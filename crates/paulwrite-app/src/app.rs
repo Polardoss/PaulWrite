@@ -493,8 +493,11 @@ impl App {
             ms(self.t_first_present.unwrap_or_default())
         ));
         if let Some(t) = self.t_file_shown {
-            report.push_str(&format!("  fichier affiché : {:.0} ms depuis la création du processus
-", ms(t)));
+            report.push_str(&format!(
+                "  fichier affiché : {:.0} ms depuis la création du processus
+",
+                ms(t)
+            ));
         }
         if let Some(s) = self.latency.summary() {
             report.push_str(&format!(

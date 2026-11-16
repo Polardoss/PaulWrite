@@ -5,7 +5,12 @@
 use paulwrite_render::{Colors, Row, RowSource, SoftRenderer};
 
 struct Demo {
-    lines: Vec<(&'static str, Vec<(usize, usize)>, Vec<usize>, Option<(usize, usize)>)>,
+    lines: Vec<(
+        &'static str,
+        Vec<(usize, usize)>,
+        Vec<usize>,
+        Option<(usize, usize)>,
+    )>,
 }
 
 impl RowSource for Demo {
@@ -28,7 +33,11 @@ fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= u32::from(b);
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -80,16 +89,28 @@ fn write_png(path: &str, w: u32, h: u32, bgra: &[u32]) {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let out = args.next().expect("usage : snapshot <sortie.png> [échelle]");
+    let out = args
+        .next()
+        .expect("usage : snapshot <sortie.png> [échelle]");
     let scale: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let (w, h) = ((760.0 * scale) as u32, (300.0 * scale) as u32);
     let mut r = SoftRenderer::new(scale, (w, h), Colors::default()).expect("rendu");
     let demo = Demo {
         lines: vec![
             ("fn main() {", vec![], vec![], None),
-            ("    let message = \"héllo wörld 😀\";", vec![(4, 11)], vec![], None),
+            (
+                "    let message = \"héllo wörld 😀\";",
+                vec![(4, 11)],
+                vec![],
+                None,
+            ),
             ("\tune tabulation, puis du texte", vec![], vec![], None),
-            ("    selection sur plusieurs lignes", vec![(8, 31)], vec![], None),
+            (
+                "    selection sur plusieurs lignes",
+                vec![(8, 31)],
+                vec![],
+                None,
+            ),
             ("saut de ligne sélectionné", vec![(0, 26)], vec![], None),
             ("deux curseurs ici", vec![], vec![3, 11], None),
             ("composition IME : かな", vec![], vec![21], Some((17, 19))),
