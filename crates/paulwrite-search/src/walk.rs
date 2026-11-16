@@ -84,8 +84,7 @@ pub fn list_files(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testutil {
     use std::fs;
 
     pub fn make_project() -> tempfile::TempDir {
@@ -103,6 +102,12 @@ mod tests {
         fs::write(r.join(".hidden_dir/secret.txt"), "caché\n").unwrap();
         dir
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::make_project;
+    use super::*;
 
     fn collect(root: &Path, opts: &IndexOptions) -> Vec<String> {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -153,6 +158,3 @@ mod tests {
         assert_eq!(rx.iter().count(), 0);
     }
 }
-
-#[cfg(test)]
-pub(crate) use tests::make_project;

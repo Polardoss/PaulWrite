@@ -256,7 +256,7 @@ pub fn search_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::walk::make_project;
+    use crate::walk::testutil::make_project;
     use std::fs;
 
     fn run(
