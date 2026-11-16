@@ -1,0 +1,36 @@
+# Build
+/target/
+
+# Secrets et configuration locale : ne jamais commiter
+.env
+.env.*
+*.local.toml
+*.local.json
+*.pem
+*.key
+*.pfx
+
+# Éditeurs / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Claude Code : réglages locaux
+.claude/settings.local.json
+
+# Logs, traces et symboles de profiling
+*.log
+*.etl
+*.pdb
+*.trace
+flamegraph*.svg
+perf.data*
+
+# Benchmarks : données générées (jusqu'à 500 Mo) et sorties lourdes
+/bench-data/
+/crates/*/bench-data/
+/target/criterion/
