@@ -16,10 +16,16 @@ pub mod fragment;
 pub mod buffer;
 pub mod selection;
 pub mod motion;
+pub mod edit;
+pub mod history;
+pub mod document;
 
 pub use buffer::Buffer;
+pub use document::Document;
+pub use edit::EditKind;
 pub use encoding::{Encoding, EncodingKind};
 pub use error::{Error, Result};
+pub use history::History;
 pub use line_ending::LineEnding;
 pub use motion::Motion;
 pub use selection::{Selection, SelectionSet};
