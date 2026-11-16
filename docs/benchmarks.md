@@ -188,3 +188,7 @@ donné 89 ms de médiane (maximum 123 ms) : machine occupée, non reproduite sur
   enregistrement avant fermeture) est dans la boucle de l'application et n'est pas couverte par des
   tests automatiques (elle exige une fenêtre) ; le rendu de la barre, lui, est testé (régions
   identiques au redessin complet, zones de clic).
+- **Non-régression du core** (le buffer tient maintenant un journal des modifications, désactivé par
+  défaut) : insertion au milieu de 500 Mo 187 ns (185 ns à l'étape 1), insertion + suppression 408 ns
+  (400 ns), frappe + undo 805 ns (786 ns), 1000 curseurs 225 µs (222 µs), 1000 curseurs avec undo
+  402 µs (373 µs, +8 %, à comparer au seuil de 2 ms). Aucune régression bloquante.
