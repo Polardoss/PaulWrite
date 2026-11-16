@@ -1,0 +1,83 @@
+# Prototype comparatif DirectWrite (Direct2D) vs wgpu + atlas de glyphes (étape 2).
+# Volontairement HORS du workspace principal : wgpu alourdirait la CI et le build normal.
+# Usage : voir docs/rendering.md.
+[package]
+name = "render-compare"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Prototype comparatif de rendu de texte (jetable, documenté dans docs/rendering.md)"
+
+[workspace]
+
+[features]
+default = ["d2d", "wgpu-backend"]
+d2d = ["dep:windows", "dep:windows-numerics"]
+wgpu-backend = ["dep:wgpu", "dep:fontdue", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+winit = "0.30"
+
+[dependencies.windows-numerics]
+version = "0.3"
+optional = true
+
+[dependencies.windows]
+version = "0.62"
+optional = true
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[dependencies.wgpu]
+version = "30"
+optional = true
+
+[dependencies.fontdue]
+version = "0.9"
+optional = true
+
+[dependencies.pollster]
+version = "1"
+optional = true
+
+[dependencies.bytemuck]
+version = "1"
+optional = true
+features = ["derive"]
+
+[[bin]]
+name = "d2d"
+path = "src/bin/d2d.rs"
+required-features = ["d2d"]
+
+[[bin]]
+name = "raw-win"
+path = "src/bin/raw_win.rs"
+required-features = ["d2d"]
+
+[[bin]]
+name = "d2d-sw"
+path = "src/bin/d2d_sw.rs"
+required-features = ["d2d"]
+
+[[bin]]
+name = "wgpu"
+path = "src/bin/wgpu.rs"
+required-features = ["wgpu-backend"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

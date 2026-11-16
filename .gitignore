@@ -34,3 +34,6 @@ perf.data*
 /bench-data/
 /crates/*/bench-data/
 /target/criterion/
+
+# Prototypes (workspaces séparés) : artefacts de build
+/prototypes/*/target/
