@@ -17,11 +17,27 @@ use ropey::{Rope, RopeSlice};
 
 use crate::fragment::Fragment;
 
+/// Une modification du texte, exprimée en octets et en (ligne, colonne en octets) : exactement ce
+/// qu'attend un analyseur incrémental comme tree-sitter (`InputEdit`). Le core n'en dépend pas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextEdit {
+    pub start_byte: usize,
+    pub old_end_byte: usize,
+    pub new_end_byte: usize,
+    /// (ligne, colonne en octets).
+    pub start_point: (usize, usize),
+    pub old_end_point: (usize, usize),
+    pub new_end_point: (usize, usize),
+}
+
 /// Contenu texte d'un document.
 #[derive(Clone, Default)]
 pub struct Buffer {
     rope: Rope,
     revision: u64,
+    /// Journal des modifications, tenu seulement si [`Buffer::track_edits`] l'a activé (aucun coût
+    /// sinon).
+    edit_log: Option<Vec<TextEdit>>,
 }
 
 impl fmt::Debug for Buffer {
@@ -48,13 +64,18 @@ impl Buffer {
         Self {
             rope: Rope::from_str(text),
             revision: 0,
+            edit_log: None,
         }
     }
 
     /// Buffer construit à partir d'un rope existant (ex. chargement de fichier).
     #[must_use]
     pub fn from_rope(rope: Rope) -> Self {
-        Self { rope, revision: 0 }
+        Self {
+            rope,
+            revision: 0,
+            edit_log: None,
+        }
     }
 
     /// Accès en lecture seule au rope (itération par chunks, tranches, etc.).
@@ -95,8 +116,49 @@ impl Buffer {
 
     // --- Édition -----------------------------------------------------------------------------
 
+    /// Active ou désactive le journal des modifications (pour la coloration incrémentale).
+    /// Désactiver vide le journal.
+    pub fn track_edits(&mut self, on: bool) {
+        self.edit_log = on.then(Vec::new);
+    }
+
+    /// Retire et renvoie les modifications faites depuis le dernier appel, dans l'ordre où elles
+    /// doivent être appliquées à un analyseur. Vide si le suivi est désactivé.
+    pub fn take_edits(&mut self) -> Vec<TextEdit> {
+        self.edit_log
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// (octet, (ligne, colonne en octets)) d'un offset de caractères.
+    fn byte_and_point(&self, char_idx: usize) -> (usize, (usize, usize)) {
+        let byte = self.rope.char_to_byte(char_idx);
+        let line = self.rope.char_to_line(char_idx);
+        (byte, (line, byte - self.rope.line_to_byte(line)))
+    }
+
     /// Insère `text` à `char_idx`.
     pub fn insert(&mut self, char_idx: usize, text: &str) {
+        if self.edit_log.is_some() && !text.is_empty() {
+            let (start_byte, start_point) = self.byte_and_point(char_idx);
+            let rows = text.matches('\n').count();
+            let new_end_point = match text.rfind('\n') {
+                Some(i) => (start_point.0 + rows, text.len() - (i + 1)),
+                None => (start_point.0, start_point.1 + text.len()),
+            };
+            let edit = TextEdit {
+                start_byte,
+                old_end_byte: start_byte,
+                new_end_byte: start_byte + text.len(),
+                start_point,
+                old_end_point: start_point,
+                new_end_point,
+            };
+            if let Some(log) = self.edit_log.as_mut() {
+                log.push(edit);
+            }
+        }
         self.rope.insert(char_idx, text);
         self.revision += 1;
     }
@@ -104,6 +166,21 @@ impl Buffer {
     /// Supprime la plage de caractères.
     pub fn delete(&mut self, range: Range<usize>) {
         if range.start < range.end {
+            if self.edit_log.is_some() {
+                let (start_byte, start_point) = self.byte_and_point(range.start);
+                let (old_end_byte, old_end_point) = self.byte_and_point(range.end);
+                let edit = TextEdit {
+                    start_byte,
+                    old_end_byte,
+                    new_end_byte: start_byte,
+                    start_point,
+                    old_end_point,
+                    new_end_point: start_point,
+                };
+                if let Some(log) = self.edit_log.as_mut() {
+                    log.push(edit);
+                }
+            }
             self.rope.remove(range);
             self.revision += 1;
         }
@@ -123,12 +200,12 @@ impl Buffer {
         self.delete(start..end);
         let mut at = start;
         frag.for_each_chunk(|chunk| {
-            self.rope.insert(at, chunk);
-            at += chunk.chars().count();
+            // `insert` tient le journal des modifications et la révision.
+            if !chunk.is_empty() {
+                self.insert(at, chunk);
+                at += chunk.chars().count();
+            }
         });
-        if !frag.is_empty() {
-            self.revision += 1;
-        }
     }
 
     // --- Lecture -----------------------------------------------------------------------------
@@ -293,5 +370,97 @@ mod tests {
         assert_eq!(b.line_col_to_char(99, 0), 3, "ligne bornée");
         assert_eq!(b.char_to_utf16(2), 3, "l'emoji vaut 2 unités UTF-16");
         assert_eq!(b.utf16_to_char(3), 2);
+    }
+
+    #[test]
+    fn journal_des_modifications_octets_et_points() {
+        let mut b = Buffer::from_text(
+            "héllo
+wörld
+",
+        );
+        // désactivé par défaut : rien n'est journalisé
+        b.insert(0, "x");
+        assert!(b.take_edits().is_empty());
+
+        b.track_edits(true);
+        // insertion sans saut de ligne, après « xhé » (1 + 1 + 2 octets) sur la ligne 0
+        b.insert(3, "ab");
+        let e = b.take_edits();
+        assert_eq!(
+            e,
+            vec![TextEdit {
+                start_byte: 4,
+                old_end_byte: 4,
+                new_end_byte: 6,
+                start_point: (0, 4),
+                old_end_point: (0, 4),
+                new_end_point: (0, 6),
+            }]
+        );
+        // insertion avec deux sauts de ligne : la colonne finale compte depuis le dernier
+        b.insert(
+            0, "a
+bb
+cc",
+        );
+        let e = b.take_edits();
+        assert_eq!(e[0].new_end_point, (2, 2));
+        assert_eq!(e[0].new_end_byte, 7);
+        // suppression à cheval sur deux lignes
+        let text = b.to_string();
+        let start = text.chars().position(|c| c == 'w').unwrap() - 2;
+        let end = start + 5;
+        b.delete(start..end);
+        let e = b.take_edits();
+        assert_eq!(e.len(), 1);
+        assert!(e[0].old_end_point.0 > e[0].start_point.0 || e[0].old_end_byte > e[0].start_byte);
+        assert_eq!(e[0].new_end_byte, e[0].start_byte);
+        assert_eq!(e[0].new_end_point, e[0].start_point);
+        // désactiver vide le journal
+        b.insert(0, "z");
+        b.track_edits(false);
+        assert!(b.take_edits().is_empty());
+    }
+
+    #[test]
+    fn la_somme_des_deltas_du_journal_egale_la_variation_de_taille() {
+        let mut b = Buffer::from_text(
+            "une ligne
+avec é et 😀
+",
+        );
+        b.track_edits(true);
+        let before = b.len_bytes() as isize;
+        let mut rng = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for _ in 0..300 {
+            let n = b.len_chars();
+            if next() % 2 == 0 || n == 0 {
+                let at = (next() % (n as u64 + 1)) as usize;
+                let text = [
+                    "a", "é", "😀", "
+", "xy
+z", "
+",
+                ][(next() % 6) as usize];
+                b.insert(at, text);
+            } else {
+                let s = (next() % n as u64) as usize;
+                let e = (s + (next() % 5) as usize).min(n);
+                b.delete(s..e);
+            }
+        }
+        let delta: isize = b
+            .take_edits()
+            .iter()
+            .map(|e| e.new_end_byte as isize - e.old_end_byte as isize)
+            .sum();
+        assert_eq!(b.len_bytes() as isize - before, delta);
     }
 }

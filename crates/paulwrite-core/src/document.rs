@@ -71,6 +71,17 @@ impl Document {
     }
 
     /// L'historique (lecture seule).
+    /// Active le journal des modifications du buffer (coloration incrémentale).
+    pub fn track_edits(&mut self, on: bool) {
+        self.buffer.track_edits(on);
+    }
+
+    /// Modifications (octets, points) faites depuis le dernier appel : frappe, collage,
+    /// undo/redo, multi-curseurs. Vide si le suivi est désactivé.
+    pub fn take_edits(&mut self) -> Vec<crate::buffer::TextEdit> {
+        self.buffer.take_edits()
+    }
+
     #[must_use]
     pub fn history(&self) -> &History {
         &self.history
