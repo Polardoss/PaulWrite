@@ -4,8 +4,9 @@
 La vitesse est le critère n°1, avant les fonctionnalités. Pas d'Electron, pas de webview, pas de
 framework UI lourd.
 
-> État : en construction. Étapes 0 (fondations) et 1 (`paulwrite-core`) en cours ; il n'y a pas
-> encore d'interface graphique.
+> État : en construction. Étapes 0 (fondations), 1 (`paulwrite-core`) et 2 (fenêtre et rendu) en
+> place : l'éditeur ouvre, édite et enregistre un fichier texte (un seul document, sans coloration
+> syntaxique ni onglets pour l'instant).
 
 ## Objectifs de performance
 
@@ -41,8 +42,8 @@ Workspace Cargo (`crates/`) :
 | `paulwrite-core` | Buffer ([ropey]), sélections et curseurs multiples, undo/redo transactionnel, encodages, I/O. Aucune dépendance UI. |
 | `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié. *(étape 3)* |
 | `paulwrite-search` | Recherche fichier/projet, fuzzy finder. *(étapes 3-4)* |
-| `paulwrite-render` | Fenêtre winit et rendu du texte (DirectWrite ou wgpu, choix mesuré). *(étape 2)* |
-| `paulwrite-app` | Commandes, raccourcis, onglets, config, thèmes. Produit le binaire `paulwrite`. |
+| `paulwrite-render` | Rendu du texte : Direct2D logiciel + DirectWrite par régions sales, presse-papiers, boîtes de dialogue. Choix mesuré : [`docs/rendering.md`](docs/rendering.md). |
+| `paulwrite-app` | Fenêtre winit, commandes nommées, raccourcis, éditeur, worker de fichiers. Produit le binaire `paulwrite`. |
 
 Plus tard : `paulwrite-lsp`, `paulwrite-plugins`.
 
@@ -63,6 +64,26 @@ Le binaire se trouve dans `target/release/paulwrite.exe`. Pour profiler (symbole
 cargo build --profile profiling
 ```
 
+## Utiliser
+
+```bash
+paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
+```
+
+| Raccourci | Commande |
+|---|---|
+| Flèches, Ctrl+flèches (mots), Home/End, Ctrl+Home/End, PgUp/PgDn | déplacements ; avec Maj : sélection |
+| Ctrl+Z, Ctrl+Y (ou Ctrl+Maj+Z) | annuler, rétablir |
+| Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V | tout sélectionner, copier, couper, coller |
+| Ctrl+S, Ctrl+Maj+S, Ctrl+O | enregistrer, enregistrer sous, ouvrir |
+| Ctrl+Alt+↑ / Ctrl+Alt+↓ | ajouter un curseur au-dessus / en dessous |
+| Échap | revenir à un seul curseur |
+| Ctrl+↑ / Ctrl+↓, molette | faire défiler sans bouger le curseur |
+| Clic, glisser, Maj+clic | placer le curseur, sélectionner |
+
+Chaque ligne correspond à une commande nommée (`cursor.left`, `edit.undo`, `file.save`, …) définie
+dans `crates/paulwrite-app/src/command.rs`.
+
 ## Tests et qualité
 
 ```bash
@@ -77,7 +98,9 @@ Les benchmarks utilisent [criterion]. Les fichiers de test volumineux (jusqu'à 
 de façon déterministe dans `bench-data/` à la première exécution (ignoré par git, prévoir ~1 Go libre).
 
 ```bash
-cargo bench -p paulwrite-core
+cargo bench -p paulwrite-core                 # étape 1 : buffer, historique, curseurs
+cargo build --release -p paulwrite-app
+.\scriptsench-app.ps1                       # étape 2 : démarrage, latence de frappe, défilement
 ```
 
 [criterion]: https://crates.io/crates/criterion

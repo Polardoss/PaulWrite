@@ -61,6 +61,7 @@ cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo bench -p paulwrite-core                # données générées dans bench-data/ (gitignoré)
+.\scriptsench-app.ps1                      # démarrage, latence de frappe, défilement (binaire release)
 ```
 
 Environnement : Windows, toolchain `stable-x86_64-pc-windows-msvc` + VS 2022 Build Tools (C++).

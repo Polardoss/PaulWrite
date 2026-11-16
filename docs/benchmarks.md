@@ -52,3 +52,45 @@ Le brief ne fixe pas de seuil au core ; les seuils ci-dessous ont été posés *
   gelée. Une construction parallèle du rope (plusieurs threads, puis concaténation) est possible si
   on veut descendre sous la seconde sur des machines plus lentes ; non fait faute de besoin mesuré.
 - Les mesures de latence de frappe de bout en bout (touche → affichage) relèvent de l'étape 2.
+
+## Étape 2 — fenêtre et rendu (`paulwrite-render`, `paulwrite-app`)
+
+Application réelle, binaire `release`. Commandes : `cargo build --release -p paulwrite-app` puis
+`.\scripts\bench-app.ps1` (démarrage, frappe, défilement) et
+`paulwrite --bench-open --bench-out rapport.txt <fichier>` (fichier affiché). Le choix de rendu et le
+prototype comparatif sont détaillés dans [`rendering.md`](rendering.md).
+
+| Scénario | Objectif | Mesuré | Verdict |
+|---|---|---|---|
+| Démarrage à froid : création du processus → fenêtre visible avec la première image | < 100 ms | **76 ms** (médiane de 7, 74-80) ; 1re image présentée 78 ms | OK (gate) |
+| Latence de frappe : événement → image copiée vers la fenêtre, 300 frappes | < 10 ms, p99 < 16 ms | moy 2,1 ms, p99 **3,6 ms**, max 15,2 ms | OK (gate) |
+| Défilement : dessin + copie par image (3 lignes), 600 images | fluide | moy 0,92 ms, p99 3,0 ms | OK |
+| Petit fichier source affiché (cache chaud) | — | 96 ms depuis la création du processus, 32 Mo de pic | — |
+| Fichier de 500 Mo : fenêtre visible, puis fichier affiché (cache chaud) | UI jamais gelée | fenêtre 84 ms ; fichier affiché à **1,19 s** ; pic 613 Mo | OK (voir limites) |
+| Mémoire au repos (document vide) | quelques dizaines de Mo | 32 Mo de pic (petit fichier) | OK |
+
+### Remarques et limites (étape 2)
+
+- **Ce que mesure la latence de frappe** : l'intervalle entre l'arrivée de l'événement dans notre
+  boucle (frappes simulées, une toutes les 20 ms) et la fin de la copie de l'image vers la fenêtre.
+  Elle **n'inclut pas** le trajet matériel du clavier jusqu'à Windows ni la composition par DWM
+  (jusqu'à une période de rafraîchissement, ~16 ms à 60 Hz, avant l'affichage physique). Ce n'est donc
+  pas une mesure photon-à-photon.
+- **Frappe et défilement mesurés hors écran** (la fenêtre est placée hors de la zone visible pour ne
+  pas gêner l'utilisateur) : GDI y copie très peu de pixels, donc la copie est un peu sous-estimée.
+  Les mêmes mesures en fenêtre visible, sur le prototype, donnaient 1,6 ms de frappe (p99 4,4 ms) et
+  1,2 ms par image de défilement : même ordre de grandeur.
+- **Démarrage** : « fenêtre visible » est mesuré au retour de `set_visible`, « 1re image » à la fin de la
+  première copie vers la fenêtre ; l'affichage physique suit la composition DWM. Le premier lancement
+  d'un exécutable neuf coûte jusqu'à +330 ms (analyse antivirus) : une exécution de chauffe précède
+  les mesures. Machine partagée avec d'autres processus.
+- **Fichier de 500 Mo** : le chargement se fait sur un worker pendant que la fenêtre est déjà
+  affichée (84 ms). On n'a **pas** injecté d'entrées pendant le chargement pour mesurer la réactivité ;
+  c'est une conséquence de l'architecture, non une mesure. Le pic mémoire de 613 Mo est celui du rope
+  (≈ taille du fichier) : l'objectif « quelques dizaines de Mo » vise l'éditeur sans gros fichier.
+- **Défilement** : par lignes entières (le rendu par régions copie des pixels alignés sur les
+  rangées) ; pas de défilement au pixel près. En 4K, le prototype en logiciel est à ~10 ms par image
+  (copie de 33 Mo) : à surveiller si le plein écran haute résolution devient un cas d'usage.
+- **Non vérifié** : saisie IME réelle (logique testée, pas essayée avec un vrai IME), multi-écrans avec
+  DPI différents (changement d'échelle codé et testé hors fenêtre), clavier réel (raccourcis testés,
+  événements Windows réels non injectés).

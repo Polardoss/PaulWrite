@@ -49,6 +49,8 @@ pub enum BenchKind {
     Typing(usize),
     /// `n` images de défilement enchaînées (3 lignes par image).
     Scroll(usize),
+    /// Ouvre le fichier donné et quitte dès qu'il est affiché.
+    Open,
 }
 
 /// Options de la ligne de commande.
@@ -77,6 +79,7 @@ impl Options {
             };
             match a.as_str() {
                 "--bench-startup" => o.bench = Some(BenchKind::Startup),
+                "--bench-open" => o.bench = Some(BenchKind::Open),
                 "--bench-typing" => o.bench = Some(BenchKind::Typing(count("--bench-typing")?)),
                 "--bench-scroll" => o.bench = Some(BenchKind::Scroll(count("--bench-scroll")?)),
                 "--bench-out" => {
@@ -157,6 +160,9 @@ struct App {
     scroll_frames: Samples,
     t_visible: Duration,
     t_first_present: Option<Duration>,
+    /// Le fichier demandé est chargé et la première image qui l'affiche est présentée.
+    file_loaded: bool,
+    t_file_shown: Option<Duration>,
     bench_started: bool,
 }
 
@@ -186,6 +192,8 @@ impl App {
             scroll_frames: Samples::default(),
             t_visible: Duration::ZERO,
             t_first_present: None,
+            file_loaded: false,
+            t_file_shown: None,
             bench_started: false,
         }
     }
@@ -424,6 +432,12 @@ impl App {
         };
         match kind {
             BenchKind::Startup => self.finish_bench(el),
+            BenchKind::Open => {
+                if self.file_loaded {
+                    self.t_file_shown = Some(since_process_start());
+                    self.finish_bench(el);
+                }
+            }
             BenchKind::Typing(n) => {
                 if !self.bench_started {
                     self.bench_started = true;
@@ -478,6 +492,10 @@ impl App {
             ms(self.t_visible),
             ms(self.t_first_present.unwrap_or_default())
         ));
+        if let Some(t) = self.t_file_shown {
+            report.push_str(&format!("  fichier affiché : {:.0} ms depuis la création du processus
+", ms(t)));
+        }
         if let Some(s) = self.latency.summary() {
             report.push_str(&format!(
                 "  frappe, événement -> image copiée vers la fenêtre : {s}\n"
@@ -508,6 +526,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let bench_offscreen = matches!(
             self.opts.bench,
+            Some(BenchKind::Typing(_) | BenchKind::Scroll(_) | BenchKind::Open)
+        );
+        let bench_synthetic = matches!(
+            self.opts.bench,
             Some(BenchKind::Typing(_) | BenchKind::Scroll(_))
         );
         let mut attrs = Window::default_attributes()
@@ -537,7 +559,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.renderer = Some(renderer);
         self.window = Some(window.clone());
 
-        if bench_offscreen {
+        if bench_synthetic {
             self.editor.load(
                 paulwrite_core::Document::from_text(&synthetic_text(5000)),
                 None,
@@ -579,6 +601,7 @@ impl ApplicationHandler<UserEvent> for App {
                     match result {
                         Ok(doc) => {
                             self.editor.load(doc, Some(path));
+                            self.file_loaded = true;
                             if let Some(r) = self.renderer.as_mut() {
                                 r.invalidate();
                             }

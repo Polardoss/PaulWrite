@@ -1,7 +1,8 @@
 # Rendu : choix et mesures (étape 2)
 
-Statut : **choix provisoire**, à confirmer par le gate de l'étape 2 (latence < 10 ms et démarrage < 100 ms
-mesurés sur l'application réelle, pas seulement sur le prototype).
+Statut : **choix confirmé** par le gate de l'étape 2 sur l'application réelle (pas seulement sur le
+prototype) : démarrage 76 ms (objectif < 100 ms), latence de frappe p99 3,6 ms (objectif < 10 ms).
+Détails dans [`benchmarks.md`](benchmarks.md). Implémentation : `crates/paulwrite-render`.
 
 ## Décision
 
@@ -9,7 +10,7 @@ mesurés sur l'application réelle, pas seulement sur le prototype).
 
 - Première image dessinée en logiciel (aucun pilote GPU sur le chemin critique du démarrage).
 - Ne redessiner que les rangées modifiées ; défilement par copie des pixels déjà dessinés.
-- Piste ouverte, non réalisée : initialiser un périphérique D3D11 sur un thread en parallèle et basculer
+- Piste ouverte, non nécessaire à ce stade : initialiser un périphérique D3D11 sur un thread en parallèle et basculer
   sur une swap chain GPU si le défilement plein écran en haute résolution l'exige (voir limites).
 
 ## Le prototype
