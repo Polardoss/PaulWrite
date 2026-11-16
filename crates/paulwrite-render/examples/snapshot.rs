@@ -4,13 +4,16 @@
 
 use paulwrite_render::{Colors, Row, RowSource, SoftRenderer};
 
+/// Texte, sélections, curseurs, soulignement.
+type DemoRow = (
+    &'static str,
+    Vec<(usize, usize)>,
+    Vec<usize>,
+    Option<(usize, usize)>,
+);
+
 struct Demo {
-    lines: Vec<(
-        &'static str,
-        Vec<(usize, usize)>,
-        Vec<usize>,
-        Option<(usize, usize)>,
-    )>,
+    lines: Vec<DemoRow>,
 }
 
 impl RowSource for Demo {
