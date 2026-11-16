@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_REGULAR, DWRITE_HIT_TEST_METRICS, DWRITE_TEXT_METRICS,
+    DWRITE_FONT_WEIGHT_REGULAR, DWRITE_HIT_TEST_METRICS, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
     DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -36,6 +36,12 @@ const MAX_CACHED_LAYOUTS: usize = 1024;
 /// Largeur du texte de police : taille en pixels logiques.
 const FONT_PX: f32 = 15.0;
 
+/// Indices des pinceaux de la barre d'onglets (après texte, fond, sélection, curseur et les
+/// catégories de coloration).
+const BR_TABBAR: usize = 3 + KIND_SLOTS;
+const BR_TAB_DIM: usize = BR_TABBAR + 1;
+const BR_TAB_ACCENT: usize = BR_TABBAR + 2;
+
 /// Couleurs (RGB, 0..1).
 #[derive(Clone, Copy, Debug)]
 pub struct Colors {
@@ -43,7 +49,13 @@ pub struct Colors {
     pub text: [f32; 3],
     pub selection: [f32; 3],
     pub caret: [f32; 3],
+    /// Couleurs de coloration syntaxique, indexées par catégorie (`Row::spans`). L'indice 0 est
+    /// ignoré : le texte ordinaire utilise `text`.
+    pub kinds: [[f32; 3]; KIND_SLOTS],
 }
+
+/// Nombre de catégories de coloration gérées (indice 0 compris).
+pub const KIND_SLOTS: usize = 16;
 
 impl Default for Colors {
     fn default() -> Self {
@@ -52,9 +64,32 @@ impl Default for Colors {
             text: [0.85, 0.86, 0.88],
             selection: [0.22, 0.34, 0.55],
             caret: [0.95, 0.95, 0.95],
+            kinds: DEFAULT_KINDS,
         }
     }
 }
+
+/// Palette par défaut (thème sombre). Ordre = catégories du crate `paulwrite-syntax` :
+/// 1 commentaire, 2 chaîne, 3 nombre, 4 mot-clé, 5 fonction, 6 type, 7 constante, 8 propriété,
+/// 9 opérateur, 10 ponctuation, 11 attribut/macro, 12 balise, 13 échappement, 14 prédéfini.
+const DEFAULT_KINDS: [[f32; 3]; KIND_SLOTS] = [
+    [0.85, 0.86, 0.88],
+    [0.42, 0.52, 0.40],
+    [0.81, 0.60, 0.47],
+    [0.71, 0.81, 0.66],
+    [0.34, 0.61, 0.84],
+    [0.86, 0.86, 0.67],
+    [0.31, 0.79, 0.69],
+    [0.31, 0.76, 1.00],
+    [0.61, 0.86, 1.00],
+    [0.85, 0.86, 0.88],
+    [0.62, 0.64, 0.68],
+    [0.77, 0.52, 0.75],
+    [0.34, 0.61, 0.84],
+    [0.84, 0.74, 0.40],
+    [0.34, 0.61, 0.84],
+    [0.85, 0.86, 0.88],
+];
 
 /// Dimensions d'un caractère à l'échelle courante, en pixels physiques.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,14 +100,34 @@ pub struct Metrics {
     pub line_height: i32,
     /// Décalage horizontal du texte (marge gauche).
     pub pad_x: f32,
+    /// Hauteur de la barre d'onglets lorsqu'elle est affichée.
+    pub tab_bar: i32,
+    /// Ordonnée de la première rangée : 0 sans onglets, `tab_bar` avec.
+    pub top: i32,
 }
 
 impl Metrics {
-    /// Nombre de rangées **entières** qui tiennent dans `height` pixels.
+    /// Nombre de rangées **entières** qui tiennent dans `height` pixels (sous la barre d'onglets).
     #[must_use]
     pub fn rows_for(&self, height: u32) -> usize {
-        (height as i32 / self.line_height.max(1)) as usize
+        ((height as i32 - self.top).max(0) / self.line_height.max(1)) as usize
     }
+}
+
+/// Un onglet à afficher dans la barre.
+#[derive(Clone, Copy, Debug)]
+pub struct TabInfo<'a> {
+    pub label: &'a str,
+    /// Contenu modifié : une pastille remplace la croix de fermeture.
+    pub modified: bool,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TabEntry {
+    label: String,
+    modified: bool,
+    active: bool,
 }
 
 /// Une rangée à dessiner. Les positions sont des indices UTF-16 dans `text`.
@@ -87,6 +142,8 @@ pub struct Row<'a> {
     pub carets: &'a [usize],
     /// Plage soulignée (texte de composition IME).
     pub underline: Option<(usize, usize)>,
+    /// Plages colorées `(début, fin, catégorie)` en UTF-16, triées et sans chevauchement.
+    pub spans: &'a [(usize, usize, u8)],
 }
 
 /// Source des rangées visibles (évite d'allouer un tableau par image).
@@ -134,6 +191,12 @@ fn deco_hash(row: &Row<'_>) -> u64 {
         mix(a);
         mix(b);
     }
+    mix(usize::MAX - 2);
+    for &(a, b, k) in row.spans {
+        mix(a);
+        mix(b);
+        mix(usize::from(k));
+    }
     h
 }
 
@@ -162,6 +225,8 @@ fn displayed(text: &str) -> &str {
 struct CachedLayout {
     layout: IDWriteTextLayout,
     units: usize,
+    /// La mise en page porte des couleurs par plage (à réinitialiser avant de la réutiliser sans).
+    colored: bool,
 }
 
 /// Moteur de rendu logiciel. Vit sur le thread UI (fabrique Direct2D mono-thread).
@@ -188,6 +253,9 @@ pub struct SoftRenderer {
     dirty: Vec<bool>,
     bands: Vec<Band>,
     valid: bool,
+    // Barre d'onglets
+    tabs: Vec<TabEntry>,
+    tabs_clean: bool,
 }
 
 impl std::fmt::Debug for SoftRenderer {
@@ -235,12 +303,29 @@ impl SoftRenderer {
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let (format, metrics) = make_format(&dwrite, scale)?;
 
-            let mut brushes = Vec::with_capacity(4);
+            // 0 texte, 1 fond, 2 sélection, 3 curseur, puis 3 + catégorie (1..KIND_SLOTS).
+            let mut brushes = Vec::with_capacity(6 + KIND_SLOTS);
             for c in [
                 colors.text,
                 colors.background,
                 colors.selection,
                 colors.caret,
+            ]
+            .into_iter()
+            .chain(colors.kinds.iter().skip(1).copied())
+            {
+                brushes.push(
+                    rt.CreateSolidColorBrush(&rgb(c), None)?
+                        .cast::<ID2D1Brush>()?,
+                );
+            }
+
+            // Barre d'onglets : fond, texte discret, accent.
+            let dim = |c: [f32; 3], k: f32| [c[0] * k, c[1] * k, c[2] * k];
+            for c in [
+                dim(colors.background, 0.72),
+                dim(colors.text, 0.58),
+                colors.kinds[4],
             ] {
                 brushes.push(
                     rt.CreateSolidColorBrush(&rgb(c), None)?
@@ -269,6 +354,8 @@ impl SoftRenderer {
                 dirty: Vec::new(),
                 bands: Vec::new(),
                 valid: false,
+                tabs: Vec::new(),
+                tabs_clean: false,
             })
         }
     }
@@ -375,6 +462,7 @@ impl SoftRenderer {
             CachedLayout {
                 layout: layout.clone(),
                 units,
+                colored: false,
             },
         );
         Ok(Some((layout, units)))
@@ -393,6 +481,7 @@ impl SoftRenderer {
     pub fn draw(&mut self, src: &dyn RowSource, scrolled_by: isize) -> Result<&[Band]> {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         let lh = self.metrics.line_height.max(1);
+        let top = self.metrics.top;
         let rows = src.len().min(self.metrics.rows_for(self.size.1));
 
         self.cur.clear();
@@ -406,7 +495,7 @@ impl SoftRenderer {
         self.bands.clear();
 
         if self.valid {
-            self.shift_for_scroll(scrolled_by, rows, w, lh)?;
+            self.shift_for_scroll(scrolled_by, rows, w, lh, top)?;
         } else {
             self.prev.clear();
         }
@@ -418,6 +507,12 @@ impl SoftRenderer {
         }
 
         if self.valid {
+            if !self.tabs_clean && top > 0 {
+                self.bands.push(Band {
+                    top: 0,
+                    bottom: top,
+                });
+            }
             let mut r = 0;
             while r < rows {
                 if !self.dirty[r] {
@@ -429,8 +524,8 @@ impl SoftRenderer {
                     r += 1;
                 }
                 self.bands.push(Band {
-                    top: start as i32 * lh,
-                    bottom: (r as i32 * lh).min(h),
+                    top: top + start as i32 * lh,
+                    bottom: (top + r as i32 * lh).min(h),
                 });
             }
         } else {
@@ -442,6 +537,7 @@ impl SoftRenderer {
         let result = self.paint_bands(&bands, src, rows, w, lh);
         self.bands = bands;
         result?;
+        self.tabs_clean = true;
 
         std::mem::swap(&mut self.prev, &mut self.cur);
         self.valid = true;
@@ -449,7 +545,14 @@ impl SoftRenderer {
     }
 
     /// Déplace les pixels déjà dessinés et décale les signatures (défilement).
-    fn shift_for_scroll(&mut self, scrolled_by: isize, rows: usize, w: i32, lh: i32) -> Result<()> {
+    fn shift_for_scroll(
+        &mut self,
+        scrolled_by: isize,
+        rows: usize,
+        w: i32,
+        lh: i32,
+        top: i32,
+    ) -> Result<()> {
         let d = scrolled_by.unsigned_abs();
         if d == 0 || d >= rows.min(self.prev.len()) || self.prev.is_empty() {
             return Ok(());
@@ -463,12 +566,12 @@ impl SoftRenderer {
                 BitBlt(
                     self.mem_dc,
                     0,
-                    0,
+                    top,
                     w,
                     region - dy,
                     Some(self.mem_dc),
                     0,
-                    dy,
+                    top + dy,
                     SRCCOPY,
                 )?;
                 self.prev.drain(0..d);
@@ -476,12 +579,12 @@ impl SoftRenderer {
                 BitBlt(
                     self.mem_dc,
                     0,
-                    dy,
+                    top + dy,
                     w,
                     region - dy,
                     Some(self.mem_dc),
                     0,
-                    0,
+                    top,
                     SRCCOPY,
                 )?;
                 self.prev.splice(0..0, std::iter::repeat(None).take(d));
@@ -499,8 +602,13 @@ impl SoftRenderer {
         lh: i32,
     ) -> Result<()> {
         let pad = self.metrics.pad_x;
-        for &Band { top, bottom } in bands {
-            if top >= bottom {
+        let first_row_y = self.metrics.top;
+        for &Band {
+            top: bt,
+            bottom: bb,
+        } in bands
+        {
+            if bt >= bb {
                 continue;
             }
             // On ne lie à la cible Direct2D que la bande modifiée : `BindDC` et `EndDraw`
@@ -508,11 +616,11 @@ impl SoftRenderer {
             // Les coordonnées de dessin sont relatives au haut de la bande.
             let rect = RECT {
                 left: 0,
-                top,
+                top: bt,
                 right: w,
-                bottom,
+                bottom: bb,
             };
-            let band_h = (bottom - top) as f32;
+            let band_h = (bb - bt) as f32;
             // SAFETY: appels Direct2D entre `BeginDraw` et `EndDraw` ; `rect` borne la DIB.
             unsafe {
                 self.rt.BindDC(self.mem_dc, &rect)?;
@@ -526,14 +634,220 @@ impl SoftRenderer {
                     },
                     &self.brushes[1],
                 );
-                let (r0, r1) = ((top / lh) as usize, ((bottom + lh - 1) / lh) as usize);
-                for row_idx in r0..r1.min(rows) {
-                    let row = src.row(row_idx);
-                    let y = (row_idx as i32 * lh - top) as f32;
-                    self.paint_row(&row, pad, y, lh as f32)?;
+                if bt < first_row_y {
+                    self.paint_tabs(w, -(bt as f32))?;
+                }
+                if bb > first_row_y {
+                    let r0 = ((bt - first_row_y).max(0) / lh) as usize;
+                    let r1 = ((bb - first_row_y + lh - 1) / lh) as usize;
+                    for row_idx in r0..r1.min(rows) {
+                        let row = src.row(row_idx);
+                        let y = (first_row_y + row_idx as i32 * lh - bt) as f32;
+                        self.paint_row(&row, pad, y, lh as f32)?;
+                    }
                 }
                 self.rt.EndDraw(None, None)?;
             }
+        }
+        Ok(())
+    }
+
+    // --- Barre d'onglets ---------------------------------------------------------------------
+
+    /// Définit les onglets affichés (liste vide : pas de barre). Un changement de contenu ne
+    /// redessine que la barre ; l'apparition ou la disparition de la barre décale les rangées
+    /// et force un redessin complet.
+    pub fn set_tabs(&mut self, tabs: &[TabInfo<'_>]) {
+        let entries: Vec<TabEntry> = tabs
+            .iter()
+            .map(|t| TabEntry {
+                label: t.label.to_owned(),
+                modified: t.modified,
+                active: t.active,
+            })
+            .collect();
+        if entries != self.tabs {
+            self.tabs = entries;
+            self.tabs_clean = false;
+        }
+        let top = if self.tabs.is_empty() {
+            0
+        } else {
+            self.metrics.tab_bar
+        };
+        if top != self.metrics.top {
+            self.metrics.top = top;
+            self.valid = false;
+        }
+    }
+
+    /// Géométrie des onglets : `(x0, x1, nombre de caractères du libellé affiché)`.
+    fn tab_geometry(&self) -> Vec<(i32, i32, usize)> {
+        let n = self.tabs.len().max(1) as i32;
+        let adv = self.metrics.advance;
+        let pad = (12.0 * self.scale).round();
+        let gap = (8.0 * self.scale).round();
+        let w = self.size.0 as f32;
+        let share = w / n as f32;
+        let max_chars = (((share - 2.0 * pad - gap - adv) / adv).floor() as usize).clamp(4, 28);
+        let mut x = 0.0_f32;
+        self.tabs
+            .iter()
+            .map(|t| {
+                let chars = t.label.chars().count().min(max_chars);
+                let width = 2.0 * pad + chars as f32 * adv + gap + adv;
+                let x0 = x;
+                x += width;
+                (x0 as i32, x as i32, chars)
+            })
+            .collect()
+    }
+
+    /// Onglet situé sous le point `(x, y)` (pixels de la zone cliente) et, si le point est sur la
+    /// croix/pastille de fermeture, `true`.
+    #[must_use]
+    pub fn tab_at(&self, x: f32, y: f32) -> Option<(usize, bool)> {
+        if self.tabs.is_empty() || y < 0.0 || y >= self.metrics.tab_bar as f32 {
+            return None;
+        }
+        let pad = (12.0 * self.scale).round();
+        let slot = self.metrics.advance + pad;
+        for (i, (x0, x1, _)) in self.tab_geometry().into_iter().enumerate() {
+            if x >= x0 as f32 && x < x1 as f32 {
+                return Some((i, x >= x1 as f32 - slot - 2.0));
+            }
+        }
+        None
+    }
+
+    /// Dessine la barre d'onglets ; `y0` est l'ordonnée du haut de la barre dans la bande en cours.
+    unsafe fn paint_tabs(&mut self, w: i32, y0: f32) -> Result<()> {
+        let bar_h = self.metrics.tab_bar as f32;
+        self.rt.FillRectangle(
+            &D2D_RECT_F {
+                left: 0.0,
+                top: y0,
+                right: w as f32,
+                bottom: y0 + bar_h,
+            },
+            &self.brushes[BR_TABBAR],
+        );
+        let geometry = self.tab_geometry();
+        let pad = (12.0 * self.scale).round();
+        let adv = self.metrics.advance;
+        let lh = self.metrics.line_height as f32;
+        let ty = y0 + ((bar_h - lh) / 2.0).floor();
+        let accent_h = (2.0 * self.scale).round().max(1.0);
+        for (i, (x0, x1, chars)) in geometry.into_iter().enumerate() {
+            let tab = self.tabs[i].clone();
+            let (xf0, xf1) = (x0 as f32, x1 as f32);
+            if tab.active {
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: xf0,
+                        top: y0,
+                        right: xf1,
+                        bottom: y0 + bar_h,
+                    },
+                    &self.brushes[1],
+                );
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: xf0,
+                        top: y0,
+                        right: xf1,
+                        bottom: y0 + accent_h,
+                    },
+                    &self.brushes[BR_TAB_ACCENT],
+                );
+            }
+            // Libellé tronqué avec une ellipse s'il dépasse la place disponible.
+            let total = tab.label.chars().count();
+            let shown: String = if total > chars {
+                tab.label
+                    .chars()
+                    .take(chars.saturating_sub(1))
+                    .chain(std::iter::once('\u{2026}'))
+                    .collect()
+            } else {
+                tab.label.clone()
+            };
+            let text_brush = if tab.active { 0 } else { BR_TAB_DIM };
+            let hash = hash_bytes(shown.as_bytes());
+            if let Some((layout, units)) = self.layout_for(&shown, hash)? {
+                self.apply_colors(hash, &layout, units, &[])?;
+                self.rt.DrawTextLayout(
+                    Vector2 {
+                        X: xf0 + pad,
+                        Y: ty,
+                    },
+                    &layout,
+                    &self.brushes[text_brush],
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+            // Pastille (modifié) ou croix (fermer), dans la dernière colonne de l'onglet.
+            let mark = if tab.modified { "\u{25CF}" } else { "\u{00D7}" };
+            let mhash = hash_bytes(mark.as_bytes());
+            if let Some((layout, units)) = self.layout_for(mark, mhash)? {
+                self.apply_colors(mhash, &layout, units, &[])?;
+                let brush = if tab.modified {
+                    BR_TAB_ACCENT
+                } else {
+                    BR_TAB_DIM
+                };
+                self.rt.DrawTextLayout(
+                    Vector2 {
+                        X: xf1 - pad - adv,
+                        Y: ty,
+                    },
+                    &layout,
+                    &self.brushes[brush],
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Applique (ou retire) les couleurs par plage d'une mise en page mise en cache : la même
+    /// mise en page sert à toutes les rangées de même texte, donc ses couleurs sont refixées à
+    /// chaque dessin si elle en a ou en a eu.
+    unsafe fn apply_colors(
+        &mut self,
+        hash: u64,
+        layout: &IDWriteTextLayout,
+        units: usize,
+        spans: &[(usize, usize, u8)],
+    ) -> Result<()> {
+        let was_colored = self.layouts.get(&hash).is_some_and(|c| c.colored);
+        if spans.is_empty() && !was_colored {
+            return Ok(());
+        }
+        let base: windows::core::IUnknown = self.brushes[0].cast()?;
+        layout.SetDrawingEffect(
+            &base,
+            DWRITE_TEXT_RANGE {
+                startPosition: 0,
+                length: units as u32,
+            },
+        )?;
+        for &(a, b, k) in spans {
+            let (a, b) = (a.min(units), b.min(units));
+            if a >= b || k == 0 || usize::from(k) >= KIND_SLOTS {
+                continue;
+            }
+            let brush: windows::core::IUnknown = self.brushes[3 + usize::from(k)].cast()?;
+            layout.SetDrawingEffect(
+                &brush,
+                DWRITE_TEXT_RANGE {
+                    startPosition: a as u32,
+                    length: (b - a) as u32,
+                },
+            )?;
+        }
+        if let Some(c) = self.layouts.get_mut(&hash) {
+            c.colored = !spans.is_empty();
         }
         Ok(())
     }
@@ -579,7 +893,8 @@ impl SoftRenderer {
                 );
             }
         }
-        if let Some((layout, _)) = &entry {
+        if let Some((layout, units)) = &entry {
+            self.apply_colors(hash, layout, *units, row.spans)?;
             self.rt.DrawTextLayout(
                 Vector2 { X: pad, Y: y },
                 layout,
@@ -736,6 +1051,8 @@ unsafe fn make_format(dwrite: &IDWriteFactory, scale: f32) -> Result<(IDWriteTex
             advance,
             line_height: m.height.ceil() as i32,
             pad_x: (PAD_X * scale).round(),
+            tab_bar: m.height.ceil() as i32 + (10.0 * scale).round() as i32,
+            top: 0,
         },
     ))
 }
@@ -825,6 +1142,7 @@ mod tests {
                 selections: &self.sels[i],
                 carets: &self.carets[i],
                 underline: None,
+                spans: &[],
             }
         }
     }
@@ -974,5 +1292,174 @@ mod tests {
         let mut r = renderer();
         let s = Rows::new(vec!["é".repeat(1_000_000)], Some((0, 5)), Some((0, 0, 20)));
         r.draw(&s, 0).unwrap();
+    }
+
+    /// Source à une seule rangée avec des plages colorées.
+    struct Colored<'a> {
+        text: &'a str,
+        spans: &'a [(usize, usize, u8)],
+    }
+
+    impl RowSource for Colored<'_> {
+        fn len(&self) -> usize {
+            1
+        }
+        fn row(&self, _: usize) -> Row<'_> {
+            Row {
+                text: self.text,
+                spans: self.spans,
+                ..Row::default()
+            }
+        }
+    }
+
+    #[test]
+    fn les_couleurs_s_appliquent_et_se_retirent() {
+        let text = "fn main() // x";
+        let mut r = renderer();
+        r.draw(&Colored { text, spans: &[] }, 0).unwrap();
+        let plain = r.pixels().to_vec();
+
+        // avec des plages : l'image change (le cache de mise en page est partagé par le texte)
+        let spans = [(0, 2, 4u8), (10, 14, 1u8)];
+        r.draw(
+            &Colored {
+                text,
+                spans: &spans,
+            },
+            0,
+        )
+        .unwrap();
+        let colored = r.pixels().to_vec();
+        assert_ne!(plain, colored, "les couleurs n'ont pas été dessinées");
+
+        // une couleur ne doit apparaître que sur la plage : la fin du texte reste la couleur de texte
+        let mut full = renderer();
+        full.draw(
+            &Colored {
+                text,
+                spans: &spans,
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(full.pixels(), colored.as_slice(), "rendu non déterministe");
+
+        // retour au texte sans plages : pixels identiques à l'image d'origine
+        r.draw(&Colored { text, spans: &[] }, 0).unwrap();
+        assert_eq!(
+            r.pixels(),
+            plain.as_slice(),
+            "les couleurs n'ont pas été retirées"
+        );
+    }
+
+    fn tab(label: &str, modified: bool, active: bool) -> TabInfo<'_> {
+        TabInfo {
+            label,
+            modified,
+            active,
+        }
+    }
+
+    #[test]
+    fn barre_d_onglets_regions_identiques_au_redessin_complet() {
+        let tabs = [
+            tab("main.rs", false, true),
+            tab(
+                "un_nom_de_fichier_vraiment_tres_long_pour_tronquer.txt",
+                true,
+                false,
+            ),
+        ];
+        let mut inc = renderer();
+        let mut full = renderer();
+        inc.set_tabs(&tabs);
+        full.set_tabs(&tabs);
+        let m = inc.metrics();
+        assert!(m.top > 0 && m.top == m.tab_bar);
+        let rows_n = m.rows_for(300);
+        assert!(rows_n > 5 && rows_n < renderer().metrics().rows_for(300));
+
+        let mut first = 50usize;
+        let mut state = Rows::new(lines(first, rows_n), Some((1, 2)), None);
+        inc.draw(&state, 0).unwrap();
+        for step in 0..60 {
+            let mut scrolled = 0isize;
+            match step % 4 {
+                0 => state.texts[3].push('x'),
+                1 => {
+                    first += 2;
+                    state.set_texts(lines(first, rows_n));
+                    scrolled = 2;
+                }
+                2 => {
+                    first -= 3;
+                    state.set_texts(lines(first, rows_n));
+                    scrolled = -3;
+                }
+                _ => state.set_caret(Some((step % rows_n, 1))),
+            }
+            // un changement d'onglet ne redessine que la barre
+            if step % 9 == 0 {
+                let active = (step / 9) % 2 == 0;
+                let t = [
+                    tab("main.rs", false, active),
+                    tab("autre.py", step % 2 == 0, !active),
+                ];
+                inc.set_tabs(&t);
+                full.set_tabs(&t);
+            }
+            inc.draw(&state, scrolled).unwrap();
+            full.invalidate();
+            full.draw(&state, 0).unwrap();
+            assert!(
+                inc.pixels() == full.pixels(),
+                "pixels différents à l'étape {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn changer_un_onglet_ne_redessine_que_la_barre() {
+        let mut r = renderer();
+        r.set_tabs(&[tab("a.rs", false, true), tab("b.rs", false, false)]);
+        let n = r.metrics().rows_for(300);
+        let s = Rows::new(lines(0, n), None, None);
+        r.draw(&s, 0).unwrap();
+        r.set_tabs(&[tab("a.rs", true, true), tab("b.rs", false, false)]);
+        let bar = r.metrics().tab_bar;
+        assert_eq!(
+            r.draw(&s, 0).unwrap().to_vec(),
+            vec![Band {
+                top: 0,
+                bottom: bar
+            }]
+        );
+        // rien ne change : plus rien à dessiner
+        r.set_tabs(&[tab("a.rs", true, true), tab("b.rs", false, false)]);
+        assert!(r.draw(&s, 0).unwrap().is_empty());
+        // supprimer la barre redessine tout
+        r.set_tabs(&[]);
+        assert_eq!(r.metrics().top, 0);
+        assert_eq!(r.draw(&s, 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn clic_sur_les_onglets() {
+        let mut r = renderer();
+        assert_eq!(r.tab_at(5.0, 5.0), None, "pas de barre");
+        r.set_tabs(&[tab("a.rs", false, true), tab("b.rs", true, false)]);
+        let bar = r.metrics().tab_bar as f32;
+        // sous la barre : pas un onglet
+        assert_eq!(r.tab_at(5.0, bar + 1.0), None);
+        let (i0, close0) = r.tab_at(5.0, 5.0).unwrap();
+        assert_eq!((i0, close0), (0, false));
+        // la fin du premier onglet est sa zone de fermeture ; juste après commence le second
+        let geo = r.tab_geometry();
+        let end0 = geo[0].1 as f32;
+        assert_eq!(r.tab_at(end0 - 3.0, 5.0), Some((0, true)));
+        assert_eq!(r.tab_at(end0 + 3.0, 5.0), Some((1, false)));
+        assert_eq!(r.tab_at(geo[1].1 as f32 + 50.0, 5.0), None);
     }
 }

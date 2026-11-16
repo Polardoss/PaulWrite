@@ -2,7 +2,10 @@
 //!
 //! Usage : `cargo run -p paulwrite-render --example snapshot -- sortie.png [échelle]`
 
-use paulwrite_render::{Colors, Row, RowSource, SoftRenderer};
+use paulwrite_render::{Colors, Row, RowSource, SoftRenderer, TabInfo};
+
+/// Couleurs de la deuxième rangée de la démo : « let » mot-clé, la chaîne, le point-virgule.
+const SPANS: [(usize, usize, u8); 3] = [(4, 7, 4), (18, 36, 2), (36, 37, 10)];
 
 /// Texte, sélections, curseurs, soulignement.
 type DemoRow = (
@@ -27,6 +30,7 @@ impl RowSource for Demo {
             selections: sels,
             carets,
             underline: *underline,
+            spans: if i == 1 { &SPANS } else { &[] },
         }
     }
 }
@@ -120,6 +124,27 @@ fn main() {
             ("", vec![], vec![0], None),
             ("}", vec![], vec![], None),
         ],
+    };
+    r.set_tabs(&[
+        TabInfo {
+            label: "main.rs",
+            modified: true,
+            active: true,
+        },
+        TabInfo {
+            label: "README.md",
+            modified: false,
+            active: false,
+        },
+        TabInfo {
+            label: "un_fichier_au_nom_vraiment_tres_long.txt",
+            modified: false,
+            active: false,
+        },
+    ]);
+    let rows = r.metrics().rows_for(h);
+    let demo = Demo {
+        lines: demo.lines.into_iter().take(rows).collect(),
     };
     r.draw(&demo, 0).expect("dessin");
     let (pw, ph) = r.size();
