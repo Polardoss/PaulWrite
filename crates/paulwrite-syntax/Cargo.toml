@@ -7,5 +7,23 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+paulwrite-core = { path = "../paulwrite-core" }
+ropey.workspace = true
+crossbeam-channel = "0.5"
+# Analyse syntaxique incrémentale : imposée par le brief. Le crate C est compilé une fois.
+tree-sitter = "0.27"
+# Nécessaire pour itérer les correspondances de requêtes (API de tree-sitter ≥ 0.25).
+streaming-iterator = "0.1"
+# Grammaires : chacune ajoute du code C (temps de compilation, taille du binaire). Jeu initial
+# volontairement restreint, extensible : Rust, JSON, TOML, Python, JavaScript, HTML, CSS.
+tree-sitter-rust = "0.24"
+tree-sitter-json = "0.24"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+
 [lints]
 workspace = true
