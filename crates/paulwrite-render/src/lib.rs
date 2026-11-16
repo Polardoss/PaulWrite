@@ -13,6 +13,7 @@
 
 #![allow(unsafe_code)]
 
+pub mod platform;
 mod soft;
 
 pub use soft::{Band, Colors, Metrics, Row, RowSource, SoftRenderer};

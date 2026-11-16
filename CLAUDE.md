@@ -72,6 +72,7 @@ seulement, jamais exécutés en CI car trop bruités).
 
 - Positions internes du buffer en **offsets de caractères** (natif ropey) ; helpers byte/UTF-16
   fournis pour tree-sitter et LSP.
-- `unsafe_code = "deny"` au niveau workspace ; seul `memmap2` (lecture mmap) est autorisé, isolé et
-  documenté localement.
+- `unsafe_code = "deny"` au niveau workspace. Exceptions, toutes documentées localement : `memmap2`
+  (lecture mmap, dans le core) et `paulwrite-render` (couche FFI Win32 : Direct2D, DirectWrite, GDI,
+  presse-papiers, boîtes de dialogue ; chaque bloc `unsafe` est petit et justifié).
 - Le core n'utilise pas l'horloge système : les temps sont injectés (tests déterministes).

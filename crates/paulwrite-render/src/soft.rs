@@ -80,12 +80,11 @@ impl Metrics {
 pub struct Row<'a> {
     /// Texte de la ligne, sans fin de ligne.
     pub text: &'a str,
-    /// Plage sélectionnée.
-    pub selection: Option<(usize, usize)>,
-    /// La sélection continue au-delà de la fin de ligne (saut de ligne sélectionné).
-    pub select_eol: bool,
-    /// Position du curseur (absent : pas de curseur dans cette rangée, ou clignotement éteint).
-    pub caret: Option<usize>,
+    /// Plages sélectionnées. Une fin supérieure à la longueur UTF-16 du texte signifie que le
+    /// saut de ligne est sélectionné (la surbrillance déborde d'un caractère).
+    pub selections: &'a [(usize, usize)],
+    /// Positions des curseurs (vide : aucun curseur dans cette rangée, ou clignotement éteint).
+    pub carets: &'a [usize],
     /// Plage soulignée (texte de composition IME).
     pub underline: Option<(usize, usize)>,
 }
@@ -109,11 +108,33 @@ pub struct Band {
 /// Signature d'une rangée dessinée : si elle est identique, les pixels le sont aussi.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Sig {
+    /// Empreinte du texte.
     hash: u64,
-    selection: Option<(usize, usize)>,
-    select_eol: bool,
-    caret: Option<usize>,
-    underline: Option<(usize, usize)>,
+    /// Empreinte des décorations (sélections, curseurs, soulignement).
+    deco: u64,
+}
+
+/// Empreinte des décorations d'une rangée.
+fn deco_hash(row: &Row<'_>) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let mut mix = |v: usize| {
+        h ^= v as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    for &(a, b) in row.selections {
+        mix(a);
+        mix(b);
+    }
+    mix(usize::MAX);
+    for &c in row.carets {
+        mix(c);
+    }
+    mix(usize::MAX - 1);
+    if let Some((a, b)) = row.underline {
+        mix(a);
+        mix(b);
+    }
+    h
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -379,10 +400,7 @@ impl SoftRenderer {
             let row = src.row(r);
             self.cur.push(Some(Sig {
                 hash: hash_bytes(row.text.as_bytes()),
-                selection: row.selection,
-                select_eol: row.select_eol,
-                caret: row.caret,
-                underline: row.underline,
+                deco: deco_hash(&row),
             }));
         }
         self.bands.clear();
@@ -525,6 +543,7 @@ impl SoftRenderer {
         let hash = hash_bytes(row.text.as_bytes());
         let entry = self.layout_for(row.text, hash)?;
         let adv = self.metrics.advance;
+        let units_len = entry.as_ref().map_or(0, |(_, u)| *u);
         let x_at = |pos: usize| -> f32 {
             match &entry {
                 None => pad,
@@ -542,10 +561,10 @@ impl SoftRenderer {
                 }
             }
         };
-        if let Some((a, b)) = row.selection {
+        for &(a, b) in row.selections {
             let x0 = x_at(a);
             let mut x1 = x_at(b);
-            if row.select_eol {
+            if b > units_len {
                 x1 += adv;
             }
             if x1 > x0 {
@@ -580,7 +599,7 @@ impl SoftRenderer {
                 &self.brushes[0],
             );
         }
-        if let Some(c) = row.caret {
+        for &c in row.carets {
             let x = x_at(c);
             self.rt.FillRectangle(
                 &D2D_RECT_F {
@@ -657,6 +676,40 @@ impl SoftRenderer {
     pub fn colors(&self) -> Colors {
         self.colors
     }
+
+    /// Position (UTF-16) dans `text` la plus proche de l'abscisse `x` (pixels, relative à la zone
+    /// cliente) : sert à placer le curseur à la souris.
+    ///
+    /// # Errors
+    /// Échec DirectWrite.
+    pub fn column_at(&mut self, text: &str, x: f32) -> Result<usize> {
+        let hash = hash_bytes(text.as_bytes());
+        let Some((layout, units)) = self.layout_for(text, hash)? else {
+            return Ok(0);
+        };
+        let (mut trailing, mut inside) = (
+            windows::core::BOOL::default(),
+            windows::core::BOOL::default(),
+        );
+        let mut m = DWRITE_HIT_TEST_METRICS::default();
+        // SAFETY: les pointeurs visent des variables locales valides ; la mise en page est vivante.
+        unsafe {
+            layout.HitTestPoint(
+                x - self.metrics.pad_x,
+                1.0,
+                &mut trailing,
+                &mut inside,
+                &mut m,
+            )?;
+        }
+        let pos = m.textPosition as usize
+            + if trailing.as_bool() {
+                m.length as usize
+            } else {
+                0
+            };
+        Ok(pos.min(units))
+    }
 }
 
 /// Crée la police à chasse fixe à l'échelle donnée et mesure un caractère.
@@ -724,8 +777,42 @@ mod tests {
 
     struct Rows {
         texts: Vec<String>,
-        caret: Option<(usize, usize)>,
-        selection: Option<(usize, usize, usize)>,
+        carets: Vec<Vec<usize>>,
+        sels: Vec<Vec<(usize, usize)>>,
+    }
+
+    impl Rows {
+        fn new(
+            texts: Vec<String>,
+            caret: Option<(usize, usize)>,
+            selection: Option<(usize, usize, usize)>,
+        ) -> Self {
+            let mut r = Self {
+                carets: vec![Vec::new(); texts.len()],
+                sels: vec![Vec::new(); texts.len()],
+                texts,
+            };
+            r.set_caret(caret);
+            r.set_selection(selection);
+            r
+        }
+        fn set_texts(&mut self, texts: Vec<String>) {
+            self.carets.resize(texts.len(), Vec::new());
+            self.sels.resize(texts.len(), Vec::new());
+            self.texts = texts;
+        }
+        fn set_caret(&mut self, caret: Option<(usize, usize)>) {
+            self.carets.iter_mut().for_each(Vec::clear);
+            if let Some((r, c)) = caret {
+                self.carets[r].push(c);
+            }
+        }
+        fn set_selection(&mut self, selection: Option<(usize, usize, usize)>) {
+            self.sels.iter_mut().for_each(Vec::clear);
+            if let Some((r, a, b)) = selection {
+                self.sels[r].push((a, b));
+            }
+        }
     }
 
     impl RowSource for Rows {
@@ -735,11 +822,8 @@ mod tests {
         fn row(&self, i: usize) -> Row<'_> {
             Row {
                 text: &self.texts[i],
-                selection: self
-                    .selection
-                    .and_then(|(r, a, b)| (r == i).then_some((a, b))),
-                select_eol: false,
-                caret: self.caret.and_then(|(r, c)| (r == i).then_some(c)),
+                selections: &self.sels[i],
+                carets: &self.carets[i],
                 underline: None,
             }
         }
@@ -778,11 +862,7 @@ mod tests {
         };
 
         let mut first = 100usize;
-        let mut state = Rows {
-            texts: lines(first, rows_n),
-            caret: Some((2, 3)),
-            selection: None,
-        };
+        let mut state = Rows::new(lines(first, rows_n), Some((2, 3)), None);
         inc.draw(&state, 0).unwrap();
 
         for step in 0..120 {
@@ -797,22 +877,29 @@ mod tests {
                     // défilement vers le bas
                     let d = (next() % 4 + 1) as usize;
                     first += d;
-                    state.texts = lines(first, rows_n);
+                    state.set_texts(lines(first, rows_n));
                     scrolled = d as isize;
                 }
                 2 => {
                     // défilement vers le haut
                     let d = (next() % 4 + 1) as usize;
                     first -= d;
-                    state.texts = lines(first, rows_n);
+                    state.set_texts(lines(first, rows_n));
                     scrolled = -(d as isize);
                 }
                 3 => {
-                    state.caret = Some(((next() % rows_n as u64) as usize, (next() % 10) as usize));
+                    state.set_caret(Some((
+                        (next() % rows_n as u64) as usize,
+                        (next() % 10) as usize,
+                    )));
                 }
                 _ => {
                     let r = (next() % rows_n as u64) as usize;
-                    state.selection = Some((r, (next() % 5) as usize, 5 + (next() % 10) as usize));
+                    state.set_selection(Some((
+                        r,
+                        (next() % 5) as usize,
+                        5 + (next() % 10) as usize,
+                    )));
                 }
             }
             // une valeur de défilement fausse ne doit rien changer au résultat
@@ -835,11 +922,7 @@ mod tests {
     fn une_frappe_ne_redessine_qu_une_bande() {
         let mut r = renderer();
         let n = r.metrics().rows_for(300);
-        let mut s = Rows {
-            texts: lines(0, n),
-            caret: Some((3, 0)),
-            selection: None,
-        };
+        let mut s = Rows::new(lines(0, n), Some((3, 0)), None);
         r.draw(&s, 0).unwrap();
         s.texts[3].push('a');
         let lh = r.metrics().line_height;
@@ -858,11 +941,7 @@ mod tests {
     #[test]
     fn le_texte_dessine_des_pixels_et_le_fond_est_uni() {
         let mut r = renderer();
-        let s = Rows {
-            texts: vec!["Hello".into(), String::new()],
-            caret: None,
-            selection: None,
-        };
+        let s = Rows::new(vec!["Hello".into(), String::new()], None, None);
         r.draw(&s, 0).unwrap();
         let (w, _) = r.size();
         let lh = r.metrics().line_height as usize;
@@ -886,22 +965,14 @@ mod tests {
         assert!(r.metrics().line_height > m1.line_height);
         r.resize((800, 400)).unwrap();
         assert_eq!(r.size(), (800, 400));
-        let s = Rows {
-            texts: lines(0, 3),
-            caret: Some((0, 0)),
-            selection: None,
-        };
+        let s = Rows::new(lines(0, 3), Some((0, 0)), None);
         r.draw(&s, 0).unwrap();
     }
 
     #[test]
     fn ligne_geante_tronquee_sans_planter() {
         let mut r = renderer();
-        let s = Rows {
-            texts: vec!["é".repeat(1_000_000)],
-            caret: Some((0, 5)),
-            selection: Some((0, 0, 20)),
-        };
+        let s = Rows::new(vec!["é".repeat(1_000_000)], Some((0, 5)), Some((0, 0, 20)));
         r.draw(&s, 0).unwrap();
     }
 }

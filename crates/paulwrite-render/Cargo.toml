@@ -1,6 +1,6 @@
 [package]
 name = "paulwrite-render"
-description = "Rendu du texte : Direct2D logiciel + DirectWrite, régions sales (étape 2)"
+description = "Rendu du texte (Direct2D logiciel + DirectWrite, régions sales) et services Win32"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# FFI Win32 (Direct2D, DirectWrite, GDI) : pas d'alternative sûre ; seules les fonctionnalités
-# utilisées sont activées (temps de compilation). Choix mesuré : docs/rendering.md.
+# FFI Win32 (Direct2D, DirectWrite, GDI, presse-papiers, boîtes de dialogue) : pas d'alternative
+# sûre ; seules les fonctionnalités utilisées sont activées (temps de compilation).
+# Choix mesuré : docs/rendering.md.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
@@ -17,7 +18,11 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_UI_Controls_Dialogs",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 windows-numerics = "0.3"
 
