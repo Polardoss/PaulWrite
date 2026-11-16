@@ -14,8 +14,12 @@ pub mod line_ending;
 pub mod encoding;
 pub mod fragment;
 pub mod buffer;
+pub mod selection;
+pub mod motion;
 
 pub use buffer::Buffer;
 pub use encoding::{Encoding, EncodingKind};
 pub use error::{Error, Result};
 pub use line_ending::LineEnding;
+pub use motion::Motion;
+pub use selection::{Selection, SelectionSet};
