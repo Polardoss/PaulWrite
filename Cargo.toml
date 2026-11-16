@@ -16,8 +16,8 @@ repository = "https://github.com/Polardoss/PaulWrite"
 rust-version = "1.80"
 
 [workspace.dependencies]
-paulwrite-core = { path = "crates/paulwrite-core" }
-ropey = "1.6"
+# Sauts de ligne = LF et CRLF uniquement (pas de VT/FF/NEL/LS/PS ni CR seul) : prévisible pour un éditeur de code.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
 unicode-segmentation = "1.12"
 memmap2 = "0.9"
 proptest = "1"
