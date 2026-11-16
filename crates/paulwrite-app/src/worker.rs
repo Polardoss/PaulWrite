@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Sender};
 use paulwrite_core::io::{self, LoadOptions};
 use paulwrite_core::{Buffer, Document, Encoding};
-use paulwrite_render::platform;
+use paulwrite_render::platform::{self, SaveChoice};
 use ropey::Rope;
 
 use crate::config::Config;
@@ -17,8 +17,29 @@ use crate::config::Config;
 /// Identifiant d'onglet (stable pendant la vie de l'onglet).
 pub type TabId = u64;
 
+/// Ce que l'application fera de la réponse à « Enregistrer les modifications ? ».
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmFor {
+    /// Fermeture d'un onglet.
+    CloseTab(TabId),
+    /// Fermeture de l'application, pour cet onglet modifié.
+    Quit(TabId),
+}
+
 /// Travail demandé au worker.
+///
+/// Les boîtes de dialogue modales (fichiers, confirmation, erreur) s'affichent **ici et jamais
+/// dans la boucle d'événements** : winit n'autorise pas la ré-entrance, et une boîte modale ouverte
+/// pendant le traitement d'un événement provoque un redessin imbriqué qui fait planter le programme.
 pub enum Job {
+    /// « Enregistrer les modifications de … ? » ; la réponse revient en [`Done::SaveConfirmed`].
+    ConfirmSave {
+        owner: isize,
+        name: String,
+        for_: ConfirmFor,
+    },
+    /// Affiche un message d'erreur (sans réponse).
+    ShowError { owner: isize, text: String },
     /// Lire et décoder un fichier pour l'onglet `tab`.
     Open { tab: TabId, path: PathBuf },
     /// Boîte « Ouvrir » (bloquante).
@@ -42,6 +63,8 @@ pub enum Job {
 impl std::fmt::Debug for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Job::ConfirmSave { for_, .. } => write!(f, "ConfirmSave({for_:?})"),
+            Job::ShowError { .. } => write!(f, "ShowError"),
             Job::Open { tab, path } => write!(f, "Open({tab}, {path:?})"),
             Job::PickOpen { .. } => write!(f, "PickOpen"),
             Job::PickSave { tab, .. } => write!(f, "PickSave({tab})"),
@@ -54,6 +77,11 @@ impl std::fmt::Debug for Job {
 pub enum Done {
     /// Configuration lue au démarrage du worker (toujours le premier message).
     Config(Config),
+    /// Réponse de l'utilisateur à [`Job::ConfirmSave`].
+    SaveConfirmed {
+        for_: ConfirmFor,
+        choice: SaveChoice,
+    },
     Loaded {
         tab: TabId,
         path: PathBuf,
@@ -81,6 +109,9 @@ impl std::fmt::Debug for Done {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Done::Config(c) => write!(f, "Config({c:?})"),
+            Done::SaveConfirmed { for_, choice } => {
+                write!(f, "SaveConfirmed({for_:?}, {choice:?})")
+            }
             Done::Loaded { tab, path, result } => {
                 write!(f, "Loaded({tab}, {path:?}, ok={})", result.is_ok())
             }
@@ -124,6 +155,11 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
             notify(Done::Config(Config::load()));
             for job in rx {
                 match job {
+                    Job::ConfirmSave { owner, name, for_ } => notify(Done::SaveConfirmed {
+                        for_,
+                        choice: platform::confirm_save(owner, &name),
+                    }),
+                    Job::ShowError { owner, text } => platform::show_error(owner, &text),
                     Job::Open { tab, path } => {
                         let result = load(tab, &path, &notify);
                         notify(Done::Loaded { tab, path, result });

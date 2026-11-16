@@ -28,7 +28,7 @@ use crate::editor::Preedit;
 use crate::keymap;
 use crate::metrics::Samples;
 use crate::tab::{Tab, SYNTAX_MARGIN_LINES};
-use crate::worker::{self, Done, Job, TabId};
+use crate::worker::{self, ConfirmFor, Done, Job, TabId};
 
 const BLINK: Duration = Duration::from_millis(530);
 
@@ -188,6 +188,8 @@ struct App {
     title: String,
     after_save: Option<AfterSave>,
     quit_queue: Vec<TabId>,
+    /// Une boîte « Enregistrer ? » est ouverte (sur le worker) : on n'en ouvre pas une deuxième.
+    confirming: bool,
     // IME
     ime_area: Option<(i32, i32)>,
     // mesures
@@ -234,6 +236,7 @@ impl App {
             title: String::new(),
             after_save: None,
             quit_queue: Vec::new(),
+            confirming: false,
             ime_area: None,
             input_at: None,
             latency: Samples::default(),
@@ -462,19 +465,37 @@ impl App {
             return;
         }
         if self.tabs[index].editor.is_modified() && !self.is_bench() {
-            self.activate(index);
-            let name = self.tabs[index].editor.display_name();
-            match platform::confirm_save(self.hwnd, &name) {
-                platform::SaveChoice::Save => {
-                    self.after_save = Some(AfterSave::CloseTab(self.tabs[index].id));
-                    self.start_save(index);
-                }
-                platform::SaveChoice::Discard => self.close_now(index),
-                platform::SaveChoice::Cancel => {}
+            if self.confirming {
+                return;
             }
+            self.activate(index);
+            self.confirm(ConfirmFor::CloseTab(self.tabs[index].id), index);
         } else {
             self.close_now(index);
         }
+    }
+
+    /// Demande « Enregistrer les modifications ? » sur le worker ; la réponse arrive en
+    /// [`Done::SaveConfirmed`].
+    fn confirm(&mut self, for_: ConfirmFor, index: usize) {
+        self.confirming = true;
+        self.jobs
+            .send(Job::ConfirmSave {
+                owner: self.hwnd,
+                name: self.tabs[index].editor.display_name(),
+                for_,
+            })
+            .ok();
+    }
+
+    /// Affiche une erreur sur le worker (jamais de boîte modale dans la boucle d'événements).
+    fn show_error(&self, text: String) {
+        self.jobs
+            .send(Job::ShowError {
+                owner: self.hwnd,
+                text,
+            })
+            .ok();
     }
 
     // --- Fichiers ----------------------------------------------------------------------------
@@ -512,6 +533,9 @@ impl App {
             el.exit();
             return;
         }
+        if self.confirming {
+            return; // une question est déjà posée
+        }
         self.quit_queue = self
             .tabs
             .iter()
@@ -531,19 +555,9 @@ impl App {
                 continue;
             }
             self.activate(index);
-            let name = self.tabs[index].editor.display_name();
-            match platform::confirm_save(self.hwnd, &name) {
-                platform::SaveChoice::Save => {
-                    self.after_save = Some(AfterSave::ContinueQuit);
-                    self.start_save(index);
-                    return;
-                }
-                platform::SaveChoice::Discard => {}
-                platform::SaveChoice::Cancel => {
-                    self.quit_queue.clear();
-                    return;
-                }
-            }
+            // La suite (enregistrer, ignorer, annuler) se poursuit à la réception de la réponse.
+            self.confirm(ConfirmFor::Quit(id), index);
+            return;
         }
         el.exit();
     }
@@ -842,14 +856,17 @@ impl ApplicationHandler<UserEvent> for App {
                     | BenchKind::Syntax(_)
             )
         );
+        // `PAULWRITE_OFFSCREEN=1` : fenêtre hors de l'écran et sans focus, pour les tests
+        // automatiques qui envoient des messages Windows à la fenêtre (aucune gêne pour l'utilisateur).
+        let offscreen = bench_offscreen || std::env::var_os("PAULWRITE_OFFSCREEN").is_some();
         let mut attrs = Window::default_attributes()
             .with_title(ed!(self).title())
             .with_inner_size(LogicalSize::new(1100.0, 720.0))
             .with_visible(false);
-        if self.is_bench() {
+        if self.is_bench() || offscreen {
             attrs = attrs.with_active(false);
         }
-        if bench_offscreen {
+        if offscreen {
             // Mesure de débit : fenêtre hors de la zone visible, pour ne pas gêner l'utilisateur.
             attrs = attrs.with_position(PhysicalPosition::new(-6000, 0));
         }
@@ -951,6 +968,34 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Done(done) => match done {
                 Done::Config(c) => self.config = c,
+                Done::SaveConfirmed { for_, choice } => {
+                    self.confirming = false;
+                    match (for_, choice) {
+                        (ConfirmFor::CloseTab(id), platform::SaveChoice::Save) => {
+                            if let Some(i) = self.tab_index(id) {
+                                self.after_save = Some(AfterSave::CloseTab(id));
+                                self.start_save(i);
+                            }
+                        }
+                        (ConfirmFor::CloseTab(id), platform::SaveChoice::Discard) => {
+                            if let Some(i) = self.tab_index(id) {
+                                self.close_now(i);
+                            }
+                        }
+                        (ConfirmFor::Quit(id), platform::SaveChoice::Save) => {
+                            if let Some(i) = self.tab_index(id) {
+                                self.after_save = Some(AfterSave::ContinueQuit);
+                                self.start_save(i);
+                            } else {
+                                self.continue_quit(el);
+                            }
+                        }
+                        (ConfirmFor::Quit(_), platform::SaveChoice::Discard) => {
+                            self.continue_quit(el);
+                        }
+                        (_, platform::SaveChoice::Cancel) => self.quit_queue.clear(),
+                    }
+                }
                 Done::Progress { tab, done, total } => {
                     if let Some(i) = self.tab_index(tab) {
                         self.tabs[i].loading = Some((done, total));
@@ -981,10 +1026,10 @@ impl ApplicationHandler<UserEvent> for App {
                             self.attach_syntax(i, None);
                         }
                         Err(e) => {
-                            platform::show_error(
-                                self.hwnd,
-                                &format!("Impossible d'ouvrir « {} » :\n{e}", path.display()),
-                            );
+                            self.show_error(format!(
+                                "Impossible d'ouvrir « {} » :\n{e}",
+                                path.display()
+                            ));
                             // L'onglet créé pour ce fichier n'a plus de raison d'être.
                             if self.tabs.len() > 1 {
                                 self.close_now(i);
@@ -1027,13 +1072,10 @@ impl ApplicationHandler<UserEvent> for App {
                         Err(e) => {
                             self.after_save = None;
                             self.quit_queue.clear();
-                            platform::show_error(
-                                self.hwnd,
-                                &format!(
-                                    "Échec de l'enregistrement de « {} » :\n{e}",
-                                    path.display()
-                                ),
-                            );
+                            self.show_error(format!(
+                                "Échec de l'enregistrement de « {} » :\n{e}",
+                                path.display()
+                            ));
                         }
                     }
                 }
