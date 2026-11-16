@@ -29,12 +29,14 @@ pub enum Request {
         revision: u64,
     },
     /// Le texte a changé : `rope` est le nouvel état (copie O(1)), `edits` les modifications
-    /// depuis la dernière requête, dans l'ordre.
+    /// depuis la dernière requête, dans l'ordre, `viewport` la fenêtre à colorer **dans le
+    /// nouveau texte** (les décalages d'octets ont pu changer).
     Edit {
         tab: u64,
         rope: Rope,
         revision: u64,
         edits: Vec<TextEdit>,
+        viewport: Range<usize>,
     },
     /// La fenêtre visible a changé : colorer cette plage d'octets.
     Viewport { tab: u64, range: Range<usize> },
@@ -124,8 +126,10 @@ pub fn spawn(notify: impl Fn(Response) + Send + 'static) -> Sender<Request> {
                             rope,
                             revision,
                             edits,
+                            viewport,
                         } => {
                             if let Some(st) = tabs.get_mut(&tab) {
+                                st.viewport = viewport;
                                 st.rope = rope;
                                 st.revision = revision;
                                 st.pending_edits.extend(edits);
@@ -209,6 +213,7 @@ mod tests {
             rope: buf.rope().clone(),
             revision: buf.revision(),
             edits: buf.take_edits(),
+            viewport: 0..buf.len_bytes(),
         })
         .unwrap();
         let r = wait(&out_rx);

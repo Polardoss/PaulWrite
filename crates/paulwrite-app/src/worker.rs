@@ -12,16 +12,26 @@ use paulwrite_core::{Buffer, Document, Encoding};
 use paulwrite_render::platform;
 use ropey::Rope;
 
+use crate::config::Config;
+
+/// Identifiant d'onglet (stable pendant la vie de l'onglet).
+pub type TabId = u64;
+
 /// Travail demandé au worker.
 pub enum Job {
-    /// Lire et décoder un fichier.
-    Open(PathBuf),
+    /// Lire et décoder un fichier pour l'onglet `tab`.
+    Open { tab: TabId, path: PathBuf },
     /// Boîte « Ouvrir » (bloquante).
     PickOpen { owner: isize },
-    /// Boîte « Enregistrer sous » (bloquante).
-    PickSave { owner: isize, suggested: String },
+    /// Boîte « Enregistrer sous » (bloquante) pour l'onglet `tab`.
+    PickSave {
+        tab: TabId,
+        owner: isize,
+        suggested: String,
+    },
     /// Écriture atomique ; `rope` est un clone O(1) du contenu au moment de la demande.
     Save {
+        tab: TabId,
         path: PathBuf,
         rope: Rope,
         encoding: Encoding,
@@ -32,57 +42,65 @@ pub enum Job {
 impl std::fmt::Debug for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Job::Open(p) => write!(f, "Open({p:?})"),
+            Job::Open { tab, path } => write!(f, "Open({tab}, {path:?})"),
             Job::PickOpen { .. } => write!(f, "PickOpen"),
-            Job::PickSave { .. } => write!(f, "PickSave"),
-            Job::Save { path, .. } => write!(f, "Save({path:?})"),
+            Job::PickSave { tab, .. } => write!(f, "PickSave({tab})"),
+            Job::Save { tab, path, .. } => write!(f, "Save({tab}, {path:?})"),
         }
     }
 }
 
 /// Résultat renvoyé au thread UI.
 pub enum Done {
+    /// Configuration lue au démarrage du worker (toujours le premier message).
+    Config(Config),
     Loaded {
+        tab: TabId,
         path: PathBuf,
         result: Result<Document, String>,
     },
     Progress {
-        path: PathBuf,
+        tab: TabId,
         done: u64,
         total: u64,
     },
     Saved {
+        tab: TabId,
         path: PathBuf,
         revision: u64,
         result: Result<(), String>,
     },
     OpenPicked(Option<PathBuf>),
-    SavePicked(Option<PathBuf>),
+    SavePicked {
+        tab: TabId,
+        path: Option<PathBuf>,
+    },
 }
 
 impl std::fmt::Debug for Done {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Done::Loaded { path, result } => write!(f, "Loaded({path:?}, ok={})", result.is_ok()),
+            Done::Config(c) => write!(f, "Config({c:?})"),
+            Done::Loaded { tab, path, result } => {
+                write!(f, "Loaded({tab}, {path:?}, ok={})", result.is_ok())
+            }
             Done::Progress { done, total, .. } => write!(f, "Progress({done}/{total})"),
-            Done::Saved { path, result, .. } => write!(f, "Saved({path:?}, ok={})", result.is_ok()),
+            Done::Saved {
+                tab, path, result, ..
+            } => write!(f, "Saved({tab}, {path:?}, ok={})", result.is_ok()),
             Done::OpenPicked(p) => write!(f, "OpenPicked({p:?})"),
-            Done::SavePicked(p) => write!(f, "SavePicked({p:?})"),
+            Done::SavePicked { tab, path } => write!(f, "SavePicked({tab}, {path:?})"),
         }
     }
 }
 
 /// Charge un fichier en document (appelé sur le worker).
-fn load(path: &Path, notify: &dyn Fn(Done)) -> Result<Document, String> {
+fn load(tab: TabId, path: &Path, notify: &dyn Fn(Done)) -> Result<Document, String> {
     let mut last = Instant::now();
     let mut progress = |done: u64, total: u64| {
         if last.elapsed() >= Duration::from_millis(100) {
             last = Instant::now();
-            notify(Done::Progress {
-                path: path.to_path_buf(),
-                done,
-                total,
-            });
+            notify(Done::Progress { tab, done, total });
         }
         true
     };
@@ -96,27 +114,33 @@ fn load(path: &Path, notify: &dyn Fn(Done)) -> Result<Document, String> {
 }
 
 /// Démarre le worker. `notify` est appelé **depuis le worker** pour chaque résultat (dans
-/// l'application : envoi d'un événement utilisateur au thread UI).
+/// l'application : envoi d'un événement utilisateur au thread UI). Le premier message est
+/// [`Done::Config`] : la configuration est lue ici, hors du thread UI.
 pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
     let (tx, rx) = unbounded::<Job>();
     thread::Builder::new()
         .name("paulwrite-worker".into())
         .spawn(move || {
+            notify(Done::Config(Config::load()));
             for job in rx {
                 match job {
-                    Job::Open(path) => {
-                        let result = load(&path, &notify);
-                        notify(Done::Loaded { path, result });
+                    Job::Open { tab, path } => {
+                        let result = load(tab, &path, &notify);
+                        notify(Done::Loaded { tab, path, result });
                     }
                     Job::PickOpen { owner } => {
-                        notify(Done::OpenPicked(platform::pick_open_file(owner)))
+                        notify(Done::OpenPicked(platform::pick_open_file(owner)));
                     }
-                    Job::PickSave { owner, suggested } => {
-                        notify(Done::SavePicked(platform::pick_save_file(
-                            owner, &suggested,
-                        )));
-                    }
+                    Job::PickSave {
+                        tab,
+                        owner,
+                        suggested,
+                    } => notify(Done::SavePicked {
+                        tab,
+                        path: platform::pick_save_file(owner, &suggested),
+                    }),
                     Job::Save {
+                        tab,
                         path,
                         rope,
                         encoding,
@@ -125,6 +149,7 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                         let result =
                             io::save_file(&path, &rope, encoding).map_err(|e| e.to_string());
                         notify(Done::Saved {
+                            tab,
                             path,
                             revision,
                             result,
@@ -154,12 +179,22 @@ mod tests {
         let jobs = spawn(move |d| {
             let _ = out_tx.lock().unwrap().send(d);
         });
+        // la configuration arrive en premier
+        assert!(matches!(
+            out_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Done::Config(_)
+        ));
 
-        jobs.send(Job::Open(path.clone())).unwrap();
+        jobs.send(Job::Open {
+            tab: 3,
+            path: path.clone(),
+        })
+        .unwrap();
         let doc = loop {
-            if let Done::Loaded { result, .. } =
+            if let Done::Loaded { tab, result, .. } =
                 out_rx.recv_timeout(Duration::from_secs(10)).unwrap()
             {
+                assert_eq!(tab, 3);
                 break result.unwrap();
             }
         };
@@ -168,6 +203,7 @@ mod tests {
 
         let out = dir.join("b.txt");
         jobs.send(Job::Save {
+            tab: 3,
             path: out.clone(),
             rope: doc.buffer().rope().clone(),
             encoding: doc.encoding(),
@@ -176,10 +212,13 @@ mod tests {
         .unwrap();
         loop {
             if let Done::Saved {
-                revision, result, ..
+                tab,
+                revision,
+                result,
+                ..
             } = out_rx.recv_timeout(Duration::from_secs(10)).unwrap()
             {
-                assert_eq!(revision, 7);
+                assert_eq!((tab, revision), (3, 7));
                 result.unwrap();
                 break;
             }
@@ -187,11 +226,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "bonjour\r\nmonde");
 
         // fichier inexistant : erreur, pas de panique
-        jobs.send(Job::Open(dir.join("absent.txt"))).unwrap();
+        jobs.send(Job::Open {
+            tab: 4,
+            path: dir.join("absent.txt"),
+        })
+        .unwrap();
         loop {
-            if let Done::Loaded { result, .. } =
+            if let Done::Loaded { tab, result, .. } =
                 out_rx.recv_timeout(Duration::from_secs(10)).unwrap()
             {
+                assert_eq!(tab, 4);
                 assert!(result.is_err());
                 break;
             }

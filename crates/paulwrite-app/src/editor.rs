@@ -6,10 +6,12 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use paulwrite_core::motion;
-use paulwrite_core::{Document, Motion, Selection, SelectionSet};
+use paulwrite_core::{Document, Motion, Selection, SelectionSet, TextEdit};
 use paulwrite_render::{Row, RowSource};
+use paulwrite_syntax::Span;
 
 use crate::command::{Command, Effect};
+use crate::spans::SpanCache;
 
 /// Texte de composition IME en cours (non encore validé).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -53,7 +55,10 @@ pub struct Editor {
     row_sels: Vec<Vec<(usize, usize)>>,
     row_carets: Vec<Vec<usize>>,
     row_underline: Vec<Option<(usize, usize)>>,
+    row_spans: Vec<Vec<(usize, usize, u8)>>,
     ime_anchor: Option<(usize, usize)>,
+    /// Plages colorées (coloration syntaxique) ; vide si la coloration est inactive.
+    spans: SpanCache,
 }
 
 impl Default for Editor {
@@ -86,7 +91,9 @@ impl Editor {
             row_sels: Vec::new(),
             row_carets: Vec::new(),
             row_underline: Vec::new(),
+            row_spans: Vec::new(),
             ime_anchor: None,
+            spans: SpanCache::default(),
         }
     }
 
@@ -147,6 +154,62 @@ impl Editor {
     pub fn title(&self) -> String {
         let star = if self.is_modified() { "*" } else { "" };
         format!("{}{star} — PaulWrite", self.display_name())
+    }
+
+    // --- Coloration syntaxique ---------------------------------------------------------------
+
+    /// Active ou désactive le suivi des modifications pour la coloration syntaxique.
+    pub fn enable_syntax(&mut self, on: bool) {
+        self.doc.track_edits(on);
+        if !on {
+            self.spans.clear();
+        }
+    }
+
+    /// Révision du texte (voir `Buffer::revision`).
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.doc.buffer().revision()
+    }
+
+    /// Modifications depuis le dernier appel, pour le thread de coloration. Les plages colorées
+    /// actuelles sont décalées en conséquence, pour que les couleurs ne sautent pas en attendant
+    /// la réponse du worker.
+    pub fn take_edits(&mut self) -> Vec<TextEdit> {
+        let edits = self.doc.take_edits();
+        for e in &edits {
+            self.spans.apply_edit(e);
+        }
+        edits
+    }
+
+    /// Plage d'octets des lignes visibles, élargie de `margin` lignes de chaque côté.
+    #[must_use]
+    pub fn view_bytes(&self, margin: usize) -> std::ops::Range<usize> {
+        let rope = self.doc.buffer().rope();
+        let total = rope.len_lines();
+        let from = self.first_line.saturating_sub(margin).min(total);
+        let to = (self.first_line + self.rows + margin).min(total);
+        let byte = |line: usize| {
+            if line >= total {
+                rope.len_bytes()
+            } else {
+                rope.line_to_byte(line)
+            }
+        };
+        byte(from)..byte(to)
+    }
+
+    /// Les plages colorées couvrent les lignes visibles (avec une marge de 30 lignes)
+    /// : sinon il faut demander une nouvelle fenêtre au worker.
+    #[must_use]
+    pub fn spans_cover_view(&self) -> bool {
+        self.spans.covers(&self.view_bytes(30))
+    }
+
+    /// Reçoit les plages colorées calculées par le worker pour `range`.
+    pub fn set_spans(&mut self, range: std::ops::Range<usize>, spans: Vec<Span>) {
+        self.spans.set(range, spans);
     }
 
     // --- Vue ---------------------------------------------------------------------------------
@@ -268,6 +331,10 @@ impl Editor {
             Command::Save => return Some(Effect::Save),
             Command::SaveAs => return Some(Effect::SaveAs),
             Command::Open => return Some(Effect::Open),
+            Command::NewFile => return Some(Effect::NewTab),
+            Command::CloseTab => return Some(Effect::CloseTab),
+            Command::NextTab => return Some(Effect::NextTab),
+            Command::PrevTab => return Some(Effect::PrevTab),
             Command::Quit => return Some(Effect::Quit),
         }
         None
@@ -355,6 +422,7 @@ impl Editor {
         self.row_sels.resize_with(rows, Vec::new);
         self.row_carets.resize_with(rows, Vec::new);
         self.row_underline.resize(rows, None);
+        self.row_spans.resize_with(rows, Vec::new);
 
         let buf = self.doc.buffer();
         let total = buf.len_lines();
@@ -366,6 +434,7 @@ impl Editor {
             self.row_sels[r].clear();
             self.row_carets[r].clear();
             self.row_underline[r] = None;
+            self.row_spans[r].clear();
             let line = first + r;
             if line < total {
                 for chunk in buf.line(line).chunks() {
@@ -373,6 +442,16 @@ impl Editor {
                 }
                 while s.ends_with(['\n', '\r']) {
                     s.pop();
+                }
+                // Coloration : plages d'octets du document -> positions UTF-16 dans la rangée.
+                let bs = buf.rope().line_to_byte(line);
+                let be = bs + s.len();
+                for sp in self.spans.overlapping(bs, be) {
+                    let a = sp.start.max(bs) - bs;
+                    let b = sp.end.min(be) - bs;
+                    if a < b {
+                        self.row_spans[r].push((utf16_of_byte(s, a), utf16_of_byte(s, b), sp.kind));
+                    }
                 }
             }
         }
@@ -439,6 +518,7 @@ impl Editor {
             let end = u + utf16_len(&pre.text);
             self.row_sels[r].clear();
             self.row_carets[r].clear();
+            self.row_spans[r].clear();
             self.row_underline[r] = Some((u, end));
             if self.caret_on {
                 let cur = pre.cursor.map_or(end, |c| {
@@ -486,6 +566,18 @@ fn utf16_of_char_col(text: &str, col: usize) -> usize {
     text.chars().take(col).map(char::len_utf16).sum()
 }
 
+/// Position UTF-16 correspondant à un décalage en octets (sur une frontière de caractère).
+fn utf16_of_byte(text: &str, byte: usize) -> usize {
+    let mut units = 0;
+    for (b, c) in text.char_indices() {
+        if b >= byte {
+            break;
+        }
+        units += c.len_utf16();
+    }
+    units
+}
+
 fn byte_of_utf16(text: &str, utf16: usize) -> usize {
     let mut units = 0;
     for (b, c) in text.char_indices() {
@@ -515,6 +607,7 @@ impl RowSource for ViewRows<'_> {
             selections: &e.row_sels[index],
             carets: &e.row_carets[index],
             underline: e.row_underline[index],
+            spans: &e.row_spans[index],
         }
     }
 }
@@ -720,5 +813,69 @@ mod tests {
     fn titre_avec_nom_de_fichier() {
         let e = Editor::from_document(Document::new(), Some(PathBuf::from("dossier/notes.txt")));
         assert_eq!(e.title(), "notes.txt — PaulWrite");
+    }
+
+    #[test]
+    fn les_plages_colorees_deviennent_des_positions_utf16_par_rangee() {
+        use paulwrite_syntax::{kind, Span};
+        let mut e = editor("é fn\nlet x");
+        e.enable_syntax(true);
+        // octets : « é » = 2, espace = 1, « fn » = 3..5 de la première ligne ; ligne 2 commence à 6
+        let span = |start, end, kind| Span { start, end, kind };
+        let len = e.document().buffer().len_bytes();
+        e.set_spans(
+            0..len,
+            vec![span(3, 5, kind::KEYWORD), span(6, 9, kind::KEYWORD)],
+        );
+        e.build_view();
+        let v = e.view();
+        // « é fn » : « fn » est aux colonnes 2..4 en UTF-16
+        assert_eq!(v.row(0).spans, [(2, 4, kind::KEYWORD)]);
+        assert_eq!(v.row(1).spans, [(0, 3, kind::KEYWORD)]);
+    }
+
+    #[test]
+    fn les_couleurs_suivent_la_frappe_en_attendant_le_worker() {
+        use paulwrite_syntax::{kind, Span};
+        let mut e = editor("fn a");
+        e.enable_syntax(true);
+        e.set_spans(
+            0..4,
+            vec![Span {
+                start: 0,
+                end: 2,
+                kind: kind::KEYWORD,
+            }],
+        );
+        // on tape deux caractères au début : la plage « fn » est repoussée
+        e.insert_text("xy", 0);
+        let edits = e.take_edits();
+        assert_eq!(edits.len(), 1);
+        e.build_view();
+        assert_eq!(e.view().row(0).text, "xyfn a");
+        assert_eq!(e.view().row(0).spans, [(2, 4, kind::KEYWORD)]);
+        // coloration désactivée : plus de plages, plus de journal
+        e.enable_syntax(false);
+        e.insert_text("z", 1);
+        assert!(e.take_edits().is_empty());
+        e.build_view();
+        assert!(e.view().row(0).spans.is_empty());
+    }
+
+    #[test]
+    fn fenetre_d_octets_des_lignes_visibles() {
+        let text: String = (0..100).map(|i| format!("l{i}\n")).collect();
+        let mut e = editor(&text);
+        // 5 lignes visibles, première ligne 0 : octets des lignes 0..5 (+ marge)
+        let v = e.view_bytes(0);
+        assert_eq!(v, 0..e.document().buffer().rope().line_to_byte(5));
+        e.scroll_by(50);
+        let v = e.view_bytes(2);
+        let rope = e.document().buffer().rope().clone();
+        assert_eq!(v, rope.line_to_byte(48)..rope.line_to_byte(57));
+        e.scroll_by(1000);
+        // fin du document : bornée
+        assert_eq!(e.view_bytes(100).end, rope.len_bytes());
+        assert!(!e.spans_cover_view());
     }
 }

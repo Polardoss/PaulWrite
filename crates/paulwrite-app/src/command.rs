@@ -33,6 +33,12 @@ pub enum Command {
     Save,
     SaveAs,
     Open,
+    /// Nouveau document vide dans un nouvel onglet.
+    NewFile,
+    /// Ferme l'onglet courant.
+    CloseTab,
+    NextTab,
+    PrevTab,
     Quit,
 }
 
@@ -89,6 +95,10 @@ impl Command {
             Command::Save => "file.save",
             Command::SaveAs => "file.save_as",
             Command::Open => "file.open",
+            Command::NewFile => "file.new",
+            Command::CloseTab => "tab.close",
+            Command::NextTab => "tab.next",
+            Command::PrevTab => "tab.prev",
             Command::Quit => "app.quit",
         }
     }
@@ -127,6 +137,10 @@ impl Command {
             Command::Save,
             Command::SaveAs,
             Command::Open,
+            Command::NewFile,
+            Command::CloseTab,
+            Command::NextTab,
+            Command::PrevTab,
             Command::Quit,
         ]);
         v
@@ -177,6 +191,10 @@ pub enum Effect {
     Save,
     SaveAs,
     Open,
+    NewTab,
+    CloseTab,
+    NextTab,
+    PrevTab,
     Quit,
 }
 

@@ -430,7 +430,14 @@ impl SoftRenderer {
         self.format = format;
         self.metrics = metrics;
         self.scale = scale;
+        // La hauteur de la barre d'onglets dépend de l'échelle.
+        self.metrics.top = if self.tabs.is_empty() {
+            0
+        } else {
+            self.metrics.tab_bar
+        };
         self.layouts.clear();
+        self.tabs_clean = false;
         self.valid = false;
         Ok(())
     }

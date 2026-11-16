@@ -41,6 +41,8 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             NamedKey::PageUp => Some(Command::PageUp(shift)),
             NamedKey::PageDown => Some(Command::PageDown(shift)),
             NamedKey::Enter => Some(Command::InsertNewline),
+            NamedKey::Tab if ctrl && shift => Some(Command::PrevTab),
+            NamedKey::Tab if ctrl => Some(Command::NextTab),
             NamedKey::Tab if !shift => Some(Command::InsertTab),
             NamedKey::Backspace => Some(Command::DeleteBackward),
             NamedKey::Delete => Some(Command::DeleteForward),
@@ -57,6 +59,8 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("s", false) => Some(Command::Save),
             ("s", true) => Some(Command::SaveAs),
             ("o", _) => Some(Command::Open),
+            ("n", _) => Some(Command::NewFile),
+            ("w", _) => Some(Command::CloseTab),
             ("q", _) => Some(Command::Quit),
             _ => None,
         },
@@ -129,6 +133,25 @@ mod tests {
         assert_eq!(command_for(&ch("z"), NONE), None);
         // AltGr (Ctrl+Alt) ne doit pas déclencher de raccourci : il sert à saisir des caractères
         assert_eq!(command_for(&ch("s"), c | ModifiersState::ALT), None);
+    }
+
+    #[test]
+    fn raccourcis_des_onglets() {
+        let c = ModifiersState::CONTROL;
+        assert_eq!(
+            command_for(&named(NamedKey::Tab), c),
+            Some(Command::NextTab)
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::Tab), c | ModifiersState::SHIFT),
+            Some(Command::PrevTab)
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::Tab), NONE),
+            Some(Command::InsertTab)
+        );
+        assert_eq!(command_for(&ch("w"), c), Some(Command::CloseTab));
+        assert_eq!(command_for(&ch("n"), c), Some(Command::NewFile));
     }
 
     #[test]

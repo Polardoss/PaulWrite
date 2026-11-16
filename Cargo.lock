@@ -1102,6 +1102,7 @@ dependencies = [
  "crossbeam-channel",
  "paulwrite-core",
  "paulwrite-render",
+ "paulwrite-syntax",
  "ropey",
  "winit",
 ]
