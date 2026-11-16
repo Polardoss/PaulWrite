@@ -9,16 +9,17 @@
 //! - [`Document`] : façade d'édition (multi-curseurs, déplacements, undo/redo transactionnel) ;
 //! - [`io`] : chargement mmap/flux, sauvegarde atomique ; [`Encoding`], [`LineEnding`].
 
-pub mod error;
-pub mod line_ending;
-pub mod encoding;
-pub mod fragment;
 pub mod buffer;
-pub mod selection;
-pub mod motion;
-pub mod edit;
-pub mod history;
 pub mod document;
+pub mod edit;
+pub mod encoding;
+pub mod error;
+pub mod fragment;
+pub mod history;
+pub mod io;
+pub mod line_ending;
+pub mod motion;
+pub mod selection;
 
 pub use buffer::Buffer;
 pub use document::Document;
