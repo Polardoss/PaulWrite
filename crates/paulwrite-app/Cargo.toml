@@ -7,9 +7,23 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "paulwrite_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "paulwrite"
 path = "src/main.rs"
+
+[dependencies]
+paulwrite-core = { path = "../paulwrite-core" }
+paulwrite-render = { path = "../paulwrite-render" }
+# Fenêtre, boucle d'événements, clavier, IME, DPI, multi-écrans : écrire cela à la main sur
+# Win32 reviendrait à réimplémenter winit. Coût mesuré au démarrage : 3 à 11 ms (EventLoop::build).
+winit = "0.30"
+# Canaux vers les workers (règle de conception n°1 : le thread UI ne fait jamais d'E/S).
+crossbeam-channel = "0.5"
+ropey.workspace = true
 
 [lints]
 workspace = true
