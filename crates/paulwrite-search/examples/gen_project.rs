@@ -31,7 +31,9 @@ fn content(index: usize) -> String {
             out.push_str("    // marqueur needle_xyz\n");
         }
         if line == 12 && index % 20 == 0 {
-            out.push_str(&format!("fn file_{index}_handler(x: i32) -> i32 {{ x + 1 }}\n"));
+            out.push_str(&format!(
+                "fn file_{index}_handler(x: i32) -> i32 {{ x + 1 }}\n"
+            ));
         }
         out.push_str(&" ".repeat((next() % 3) as usize * 4));
         for _ in 0..(4 + next() % 6) {
@@ -64,7 +66,9 @@ fn main() {
             scope.spawn(move || {
                 for i in (t..n).step_by(threads) {
                     let (module, sub, file) = (i / 1000, (i / 50) % 20, i % 50);
-                    let dir = root.join(format!("mod_{module:03}")).join(format!("sub_{sub:02}"));
+                    let dir = root
+                        .join(format!("mod_{module:03}"))
+                        .join(format!("sub_{sub:02}"));
                     fs::create_dir_all(&dir).unwrap();
                     let ext = exts[i % exts.len()];
                     fs::write(dir.join(format!("file_{file:04}.{ext}")), content(i)).unwrap();

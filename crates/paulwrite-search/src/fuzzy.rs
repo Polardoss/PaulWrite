@@ -46,8 +46,14 @@ impl FuzzyFinder {
         self.nucleo.injector()
     }
 
-    /// Ajoute un chemin candidat.
+    /// Ajoute un chemin candidat. Les antislashs (Windows) sont remplacés par des `/` : on tape `/`
+    /// au clavier, et les résultats sont renvoyés avec des `/` (valides aussi sous Windows).
     pub fn add(injector: &FuzzyInjector, path: String) {
+        let path = if path.contains('\\') {
+            path.replace('\\', "/")
+        } else {
+            path
+        };
         injector.push(path, |s, columns| columns[0] = s.as_str().into());
     }
 
@@ -142,6 +148,15 @@ mod tests {
         f.set_query("");
         settle(&mut f);
         assert_eq!(f.matched_count(), 5);
+    }
+
+    #[test]
+    fn les_antislashs_windows_sont_normalises() {
+        let mut f = finder_with(&["src\\sub\\main.rs", "docs\\a.md"]);
+        settle(&mut f);
+        f.set_query("src/sub/main");
+        settle(&mut f);
+        assert_eq!(f.top(5), ["src/sub/main.rs"]);
     }
 
     #[test]

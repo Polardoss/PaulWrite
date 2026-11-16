@@ -120,9 +120,9 @@ fn bench_fuzzy(root: &Path) {
     let mut per_key = Vec::new();
     let mut first_key = Vec::new();
     for query in [
-        "mod_017/sub_05/file_0123.rs",
+        "mod_017/sub_05/file_0023.py",
         "sub_12 file_00 py",
-        "f0456md",
+        "mod_099 sub_19 file_0049 md",
         "mod_999",
         "readme",
     ] {
@@ -149,15 +149,36 @@ fn bench_fuzzy(root: &Path) {
         );
     }
     println!("fuzzy, temps par frappe : {}", stats(&mut per_key));
-    println!("fuzzy, 1re lettre (tous les candidats) : {}", stats(&mut first_key));
+    println!(
+        "fuzzy, 1re lettre (tous les candidats) : {}",
+        stats(&mut first_key)
+    );
 }
 
 fn main() {
     let root = std::env::args().nth(1).expect("usage : bench <dossier>");
     let root = Path::new(&root);
     bench_list(root);
-    bench_text(root, "littéral rare « needle_xyz »", "needle_xyz", false, 10_000);
-    bench_text(root, "regex courante « fn \\w+_handler »", r"fn \w+_handler", true, 10_000);
-    bench_text(root, "regex courante limitée à 100 résultats", r"fn \w+_handler", true, 100);
+    bench_text(
+        root,
+        "littéral rare « needle_xyz »",
+        "needle_xyz",
+        false,
+        10_000,
+    );
+    bench_text(
+        root,
+        "regex courante « fn \\w+_handler »",
+        r"fn \w+_handler",
+        true,
+        10_000,
+    );
+    bench_text(
+        root,
+        "regex courante limitée à 100 résultats",
+        r"fn \w+_handler",
+        true,
+        100,
+    );
     bench_fuzzy(root);
 }

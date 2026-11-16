@@ -4,9 +4,10 @@
 La vitesse est le critère n°1, avant les fonctionnalités. Pas d'Electron, pas de webview, pas de
 framework UI lourd.
 
-> État : en construction. Étapes 0 (fondations), 1 (`paulwrite-core`) et 2 (fenêtre et rendu) en
-> place : l'éditeur ouvre, édite et enregistre un fichier texte (un seul document, sans coloration
-> syntaxique ni onglets pour l'instant).
+> État : en construction. Étapes 0 à 3 en place : l'éditeur ouvre, édite et enregistre des fichiers
+> dans des onglets, avec coloration syntaxique (Rust, JSON, TOML, Python, JavaScript, HTML, CSS).
+> La recherche (fichiers, texte, fuzzy) existe en bibliothèque mais n'a pas encore d'interface
+> (étape 4).
 
 ## Objectifs de performance
 
@@ -41,8 +42,8 @@ Workspace Cargo (`crates/`) :
 | Crate | Rôle |
 |---|---|
 | `paulwrite-core` | Buffer ([ropey]), sélections et curseurs multiples, undo/redo transactionnel, encodages, I/O. Aucune dépendance UI. |
-| `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié. *(étape 3)* |
-| `paulwrite-search` | Recherche fichier/projet, fuzzy finder. *(étapes 3-4)* |
+| `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié (7 langages). |
+| `paulwrite-search` | Liste de fichiers, recherche de texte (moteur de ripgrep) et fuzzy finder (nucleo), respectent `.gitignore`. Interface : étape 4. |
 | `paulwrite-render` | Rendu du texte : Direct2D logiciel + DirectWrite par régions sales, presse-papiers, boîtes de dialogue. Choix mesuré : [`docs/rendering.md`](docs/rendering.md). |
 | `paulwrite-app` | Fenêtre winit, commandes nommées, raccourcis, éditeur, worker de fichiers. Produit le binaire `paulwrite`. |
 
@@ -76,11 +77,23 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Flèches, Ctrl+flèches (mots), Home/End, Ctrl+Home/End, PgUp/PgDn | déplacements ; avec Maj : sélection |
 | Ctrl+Z, Ctrl+Y (ou Ctrl+Maj+Z) | annuler, rétablir |
 | Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V | tout sélectionner, copier, couper, coller |
-| Ctrl+S, Ctrl+Maj+S, Ctrl+O | enregistrer, enregistrer sous, ouvrir |
+| Ctrl+S, Ctrl+Maj+S, Ctrl+O | enregistrer, enregistrer sous, ouvrir (dans un nouvel onglet) |
+| Ctrl+N, Ctrl+W | nouvel onglet, fermer l'onglet |
+| Ctrl+Tab, Ctrl+Maj+Tab, clic, clic milieu | onglet suivant, précédent, activer, fermer |
 | Ctrl+Alt+↑ / Ctrl+Alt+↓ | ajouter un curseur au-dessus / en dessous |
 | Échap | revenir à un seul curseur |
 | Ctrl+↑ / Ctrl+↓, molette | faire défiler sans bouger le curseur |
 | Clic, glisser, Maj+clic | placer le curseur, sélectionner |
+
+Plusieurs fichiers peuvent être passés en argument (`paulwrite a.rs b.json`) ou glissés sur la
+fenêtre : un onglet chacun. Un fichier déjà ouvert est simplement activé.
+
+Réglages (facultatifs) dans `%APPDATA%\PaulWrite\config.toml` :
+
+```toml
+highlight = true                # false : pas de coloration syntaxique
+highlight_max_bytes = 1048576   # au-delà de cette taille (octets), pas de coloration
+```
 
 Chaque ligne correspond à une commande nommée (`cursor.left`, `edit.undo`, `file.save`, …) définie
 dans `crates/paulwrite-app/src/command.rs`.
@@ -101,7 +114,9 @@ de façon déterministe dans `bench-data/` à la première exécution (ignoré p
 ```bash
 cargo bench -p paulwrite-core                 # étape 1 : buffer, historique, curseurs
 cargo build --release -p paulwrite-app
-.\scriptsench-app.ps1                       # étape 2 : démarrage, latence de frappe, défilement
+.\scripts\bench-app.ps1                       # étapes 2-3 : démarrage, frappe, défilement, coloration
+cargo run --release -p paulwrite-search --example gen_project -- bench-data\project-100k
+cargo run --release -p paulwrite-search --example bench -- bench-data\project-100k   # étape 3 : recherche
 ```
 
 [criterion]: https://crates.io/crates/criterion

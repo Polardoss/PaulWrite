@@ -94,3 +94,97 @@ prototype comparatif sont détaillés dans [`rendering.md`](rendering.md).
 - **Non vérifié** : saisie IME réelle (logique testée, pas essayée avec un vrai IME), multi-écrans avec
   DPI différents (changement d'échelle codé et testé hors fenêtre), clavier réel (raccourcis testés,
   événements Windows réels non injectés).
+
+## Étape 3 — coloration, recherche, onglets
+
+Commandes : `.\scripts\bench-app.ps1` (application : démarrage, frappe, coloration),
+`cargo run --release -p paulwrite-syntax --example bench -- <Ko> <frappes>` (analyse seule),
+`cargo run --release -p paulwrite-search --example gen_project -- bench-data\project-100k` puis
+`cargo run --release -p paulwrite-search --example bench -- bench-data\project-100k` (recherche).
+Le projet de test (`bench-data/`, ignoré par git) compte 100 000 fichiers de ~1,4 Ko répartis en
+100 modules × 20 sous-dossiers × 50 fichiers, plus 3 000 fichiers dans `target/` et `node_modules/`
+exclus par `.gitignore` (une recherche correcte ne doit pas les voir : vérifié, 100 résultats et non
+3 100 pour le motif rare).
+
+### Recherche et fuzzy (100 000 fichiers, cache chaud)
+
+| Scénario | Objectif | Mesuré | Verdict |
+|---|---|---|---|
+| Recherche de texte, premiers résultats (regex courante `fn \w+_handler`, 1 fichier sur 20) | < 200 ms | **21 ms** (20-22) | OK |
+| Recherche de texte, premiers résultats (littéral rare `needle_xyz`, 1 fichier sur 1000) | < 200 ms | 22 à 83 ms | OK |
+| Recherche limitée à 100 résultats | — | 21 ms jusqu'aux premiers, 48-63 ms au total (≈ 2 100 fichiers lus) | — |
+| Balayage complet des 100 000 fichiers (texte) | — | 1,8 s (≈ 55 000 fichiers/s, 12 threads) | — |
+| Liste des 100 000 fichiers (`.gitignore` respecté) | — | premier lot 19-22 ms, total 130-145 ms | — |
+| Indexation fuzzy des 100 000 chemins | — | 124 ms | — |
+| Fuzzy, temps par frappe (84 frappes, 5 requêtes) | < 30 ms | p50 0,52 ms, p99 **6,8 ms**, max 6,8 ms | OK |
+| Fuzzy, première lettre (100 000 candidats) | < 30 ms | 5,3 ms | OK |
+
+**Premier passage à froid : objectif non tenu, cause connue.** Juste après la génération des
+fichiers, la première recherche a mis **2,5 s** avant ses premiers résultats et **48 s** au total
+(contre 2 s au total ensuite). Les 100 000 fichiers étaient neufs et jamais relus : le temps est
+dominé par l'analyse antivirus de Windows (Defender) à la première lecture de chaque fichier, que
+l'on ne contrôle pas. Impossible de reproduire à volonté (il faudrait vider le cache système, ce qui
+demande des droits administrateur). Les chiffres du tableau sont donc ceux d'un projet déjà lu une
+fois, cas habituel d'un projet sur lequel on travaille.
+
+### Coloration syntaxique (analyse tree-sitter)
+
+Fichier Rust synthétique valide (~50 octets par ligne, structure plate : le **pire cas** pour
+l'analyse incrémentale de tree-sitter, qui coûte plus cher quand la racine a des milliers
+d'enfants). Fenêtre de coloration : 230 lignes autour de la frappe. Frappes au milieu du document.
+
+| Taille | Analyse complète (worker) | Analyse incrémentale par frappe (p50) | Requête de coloration (230 lignes) | Pic mémoire |
+|---|---|---|---|---|
+| 64 Ko | 14 ms | 0,5 ms | ~1 ms | — |
+| 256 Ko | 57 ms | 2,2 ms | ~1 ms | — |
+| **1 Mo** | 234 ms | **15,8 ms** (p99 24) | 1,1-1,3 ms | 56 Mo |
+| 2 Mo | 553 ms | 43 ms | ~1 ms | 104 Mo |
+| 4 Mo | 0,9 à 1,4 s | 72 à 77 ms (p99 98 à 166) | ~1 ms | 200 Mo |
+| 16 Mo | 3,8 s | 304 ms | — | 785 Mo |
+
+Compilation de la requête de coloration du Rust : 21 ms (une fois par document, sur le worker).
+
+**Seuil par défaut : 1 Mo** (`highlight_max_bytes` dans `%APPDATA%\PaulWrite\config.toml`, ou
+variable `PAULWRITE_HIGHLIGHT_MAX_BYTES`). Au-delà, pas de coloration. Raisons : l'analyse
+incrémentale devient perceptible (> 40 ms) dès 2 Mo et la mémoire vaut environ 50 fois la taille du
+fichier. `highlight = false` désactive la coloration partout.
+
+| Scénario dans l'application (fichier Rust de ~1 Mo, 300 frappes, 1 toutes les 20 ms) | Mesuré |
+|---|---|
+| Frappe, événement → image copiée vers la fenêtre | moy 1,2 ms, **p99 3,0 ms** |
+| Frappe → couleurs à jour reçues par le thread UI | moy 12,0 ms, p99 18,2 ms |
+| Thread de coloration, analyse + requête par frappe | moy 11,7 ms, p99 15,3 ms |
+
+La coloration ne ralentit **pas** la frappe (p99 3,0 ms contre 3,6 ms sans) : elle tourne sur son
+propre thread et, en attendant sa réponse, les plages colorées existantes sont décalées par
+l'éditeur lui-même, donc les couleurs ne « sautent » pas. Le retard des couleurs (~12 ms à 1 Mo)
+n'est visible que sur le mot en cours de frappe. Si les frappes arrivent plus vite que l'analyse,
+le worker regroupe les modifications et n'analyse qu'une fois.
+
+### Application (onglets, démarrage)
+
+| Scénario | Objectif | Mesuré | Verdict |
+|---|---|---|---|
+| Démarrage à froid, fenêtre visible avec barre d'onglets (21 exécutions) | < 100 ms | médiane **76 ms** (69-91) ; 1re image 80 ms (71-93) | OK (gate) |
+| Latence de frappe, événement → image (300 frappes) | < 10 ms | moy 2,2 ms, p99 **3,6 ms** | OK (gate) |
+| Défilement, dessin + copie par image | fluide | moy 0,87 ms, p99 2,6 ms | OK |
+| Taille de l'exécutable | — | 4,1 Mo (7 grammaires comprises) | — |
+
+Les onglets n'ont pas changé le démarrage (76 ms en médiane, comme à l'étape 2). Une série isolée a
+donné 89 ms de médiane (maximum 123 ms) : machine occupée, non reproduite sur 21 exécutions.
+
+### Remarques et limites (étape 3)
+
+- **Données synthétiques** : le code Rust de test est régulier et plat ; des fichiers réels (modules
+  imbriqués) devraient être plus favorables à l'analyse incrémentale, mais JSON volumineux ou code
+  généré peuvent ressembler au cas mesuré. Seul le Rust a été mesuré en détail (7 langages sont
+  vérifiés par des tests de bon fonctionnement, pas de performance).
+- **Coloration de HTML** : les scripts et styles intégrés (`<script>`, `<style>`) ne sont pas colorés
+  dans le langage correspondant (pas d'injection de langage).
+- **Interface de recherche** : le crate `paulwrite-search` fournit la liste de fichiers, la recherche
+  de texte et le fuzzy finder, mesurés ci-dessus. L'interface (palette de commandes, Goto Anything,
+  panneau de résultats) est l'objet de l'étape 4 : rien n'est encore appelable depuis l'éditeur.
+- **Onglets** : la logique de gestion des onglets (ouverture, fermeture avec confirmation,
+  enregistrement avant fermeture) est dans la boucle de l'application et n'est pas couverte par des
+  tests automatiques (elle exige une fenêtre) ; le rendu de la barre, lui, est testé (régions
+  identiques au redessin complet, zones de clic).

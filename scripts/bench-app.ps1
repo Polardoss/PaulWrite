@@ -6,9 +6,9 @@
 #   .\scripts\bench-app.ps1 [-Runs 7] [-Typing 300] [-Scroll 600] [-File chemin]
 #
 # - Demarrage : la fenetre apparait ~100 ms a l'ecran (sans prendre le focus), une fois par execution.
-# - Frappe et defilement : fenetre HORS de la zone visible de l'ecran (rien ne gene l'utilisateur).
+# - Frappe, coloration et defilement : fenetre HORS de la zone visible de l'ecran (rien ne gene l'utilisateur).
 #   La copie vers la fenetre y est un peu sous-estimee (rien a afficher) : voir docs/benchmarks.md.
-param([int]$Runs = 7, [int]$Typing = 300, [int]$Scroll = 600, [string]$File = "")
+param([int]$Runs = 7, [int]$Typing = 300, [int]$Scroll = 600, [int]$Syntax = 300, [string]$File = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $exe = Join-Path $root "target\release\paulwrite.exe"
@@ -44,4 +44,7 @@ $o = Run-Bench @("--bench-typing", "$Typing")
 $o = Run-Bench @("--bench-scroll", "$Scroll")
 "DEFILEMENT ($Scroll images, 3 lignes par image) :"
 ($o -split "`n" | Where-Object { $_ -match 'filement' }) -join "`n"
+$o = Run-Bench @("--bench-syntax", "$Syntax")
+"COLORATION ($Syntax frappes dans un fichier Rust de ~1 Mo, une toutes les 20 ms) :"
+($o -split "`n" | Where-Object { $_ -match 'frappe|coloration' }) -join "`n"
 Remove-Item $tmp -ErrorAction SilentlyContinue
