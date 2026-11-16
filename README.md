@@ -11,7 +11,6 @@ framework UI lourd.
 
 ## Objectifs de performance
 
-
 Chaque objectif est **mesuré**, jamais supposé. Une régression de performance bloque l'étape.
 
 | Objectif | Cible |
