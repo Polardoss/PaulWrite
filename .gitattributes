@@ -1,0 +1,7 @@
+# Fins de ligne LF partout dans le dépôt, y compris sur Windows (rustfmt est configuré en Unix).
+* text=auto eol=lf
+
+# Fichiers binaires éventuels
+*.png binary
+*.ico binary
+*.woff2 binary
