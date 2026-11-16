@@ -34,8 +34,11 @@ pub struct LoadOptions {
 
 impl Default for LoadOptions {
     fn default() -> Self {
+        // Défaut : toujours en flux. Mesuré sur 500 Mo (cache chaud) : flux 0,80 s contre
+        // mmap 1,04 s ; mmap ajoute un risque (troncature concurrente) sans gain. Voir
+        // docs/benchmarks.md. mmap reste disponible via un seuil plus bas.
         Self {
-            mmap_threshold: 8 * 1024 * 1024,
+            mmap_threshold: u64::MAX,
             chunk_size: 1024 * 1024,
         }
     }
