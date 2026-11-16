@@ -17,7 +17,7 @@ use windows::Win32::UI::Controls::Dialogs::{
     OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, IDNO, IDYES, MB_ICONQUESTION, MB_YESNOCANCEL,
+    MessageBoxW, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL,
 };
 
 /// Texte du presse-papiers (s'il y en a).
@@ -110,6 +110,20 @@ pub fn confirm_save(owner: isize, file_name: &str) -> SaveChoice {
         SaveChoice::Discard
     } else {
         SaveChoice::Cancel
+    }
+}
+
+/// Affiche un message d'erreur (boîte modale, bouton OK).
+pub fn show_error(owner: isize, text: &str) {
+    let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `text` est terminé par 0 et vit pendant l'appel (bloquant).
+    unsafe {
+        MessageBoxW(
+            Some(HWND(owner as *mut _)),
+            PCWSTR(text.as_ptr()),
+            w!("PaulWrite"),
+            MB_OK | MB_ICONERROR,
+        );
     }
 }
 
