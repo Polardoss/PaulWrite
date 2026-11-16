@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// Taille maximale (octets) d'un fichier coloré par défaut. Au-delà, la coloration est désactivée
 /// (voir `docs/benchmarks.md` pour les mesures qui fondent cette valeur).
-pub const DEFAULT_HIGHLIGHT_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_HIGHLIGHT_MAX_BYTES: usize = 1024 * 1024;
 
 /// Réglages de l'application.
 #[derive(Clone, Debug, PartialEq, Eq)]

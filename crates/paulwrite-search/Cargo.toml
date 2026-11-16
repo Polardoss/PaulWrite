@@ -1,11 +1,26 @@
 [package]
 name = "paulwrite-search"
-description = "Recherche fichier/projet et fuzzy finder (étapes 3-4)"
+description = "Recherche de fichiers et de texte dans un projet, fuzzy finder (étapes 3-4)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+crossbeam-channel = "0.5"
+# Parcours parallèle de dossiers qui respecte .gitignore : le même moteur que ripgrep. Écrire
+# soi-même la gestion de .gitignore / .ignore / fichiers cachés serait plus lent et incomplet.
+ignore = "0.4"
+# Recherche de texte par ligne (moteur de ripgrep) : imposée par le brief.
+grep-regex = "0.1"
+grep-searcher = "0.1"
+grep-matcher = "0.1"
+# Fuzzy matching (algorithme de Helix) avec threads d'arrière-plan : imposé par le brief.
+nucleo = "0.5"
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
