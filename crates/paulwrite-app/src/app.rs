@@ -27,9 +27,9 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::platform::windows::EventLoopBuilderExtWindows;
+use winit::platform::windows::{EventLoopBuilderExtWindows, IconExtWindows, WindowAttributesExtWindows};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::window::{Cursor, CursorIcon, Window, WindowId};
+use winit::window::{Cursor, CursorIcon, Icon, Window, WindowId};
 
 use crate::command::{Command, Effect, LspAction};
 use crate::config::Config;
@@ -2833,6 +2833,12 @@ impl ApplicationHandler<UserEvent> for App {
             .with_title(ed!(self).title())
             .with_inner_size(LogicalSize::new(1100.0, 720.0))
             .with_visible(false);
+        // Icône de l'exécutable (ressource 1, voir `build.rs`) : barre de titre et barre des tâches.
+        if let Ok(icon) = Icon::from_resource(1, None) {
+            attrs = attrs
+                .with_window_icon(Some(icon.clone()))
+                .with_taskbar_icon(Some(icon));
+        }
         if self.is_bench() || offscreen {
             attrs = attrs.with_active(false);
         }

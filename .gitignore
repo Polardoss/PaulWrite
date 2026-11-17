@@ -37,3 +37,6 @@ perf.data*
 
 # Prototypes (workspaces séparés) : artefacts de build
 /prototypes/*/target/
+
+# Archives de distribution (scripts\package.ps1)
+/dist/

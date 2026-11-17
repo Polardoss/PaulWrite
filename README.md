@@ -64,6 +64,23 @@ Le binaire se trouve dans `target/release/paulwrite.exe`. Pour profiler (symbole
 cargo build --profile profiling
 ```
 
+## Installer
+
+Pas besoin de compiler : l'archive `PaulWrite-<version>-windows-x64.zip` (2 Mo) contient
+`paulwrite.exe` et deux scripts. Dans le dossier décompressé :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1   # copie dans %LOCALAPPDATA%\Programs\PaulWrite, menu Démarrer, « Open with PaulWrite »
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Associate .txt,.md,.rs  # PaulWrite apparaît aussi dans « Ouvrir avec » pour ces extensions
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -AddToPath  # `paulwrite fichier` depuis un terminal
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun  # affiche ce qui serait fait, ne change rien
+```
+
+Tout est installé pour **l'utilisateur courant** (aucun droit d'administrateur). `uninstall.ps1`
+(ou « Applications installées ») retire tout ; vos réglages (`%APPDATA%\PaulWrite`) sont conservés.
+(Windows bloque les scripts téléchargés par défaut : d'où `-ExecutionPolicy Bypass`, qui ne vaut que pour cette commande.)
+Détails : [`docs/distribution.md`](docs/distribution.md).
+
 ## Utiliser
 
 ```bash

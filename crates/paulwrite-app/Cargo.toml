@@ -31,3 +31,8 @@ ropey.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+# Icône et informations de version dans l'exécutable (compile un fichier .rc avec le compilateur de
+# ressources de Windows). Dépendance de compilation seulement : aucun effet sur le démarrage.
+embed-resource = "3"
