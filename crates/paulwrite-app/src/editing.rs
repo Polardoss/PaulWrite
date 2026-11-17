@@ -292,7 +292,7 @@ pub fn toggle_comment(doc: &mut Document, style: CommentStyle, now_ms: u64) -> b
     }
     let commented = |text: &str| {
         let t = text.trim();
-        t.starts_with(open) && close.is_none_or(|c| t.ends_with(c))
+        t.starts_with(open) && close.map_or(true, |c| t.ends_with(c))
     };
     let all_commented = lines.iter().all(|(_, t, _)| commented(t));
     let mut repl: Vec<Replacement> = Vec::new();
@@ -516,10 +516,10 @@ pub fn type_char(doc: &mut Document, c: char, now_ms: u64) -> bool {
         }
         let before = (start > 0).then(|| buf.char(start - 1));
         let after = (start < len).then(|| buf.char(start));
-        let after_ok = after.is_none_or(|a| {
+        let after_ok = after.map_or(true, |a| {
             a.is_whitespace() || matches!(a, ')' | ']' | '}' | '>' | ',' | ';' | ':' | '.')
         });
-        let before_ok = !quote || before.is_none_or(|b| !is_word(b) && b != open);
+        let before_ok = !quote || before.map_or(true, |b| !is_word(b) && b != open);
         if after_ok && before_ok {
             repl.push((start, start, format!("{open}{close}")));
             sels.push(Selection::caret(pos(start) + 1));
