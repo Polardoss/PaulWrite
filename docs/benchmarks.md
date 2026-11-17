@@ -293,6 +293,51 @@ modifications, sérialisation, thread du client) et non celui d'un vrai serveur.
   été mesuré dans le chemin de saisie : aucun plugin n'y est appelé par frappe.
 - Limites fonctionnelles du LSP : voir [`lsp.md`](lsp.md).
 
+## Interface « Sublime Text » (début de l'étape 6)
+
+Refonte visuelle : gouttière, onglets, barre d'état, minimap, barre de défilement, barre latérale,
+panneau clair, barre de menus (voir [`interface.md`](interface.md)). Chaque élément ajoute du travail
+à chaque image : la mesure a donc été faite **avant de conclure**, et une première version a été
+corrigée.
+
+Mesures dans l'application réelle (binaire `release`, fenêtre hors écran 1100×720, `.\scriptsench-app.ps1`).
+La référence « avant » est la même machine, la même séance, juste avant la refonte (3 séries).
+
+| Scénario | Objectif | Avant la refonte | Première version | **Version finale** | Verdict |
+|---|---|---|---|---|---|
+| Frappe → image copiée, 300 frappes | < 10 ms (p99 < 16) | moy 2,25–2,36 ms, p99 3,5–10,0 | moy 6,26 ms, p99 10,2 | **moy 2,7–3,7 ms, p50 2,0–3,5, p99 6,6–7,0, max ≤ 7,9** (4 séries) | OK |
+| Frappe dans un fichier Rust de 1 Mo (coloration) | < 10 ms | moy 1,3–1,7, p99 5–15 | — | moy 1,71, p99 4,7 | OK |
+| Frappe avec un serveur de langage actif | p99 < 10 ms | moy 1,67, p99 3,1–15,7 | — | moy 1,62, p99 3,1 | OK |
+| Défilement, 600 images de 3 lignes | fluide | — (0,8 ms p50 hors fenêtre) | moy 1,95, p99 4,4 | **moy 1,27–1,33 ms, p99 3,4–4,4** (4 séries) | OK |
+| Démarrage à froid, fenêtre visible (7 runs) | < 100 ms | médiane 75,5 ms | — | **médiane 78 ms** (74–117) | OK |
+| Goto Anything, frappe → résultats affichés (100 000 fichiers) | < 30 ms | p99 10,7–27,4 | — | p99 26,3–30,8 (2 séries) | à la limite, comme à l'étape 4 |
+| Recherche dans le projet, premiers résultats | < 200 ms | 29–131 ms | — | 29–47 ms (motif courant) ; 47–277 ms (motif rare, 4 séries) | OK (une série à 277 ms) |
+| Taille de l'exécutable | — | 5,74 Mo | — | 5,87 Mo | — |
+
+### Ce que la mesure a montré
+
+- **La première version coûtait 2,7× plus par frappe** (moyenne 6,26 ms contre 2,3). Mesuré hors
+  fenêtre (`cargo test --release -p paulwrite-render mesure_frappe -- --ignored --nocapture`, 1100×720,
+  CPU chaud) : la rangée seule coûte 0,36 ms, la barre d'état ajoute 0,33 ms, la minimap 0,8 ms.
+  Dans l'application, avec 20 ms de repos entre deux frappes, les mêmes opérations coûtent environ
+  6 fois plus (le processeur ralentit pendant les pauses) : l'écart se voit donc beaucoup plus que
+  dans un test en boucle serrée.
+- **Corrections** : (1) la minimap n'est reconstruite qu'au plus tous les 150 ms pendant la frappe,
+  tout de suite au défilement ; (2) la zone de droite (minimap, barre de défilement) est dessinée par
+  copie de pixels et non par une image Direct2D (0,8 ms → 0,2 ms) ; (3) seule la partie gauche de la
+  barre d'état, qui change à chaque frappe, est redessinée. Reste, par frappe : 0,36 ms (rangée)
+  + 0,33 ms (barre d'état, dont la création du texte) mesurés à chaud.
+- **Le coût qui reste est la barre d'état** (position du curseur, mise à jour à chaque frappe) :
+  +0,4 à +1,3 ms par frappe dans l'application, sans dépasser l'objectif (p99 7 ms).
+- **Minimap en retard** : elle peut montrer l'état du texte d'il y a 150 ms pendant la frappe
+  continue ; elle se met à jour dès qu'on s'arrête (une image est redemandée à l'échéance).
+- **Machine bruitée** : un antivirus (Kaspersky) a bloqué l'accès à l'exécutable pendant près de
+  15 minutes après une série d'essais ; une recherche mesurée à ce moment-là a pris 68 s au lieu de
+  2 s (non retenue, refaite 4 fois). Les valeurs ci-dessus viennent de séries hors de cette période.
+- **Non mesuré** : coût de la barre latérale ouverte (dossier de 100 000 fichiers : listing de la
+  racine seulement, mais l'arbre aplati est reconstruit à chaque dépli), rendu à 125 % et 150 % de
+  mise à l'échelle Windows, minimap d'un fichier de 500 Mo (elle lit les lignes affichées seulement).
+
 ## Correction : défilement (bug de l'étape 2 trouvé à l'étape 4)
 
 **Bug** : après un défilement, le milieu de la fenêtre gardait l'ancien texte pendant que le haut et

@@ -42,7 +42,7 @@ Workspace Cargo (`crates/`) :
 | `paulwrite-core` | Buffer ([ropey]), sélections et curseurs multiples, undo/redo transactionnel, encodages, I/O. Aucune dépendance UI. |
 | `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié (7 langages). |
 | `paulwrite-search` | Liste de fichiers, recherche de texte (moteur de ripgrep) et fuzzy finder (nucleo), respectent `.gitignore`. |
-| `paulwrite-render` | Rendu du texte : Direct2D logiciel + DirectWrite par régions sales, presse-papiers, boîtes de dialogue. Choix mesuré : [`docs/rendering.md`](docs/rendering.md). |
+| `paulwrite-render` | Rendu : Direct2D logiciel + DirectWrite par régions sales (texte, gouttière, onglets, minimap, barre d'état, barre latérale, panneau), presse-papiers, boîtes de dialogue, barre de menus. Choix mesuré : [`docs/rendering.md`](docs/rendering.md) ; apparence : [`docs/interface.md`](docs/interface.md). |
 | `paulwrite-plugins` | Plugins Lua sur thread dédié : commandes et événements, instantané O(1) du texte, limites de temps et de mémoire. Voir [`docs/plugins.md`](docs/plugins.md). |
 | `paulwrite-lsp` | Client LSP (JSON-RPC sur stdio, un thread par serveur) : diagnostics, complétion, définition, survol. Désactivé par défaut. Voir [`docs/lsp.md`](docs/lsp.md). |
 | `paulwrite-app` | Fenêtre winit, commandes nommées, raccourcis, éditeur, worker de fichiers. Produit le binaire `paulwrite`. |
@@ -87,6 +87,9 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Échap | revenir à un seul curseur |
 | Ctrl+↑ / Ctrl+↓, molette | faire défiler sans bouger le curseur |
 | Clic, glisser, Maj+clic | placer le curseur, sélectionner |
+| Clic dans la gouttière | sélectionner la ligne |
+| Clic ou glisser dans la minimap, glisser la barre de défilement | faire défiler |
+| Ctrl+K puis Ctrl+B, icône en bas à gauche | afficher / masquer la barre latérale |
 
 Dans le panneau (Goto Anything, palette, recherche) : saisir pour filtrer, ↑ ↓ PgUp PgDn pour
 choisir, Entrée ou clic pour valider, Échap ou clic à côté pour fermer. Le **projet** est le dossier
@@ -95,6 +98,10 @@ fichier courant. `.gitignore` est respecté.
 
 Les plugins Lua (`%APPDATA%\PaulWrite\plugins`) ajoutent leurs commandes à la palette : voir
 [`docs/plugins.md`](docs/plugins.md).
+
+La barre de menus (File, Edit, Selection, Find, View, Goto, Tools, Project, Preferences, Help)
+donne accès aux mêmes commandes, dont **File ▸ Open Folder…** : le dossier devient le projet et sa
+barre latérale s'affiche (un dossier passé en argument ou glissé sur la fenêtre fait de même).
 
 Plusieurs fichiers peuvent être passés en argument (`paulwrite a.rs b.json`) ou glissés sur la
 fenêtre : un onglet chacun. Un fichier déjà ouvert est simplement activé.
@@ -117,6 +124,13 @@ dans `crates/paulwrite-app/src/command.rs`.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
+
+Contrôle visuel du rendu, sans rien afficher à l'écran (la fenêtre est hors de la zone visible) :
+
+```bash
+paulwrite --screenshot capture.png dossier fichier.rs   # écrit une capture PNG puis quitte
+cargo run -p paulwrite-render --example snapshot -- demo.png   # démo du moteur seul
 ```
 
 ## Benchmarks
