@@ -309,6 +309,10 @@ pub struct SoftRenderer {
     cur: Vec<Option<Sig>>,
     dirty: Vec<bool>,
     bands: Vec<Band>,
+    /// Zone des rangées dont les pixels ont été **déplacés** par un défilement : elle a changé
+    /// dans la DIB sans être redessinée, donc [`present`](Self::present) doit la recopier vers la
+    /// fenêtre en plus des bandes dessinées (sinon le milieu de l'écran garde l'ancien contenu).
+    shift_region: Option<Band>,
     valid: bool,
     // Barre d'onglets
     tabs: Vec<TabEntry>,
@@ -415,6 +419,7 @@ impl SoftRenderer {
                 cur: Vec::new(),
                 dirty: Vec::new(),
                 bands: Vec::new(),
+                shift_region: None,
                 valid: false,
                 tabs: Vec::new(),
                 tabs_clean: false,
@@ -638,6 +643,10 @@ impl SoftRenderer {
         }
         let dy = d as i32 * lh;
         let region = self.prev.len() as i32 * lh;
+        self.shift_region = Some(Band {
+            top,
+            bottom: (top + region).min(self.size.1 as i32),
+        });
         // SAFETY: copie de pixels à l'intérieur de la DIB sélectionnée dans `mem_dc` ; GDI gère
         // le chevauchement source/destination.
         unsafe {
@@ -1183,11 +1192,18 @@ impl SoftRenderer {
     /// # Errors
     /// Échec GDI.
     pub fn present(&mut self, hwnd: isize) -> Result<()> {
-        let bands = std::mem::take(&mut self.bands);
-        let r = self.blit(hwnd, &bands);
-        self.bands = bands;
+        let bands = self.blit_bands();
         self.bands.clear();
-        r
+        self.shift_region = None;
+        self.blit(hwnd, &bands)
+    }
+
+    /// Ce qu'il faut recopier vers la fenêtre : les bandes redessinées et, après un défilement, la
+    /// zone dont les pixels ont été déplacés.
+    fn blit_bands(&self) -> Vec<Band> {
+        let mut v = self.bands.clone();
+        v.extend(self.shift_region);
+        v
     }
 
     /// Copie toute la DIB vers la fenêtre (fenêtre redécouverte, `WM_PAINT`).
@@ -1200,6 +1216,7 @@ impl SoftRenderer {
             bottom: self.size.1 as i32,
         }];
         self.bands.clear();
+        self.shift_region = None;
         self.blit(hwnd, &all)
     }
 
@@ -1207,15 +1224,23 @@ impl SoftRenderer {
         if bands.is_empty() {
             return Ok(());
         }
-        let w = self.size.0 as i32;
         let hwnd = HWND(hwnd as *mut _);
-        // SAFETY: le DC de la fenêtre est obtenu puis libéré dans cette fonction ; `mem_dc`
-        // contient la DIB.
+        // SAFETY: le DC de la fenêtre est obtenu puis libéré dans cette fonction.
         unsafe {
             let dc = GetDC(Some(hwnd));
-            let mut result = Ok(());
-            for b in bands {
-                if let Err(e) = BitBlt(
+            let result = self.blit_to_dc(dc, bands);
+            ReleaseDC(Some(hwnd), dc);
+            result
+        }
+    }
+
+    /// Copie les bandes de la DIB vers `dc` (la fenêtre, ou une cible de test).
+    fn blit_to_dc(&self, dc: HDC, bands: &[Band]) -> Result<()> {
+        let w = self.size.0 as i32;
+        for b in bands {
+            // SAFETY: `dc` est un DC valide fourni par l'appelant ; `mem_dc` contient la DIB.
+            unsafe {
+                BitBlt(
                     dc,
                     0,
                     b.top,
@@ -1225,14 +1250,10 @@ impl SoftRenderer {
                     0,
                     b.top,
                     SRCCOPY,
-                ) {
-                    result = Err(e);
-                    break;
-                }
+                )?;
             }
-            ReleaseDC(Some(hwnd), dc);
-            result
         }
+        Ok(())
     }
 
     /// Couleurs utilisées.
@@ -1820,5 +1841,135 @@ mod tests {
         assert_eq!(r.overlay_row_at(320.0, lh * 5.5), None);
         assert_eq!(r.overlay_row_at(2.0, lh * 2.5), None);
         assert!(r.overlay_columns() >= 20);
+    }
+
+    /// Cible de test qui joue le rôle de la fenêtre : un DC mémoire avec sa propre DIB.
+    struct FakeWindow {
+        dc: HDC,
+        dib: HBITMAP,
+        old: HGDIOBJ,
+        bits: *mut u32,
+        len: usize,
+    }
+
+    impl FakeWindow {
+        fn new(size: (u32, u32)) -> Self {
+            unsafe {
+                let dc = CreateCompatibleDC(None);
+                let (dib, old, bits) = make_dib(dc, size.0, size.1).unwrap();
+                Self {
+                    dc,
+                    dib,
+                    old,
+                    bits,
+                    len: size.0 as usize * size.1 as usize,
+                }
+            }
+        }
+        fn pixels(&self) -> &[u32] {
+            unsafe { std::slice::from_raw_parts(self.bits, self.len) }
+        }
+        /// Comme `SoftRenderer::present`, mais vers cette fausse fenêtre.
+        fn present(&self, r: &mut SoftRenderer) {
+            let bands = r.blit_bands();
+            r.bands.clear();
+            r.shift_region = None;
+            r.blit_to_dc(self.dc, &bands).unwrap();
+        }
+    }
+
+    impl Drop for FakeWindow {
+        fn drop(&mut self) {
+            unsafe {
+                SelectObject(self.dc, self.old);
+                let _ = DeleteObject(self.dib.into());
+                let _ = DeleteDC(self.dc);
+            }
+        }
+    }
+
+    /// Ce que reçoit la fenêtre (bandes recopiées image après image) doit toujours être
+    /// identique à la DIB, y compris après un défilement : les pixels déplacés dans la DIB
+    /// doivent être recopiés eux aussi.
+    #[test]
+    fn la_fenetre_recoit_tout_ce_qui_change_dans_la_dib() {
+        let mut r = renderer();
+        let window = FakeWindow::new(r.size());
+        r.set_tabs(&[tab("a.rs", false, true), tab("b.rs", true, false)]);
+        let n = r.metrics().rows_for(300);
+        let mut first = 40usize;
+        let mut state = Rows::new(lines(first, n), Some((3, 1)), None);
+        r.draw(&state, 0).unwrap();
+        window.present(&mut r);
+        assert!(window.pixels() == r.pixels(), "image initiale");
+
+        for step in 0..60 {
+            let mut scrolled = 0isize;
+            match step % 6 {
+                0 => {
+                    first += 3;
+                    state.set_texts(lines(first, n));
+                    scrolled = 3;
+                }
+                1 => state.texts[4].push('z'),
+                2 => {
+                    first -= 2;
+                    state.set_texts(lines(first, n));
+                    scrolled = -2;
+                }
+                3 => state.set_caret(Some((step % n, 2))),
+                4 => {
+                    first += 1;
+                    state.set_texts(lines(first, n));
+                    scrolled = 1;
+                }
+                _ => {}
+            }
+            let ov = (step % 12 >= 8).then(|| overlay(1, "ab", 3));
+            r.set_overlay(ov.as_ref());
+            r.draw(&state, scrolled).unwrap();
+            window.present(&mut r);
+            assert!(
+                window.pixels() == r.pixels(),
+                "la fenêtre diffère de la DIB à l'étape {step} (défilement {scrolled})"
+            );
+        }
+    }
+
+    /// Coût réel d'une image de défilement (dessin + copie de la zone déplacée) sur une cible
+    /// qui n'est pas rognée par l'écran. Mesure, pas test : `cargo test -p paulwrite-render
+    /// mesure_defilement -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure"]
+    fn mesure_defilement() {
+        for size in [(1100u32, 720u32), (1920, 1080), (3840, 2160)] {
+            let mut r = SoftRenderer::new(1.0, size, Colors::default()).unwrap();
+            let window = FakeWindow::new(size);
+            r.set_tabs(&[tab("a.rs", false, true)]);
+            let n = r.metrics().rows_for(size.1);
+            let mut first = 5000usize;
+            let mut state = Rows::new(lines(first, n), None, None);
+            r.draw(&state, 0).unwrap();
+            window.present(&mut r);
+            let mut times = Vec::new();
+            for step in 0..200 {
+                let d: isize = if step % 2 == 0 { 3 } else { -3 };
+                first = (first as isize + d) as usize;
+                state.set_texts(lines(first, n));
+                let t = std::time::Instant::now();
+                r.draw(&state, d).unwrap();
+                window.present(&mut r);
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            println!(
+                "{}x{} : défilement de 3 lignes, dessin + copie : p50 {:.2} ms | p95 {:.2} | max {:.2}",
+                size.0,
+                size.1,
+                times[times.len() / 2],
+                times[times.len() * 95 / 100],
+                times[times.len() - 1]
+            );
+        }
     }
 }

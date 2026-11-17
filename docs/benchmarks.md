@@ -247,3 +247,31 @@ montre les résultats **à jour** de cette frappe (le classement de nucleo est t
   le panneau (seule la validation est prise en compte), clic de souris dans le panneau (zones de
   clic testées, pas essayées à la main), comportement sur plusieurs écrans. Les mesures utilisent
   des frappes simulées.
+
+## Correction : défilement (bug de l'étape 2 trouvé à l'étape 4)
+
+**Bug** : après un défilement, le milieu de la fenêtre gardait l'ancien texte pendant que le haut et
+le bas changeaient. Le rendu déplace les pixels déjà dessinés dans l'image en mémoire (rapide), mais
+la copie vers la fenêtre ne portait que sur les lignes *redessinées* : la zone déplacée n'était
+jamais recopiée. Corrigé (la zone déplacée fait maintenant partie de la copie). Les tests de
+l'étape 2 comparaient l'image en mémoire avec un redessin complet, jamais ce que reçoit la
+fenêtre : un nouveau test simule la fenêtre (cible mémoire) et vérifie qu'elle reste identique à
+l'image en mémoire après défilements, frappes, panneau et changements d'onglet. Il échoue sans la
+correction (vérifié).
+
+**Mesures corrigées.** Les « 0,9 ms par image » des étapes 2 à 4 venaient d'une fenêtre hors écran,
+où Windows rogne la copie, et ne comptaient pas la copie de la zone déplacée : elles étaient trop
+optimistes. Coût réel d'une image de défilement de 3 lignes (dessin + déplacement + copie de toute la
+zone) sur une cible non rognée (`cargo test --release -p paulwrite-render mesure_defilement --
+--ignored --nocapture`) :
+
+| Fenêtre | p50 | p95 | max | Verdict |
+|---|---|---|---|---|
+| 1100×720 | 0,8 ms | 1,5 ms | 2,3 ms | fluide |
+| 1920×1080 | 5,9 ms | 12,1 ms | 16,3 ms | fluide en général, quelques images à la limite de 16 ms |
+| 3840×2160 | 16,5 ms | 21,3 ms | 29,2 ms | **pas fluide à 60 images/s** |
+
+La copie de la surface entière (deux fois : décalage dans l'image en mémoire, puis envoi à la
+fenêtre) est limitée par la bande passante mémoire : 33 Mo par copie en 4K. Pistes si cela devient
+un cas d'usage : défilement par le GPU (swap chain, voir `rendering.md`), ou ne déplacer que la
+zone visible utile. Aucune n'est entreprise sans votre avis.

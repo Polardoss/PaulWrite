@@ -85,8 +85,8 @@ Décomposition : 25 à 47 ms avant `main` (chargeur Windows) ; création d'une f
 - **Piège de performance** : `ID2D1DCRenderTarget::BindDC` et `EndDraw` copient toute la zone liée. Il
   faut lier **uniquement la bande modifiée** (coordonnées relatives à son haut) : lier l'écran entier
   coûtait ~5 ms pour une seule ligne.
-- **Défilement en 4K** : 10 ms par image en logiciel (copie de ~33 Mo par image), donc pas à 60 fps
-  constants. Si cela gêne, basculer sur le GPU en arrière-plan (piste ci-dessus).
+- **Défilement en grand écran** : 5,9 ms par image en 1920×1080 et 16,5 ms en 4K en logiciel (copie de
+  la zone déplacée, mesure corrigée à l'étape 4, voir `benchmarks.md`), donc pas à 60 fps constants en 4K. Si cela gêne, basculer sur le GPU en arrière-plan (piste ci-dessus).
 - Le prototype ne gère pas `WM_PAINT` (fenêtre découverte) : l'application réelle doit recopier la DIB
   entière dans ce cas.
 - Vsync / latence avec cadencement réaliste non mesurés ; mesure unique avec vsync, artificielle
