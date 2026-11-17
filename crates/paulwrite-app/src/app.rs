@@ -16,8 +16,7 @@ use crossbeam_channel::Sender;
 use paulwrite_lsp as lsp;
 use paulwrite_plugins as plugins;
 use paulwrite_render::{
-    platform, since_process_start, Colors, Overlay, OverlayRow, OverlayRowKind, SoftRenderer,
-    TabInfo,
+    platform, since_process_start, Chrome, Colors, SoftRenderer, StripHit, TabButton, TabInfo,
 };
 use paulwrite_search::{self as search, FuzzyFinder, IndexOptions, SearchOptions, TextQuery};
 use paulwrite_syntax::{self as syntax, Language};
@@ -74,6 +73,8 @@ pub enum UserEvent {
     Plugin(plugins::Response),
     /// Événement d'un serveur de langage (diagnostics, résultat de complétion…).
     Lsp(lsp::Event),
+    /// Étape d'une capture d'écran (`--screenshot`).
+    Screenshot(u8),
 }
 
 /// Mode de mesure.
@@ -110,6 +111,9 @@ pub struct Options {
     pub bench_out: Option<PathBuf>,
     /// Argument d'un mode de mesure (texte recherché par `--bench-palette-search`).
     pub bench_arg: Option<String>,
+    /// Écrit une capture PNG de la fenêtre (hors écran) puis quitte : contrôle visuel du rendu.
+    /// `PAULWRITE_SCREENSHOT_PALETTE=files|commands` ouvre le panneau avant la capture.
+    pub screenshot: Option<PathBuf>,
 }
 
 impl Options {
@@ -144,6 +148,11 @@ impl Options {
                 "--bench-palette-search" => {
                     o.bench = Some(BenchKind::PaletteSearch);
                     o.bench_arg = Some(it.next().ok_or("--bench-palette-search attend un texte")?);
+                }
+                "--screenshot" => {
+                    o.screenshot = Some(PathBuf::from(
+                        it.next().ok_or("--screenshot attend un chemin")?,
+                    ));
                 }
                 "--bench-out" => {
                     o.bench_out = Some(PathBuf::from(
@@ -316,6 +325,10 @@ struct App {
     lsp_latency: Samples,
     lsp_req_at: Option<Instant>,
     bench_keys: usize,
+    /// Texte de la barre d'état, reconstruit à chaque image (tampon réutilisé).
+    status_buf: String,
+    /// Glissement en cours dans la zone de droite : `true` barre de défilement, `false` minimap.
+    strip_drag: Option<bool>,
 
     palette: Option<PaletteState>,
     /// Le contenu du panneau a changé : à renvoyer au moteur de rendu.
@@ -398,6 +411,8 @@ impl App {
             lsp_latency: Samples::default(),
             lsp_req_at: None,
             bench_keys: 0,
+            status_buf: String::new(),
+            strip_drag: None,
             palette: None,
             overlay_dirty: false,
             palette_query_at: None,
@@ -962,6 +977,26 @@ impl App {
         self.request_redraw();
     }
 
+    /// Liste des onglets ouverts (flèche à droite de la barre d'onglets).
+    fn open_tab_list(&mut self) {
+        let items: Vec<Item> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| Item {
+                label: t.label(),
+                detail: String::new(),
+                highlights: Vec::new(),
+                target: Target::Tab(i),
+            })
+            .collect();
+        self.open_list_palette(PaletteMode::Tabs, items, String::new());
+        if let Some(st) = self.palette.as_mut() {
+            st.palette
+                .select_visible(self.active.min(crate::palette::MAX_VISIBLE - 1));
+        }
+    }
+
     /// Liste des diagnostics du document courant.
     fn open_diagnostics(&mut self) {
         let mut diags = self.tabs[self.active].diagnostics.clone();
@@ -1317,6 +1352,7 @@ impl App {
             | PaletteMode::Completion
             | PaletteMode::Diagnostics
             | PaletteMode::Locations
+            | PaletteMode::Tabs
             | PaletteMode::Hover => {}
             PaletteMode::Search => {
                 st.palette.set_note(format!(
@@ -1430,6 +1466,7 @@ impl App {
             PaletteMode::Search
             | PaletteMode::Diagnostics
             | PaletteMode::Locations
+            | PaletteMode::Tabs
             | PaletteMode::Hover => true,
         };
         self.overlay_dirty = true;
@@ -1459,7 +1496,10 @@ impl App {
                 self.note_settled(settled);
             }
             PaletteMode::Search => self.start_search(query),
-            PaletteMode::Diagnostics | PaletteMode::Locations | PaletteMode::Hover => {}
+            PaletteMode::Diagnostics
+            | PaletteMode::Locations
+            | PaletteMode::Tabs
+            | PaletteMode::Hover => {}
         }
         self.overlay_dirty = true;
     }
@@ -1574,6 +1614,7 @@ impl App {
                 self.request_redraw();
             }
             Target::Nothing => {}
+            Target::Tab(i) => self.activate(i),
         }
     }
 
@@ -1712,29 +1753,8 @@ impl App {
                 let overlay = st.palette.to_overlay(r.overlay_columns());
                 r.set_overlay(Some(&overlay));
             }
-            None => match &self.toast {
-                Some((text, _)) => {
-                    let cols = r.overlay_columns();
-                    let first = text.lines().next().unwrap_or("");
-                    let shown: String = if first.chars().count() > cols {
-                        first
-                            .chars()
-                            .take(cols.saturating_sub(1))
-                            .chain(std::iter::once('\u{2026}'))
-                            .collect()
-                    } else {
-                        first.to_owned()
-                    };
-                    r.set_overlay(Some(&Overlay {
-                        rows: vec![OverlayRow {
-                            kind: OverlayRowKind::Note,
-                            text: shown,
-                            ..OverlayRow::default()
-                        }],
-                    }));
-                }
-                None => r.set_overlay(None),
-            },
+            // Les messages brefs s'affichent dans la barre d'état (voir `refresh_chrome`).
+            None => r.set_overlay(None),
         }
     }
 
@@ -1772,12 +1792,43 @@ impl App {
         ed!(self).mark_drawn();
     }
 
+    /// Gouttière, barre d'état, minimap et barre de défilement de l'onglet actif.
+    fn refresh_chrome(&mut self) {
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        let tab = &self.tabs[self.active];
+        self.status_buf.clear();
+        match &self.toast {
+            Some((text, _)) => self
+                .status_buf
+                .push_str(text.lines().next().unwrap_or_default()),
+            None => tab.editor.write_status(&mut self.status_buf),
+        }
+        let language = tab.language.map_or("Plain Text", |l| l.display_name());
+        r.set_chrome(&Chrome {
+            line_digits: tab.editor.line_digits(),
+            status_left: &self.status_buf,
+            status_right: &["Tab Size: 4", language],
+            scroll: Some(tab.editor.scroll()),
+        });
+        if let Err(e) = r.set_minimap(&tab.editor.minimap(), tab.editor.revision()) {
+            eprintln!("minimap : {e}");
+        }
+        // La gouttière ou la barre d'état peuvent changer le nombre de rangées visibles.
+        let rows = r.metrics().rows_for(r.size().1);
+        if rows != self.tabs[self.active].editor.rows() {
+            self.tabs[self.active].editor.set_viewport_rows(rows);
+        }
+    }
+
     fn redraw(&mut self, el: &ActiveEventLoop) {
         let started = Instant::now();
         self.sync_syntax();
         self.sync_lsp();
         self.refresh_tabs();
         self.refresh_overlay();
+        self.refresh_chrome();
         self.draw();
         if let Some(r) = self.renderer.as_mut() {
             let result = if self.full_present {
@@ -1920,6 +1971,74 @@ impl App {
         if let Some(effect) = ed!(self).execute(cmd, now) {
             self.run_effect(effect, el);
         }
+    }
+
+    /// Capture d'écran : au bout d'un instant (lecture du fichier, coloration), ouvre le panneau
+    /// demandé, puis écrit l'image de la fenêtre et quitte.
+    fn screenshot_step(&mut self, step: u8, el: &ActiveEventLoop) {
+        let proxy = self.proxy.clone();
+        let later = move |ms: u64, step: u8| {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(ms));
+                let _ = proxy.send_event(UserEvent::Screenshot(step));
+            });
+        };
+        if step == 0 {
+            match std::env::var("PAULWRITE_SCREENSHOT_PALETTE").as_deref() {
+                Ok("files") => self.open_palette(PaletteMode::Files),
+                Ok("commands") => self.open_palette(PaletteMode::Commands),
+                _ => {}
+            }
+            later(800, 1);
+            return;
+        }
+        self.redraw(el);
+        if let (Some(path), Some(r)) = (&self.opts.screenshot, self.renderer.as_ref()) {
+            let (w, h) = r.size();
+            if let Err(e) = paulwrite_render::write_png(path, w, h, r.pixels()) {
+                eprintln!("capture : {e}");
+            }
+        }
+        el.exit();
+    }
+
+    /// Fait défiler le document d'après un clic dans la minimap ou la barre de défilement.
+    fn strip_apply(&mut self, hit: StripHit) {
+        match hit {
+            StripHit::Minimap { line } => ed!(self).scroll_to_center(line),
+            StripHit::Scrollbar { fraction } => ed!(self).scroll_to_fraction(fraction),
+        }
+        self.touch(Instant::now());
+    }
+
+    /// Glissement dans la zone de droite : seule l'ordonnée de la souris compte.
+    fn strip_scroll(&mut self, scrollbar: bool) {
+        let Some(r) = self.renderer.as_ref() else {
+            return;
+        };
+        let m = r.metrics();
+        let w = r.size().0 as f32;
+        let x = if scrollbar {
+            w - 1.0
+        } else {
+            w - m.minimap as f32 + 1.0
+        };
+        let bottom = (r.size().1 as i32 - m.status_bar) as f32;
+        let y = (self.mouse.y as f32).clamp(m.top as f32, bottom - 1.0);
+        if let Some(hit) = r.strip_hit(x, y) {
+            self.strip_apply(hit);
+        }
+    }
+
+    /// Clic dans la gouttière : sélectionne la ligne.
+    fn select_row_at_mouse(&mut self) {
+        let Some(r) = self.renderer.as_ref() else {
+            return;
+        };
+        let m = r.metrics();
+        let row = ((self.mouse.y as i32 - m.top).max(0) / m.line_height.max(1)) as usize;
+        let row = row.min(ed!(self).rows().saturating_sub(1));
+        ed!(self).select_row(row);
     }
 
     /// Place le curseur sous la souris (clic ou glissement).
@@ -2189,7 +2308,9 @@ impl ApplicationHandler<UserEvent> for App {
         );
         // `PAULWRITE_OFFSCREEN=1` : fenêtre hors de l'écran et sans focus, pour les tests
         // automatiques qui envoient des messages Windows à la fenêtre (aucune gêne pour l'utilisateur).
-        let offscreen = bench_offscreen || std::env::var_os("PAULWRITE_OFFSCREEN").is_some();
+        let offscreen = bench_offscreen
+            || self.opts.screenshot.is_some()
+            || std::env::var_os("PAULWRITE_OFFSCREEN").is_some();
         let mut attrs = Window::default_attributes()
             .with_title(ed!(self).title())
             .with_inner_size(LogicalSize::new(1100.0, 720.0))
@@ -2217,6 +2338,13 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window.clone());
         // Barre d'onglets : fixe la zone des rangées avant la première image.
         self.refresh_tabs();
+        if self.opts.screenshot.is_some() {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                let _ = proxy.send_event(UserEvent::Screenshot(0));
+            });
+        }
 
         match self.opts.bench {
             Some(BenchKind::Typing(_) | BenchKind::Scroll(_)) => {
@@ -2319,6 +2447,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::BenchDone => self.finish_bench(el),
             UserEvent::Lsp(event) => self.on_lsp_event(event),
+            UserEvent::Screenshot(step) => self.screenshot_step(step, el),
             UserEvent::Plugin(resp) => match resp {
                 plugins::Response::Loaded(report) => {
                     self.plugin_commands = report.commands.clone();
@@ -2694,7 +2823,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = position;
-                if self.dragging {
+                if let Some(scrollbar) = self.strip_drag {
+                    self.strip_scroll(scrollbar);
+                } else if self.dragging {
                     self.mouse_to_caret(true);
                     self.touch(Instant::now());
                 }
@@ -2727,17 +2858,49 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                let hit = self.renderer.as_ref().and_then(|r| r.tab_at(x, y));
-                let in_bar = self
-                    .renderer
-                    .as_ref()
-                    .is_some_and(|r| (self.mouse.y as i32) < r.metrics().top);
-                match (button, hit) {
-                    (MouseButton::Left, Some((i, true))) | (MouseButton::Middle, Some((i, _))) => {
-                        self.close_tab(i);
+                let (hit, tab_button, strip, area) = match self.renderer.as_ref() {
+                    Some(r) => {
+                        let m = r.metrics();
+                        let bottom = r.size().1 as i32 - m.status_bar;
+                        (
+                            r.tab_at(x, y),
+                            r.tab_button_at(x, y),
+                            r.strip_hit(x, y),
+                            // zone des rangées : (gouttière ?, à l'intérieur ?)
+                            Some((
+                                x < m.gutter as f32,
+                                (self.mouse.y as i32) >= m.top && (self.mouse.y as i32) < bottom,
+                            )),
+                        )
                     }
-                    (MouseButton::Left, Some((i, false))) => self.activate(i),
-                    (MouseButton::Left, None) if !in_bar => {
+                    None => (None, None, None, None),
+                };
+                let in_rows = area.is_some_and(|(_, inside)| inside);
+                let in_gutter = area.is_some_and(|(gutter, _)| gutter);
+                match (button, hit, tab_button, strip) {
+                    (MouseButton::Left, _, Some(b), _) => match b {
+                        TabButton::Previous => {
+                            self.activate((self.active + self.tabs.len() - 1) % self.tabs.len());
+                        }
+                        TabButton::Next => self.activate((self.active + 1) % self.tabs.len()),
+                        TabButton::New => {
+                            let i = self.push_tab();
+                            self.activate(i);
+                        }
+                        TabButton::List => self.open_tab_list(),
+                    },
+                    (MouseButton::Left, Some((i, true)), _, _)
+                    | (MouseButton::Middle, Some((i, _)), _, _) => self.close_tab(i),
+                    (MouseButton::Left, Some((i, false)), _, _) => self.activate(i),
+                    (MouseButton::Left, None, None, Some(hit)) => {
+                        self.strip_drag = Some(matches!(hit, StripHit::Scrollbar { .. }));
+                        self.strip_apply(hit);
+                    }
+                    (MouseButton::Left, None, None, None) if in_rows && in_gutter => {
+                        self.select_row_at_mouse();
+                        self.touch(Instant::now());
+                    }
+                    (MouseButton::Left, None, None, None) if in_rows => {
                         self.dragging = true;
                         self.mouse_to_caret(self.mods.shift_key());
                         self.touch(Instant::now());
@@ -2749,7 +2912,10 @@ impl ApplicationHandler<UserEvent> for App {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
-            } => self.dragging = false,
+            } => {
+                self.dragging = false;
+                self.strip_drag = None;
+            }
             WindowEvent::DroppedFile(path) => self.open_path(path),
             _ => {}
         }

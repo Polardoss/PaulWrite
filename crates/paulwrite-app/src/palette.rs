@@ -29,6 +29,8 @@ pub enum PaletteMode {
     Locations,
     /// Texte de survol d'un serveur de langage (lecture seule).
     Hover,
+    /// Onglets ouverts (liste fixe : on choisit avec les flèches).
+    Tabs,
 }
 
 impl PaletteMode {
@@ -37,7 +39,10 @@ impl PaletteMode {
     pub fn is_static(self) -> bool {
         matches!(
             self,
-            PaletteMode::Diagnostics | PaletteMode::Locations | PaletteMode::Hover
+            PaletteMode::Diagnostics
+                | PaletteMode::Locations
+                | PaletteMode::Hover
+                | PaletteMode::Tabs
         )
     }
 }
@@ -47,13 +52,14 @@ impl PaletteMode {
     fn prompt(self) -> &'static str {
         match self {
             PaletteMode::Files => "",
-            PaletteMode::Commands => "> ",
+            PaletteMode::Commands => "",
             PaletteMode::GotoLine => ": ",
             PaletteMode::Search => "? ",
             PaletteMode::Completion => "",
             PaletteMode::Diagnostics => "Diagnostics",
             PaletteMode::Locations => "Définitions",
             PaletteMode::Hover => "Survol",
+            PaletteMode::Tabs => "Onglets ouverts",
         }
     }
 }
@@ -76,6 +82,8 @@ pub enum Target {
     Completion(String, usize),
     /// Rien à faire (ligne d'information, par exemple le texte d'un survol).
     Nothing,
+    /// Activer cet onglet (indice dans la liste des onglets).
+    Tab(usize),
 }
 
 /// Un résultat de la liste.
@@ -414,13 +422,6 @@ impl Palette {
             } else {
                 self.note.clone()
             }
-        } else if self.items.len() > MAX_VISIBLE {
-            let position = format!("{} / {}", self.selected + 1, self.items.len());
-            if self.note.is_empty() {
-                position
-            } else {
-                format!("{position} — {}", self.note)
-            }
         } else {
             self.note.clone()
         };
@@ -431,7 +432,12 @@ impl Palette {
                 ..OverlayRow::default()
             });
         }
-        Overlay { rows }
+        let scroll = (self.items.len() > MAX_VISIBLE).then_some((
+            self.offset,
+            MAX_VISIBLE,
+            self.items.len(),
+        ));
+        Overlay { rows, scroll }
     }
 }
 
@@ -648,8 +654,8 @@ mod tests {
         type_text(&mut p, "undo");
         let o = p.to_overlay(40);
         assert_eq!(o.rows[0].kind, OverlayRowKind::Input);
-        assert_eq!(o.rows[0].text, "> undo");
-        assert_eq!(o.rows[0].caret, Some(6));
+        assert_eq!(o.rows[0].text, "undo");
+        assert_eq!(o.rows[0].caret, Some(4));
         // sans résultat : message
         assert_eq!(o.rows.last().unwrap().text, "Aucun résultat");
 
@@ -665,7 +671,8 @@ mod tests {
         assert_eq!(o.rows[1].hint, "Ctrl+Z");
         assert_eq!(o.rows[1].highlights, vec![(0, 2)]);
         assert_eq!(o.rows[2].kind, OverlayRowKind::Item);
-        assert_eq!(o.rows.last().unwrap().text, "1 / 12 — 12 résultats");
+        assert_eq!(o.rows.last().unwrap().text, "12 résultats");
+        assert_eq!(o.scroll, Some((0, MAX_VISIBLE, 12)));
     }
 
     #[test]

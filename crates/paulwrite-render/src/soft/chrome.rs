@@ -1,0 +1,1009 @@
+//! L'interface autour du texte : barre d'onglets, gouttière, barre d'état, minimap, barre de
+//! défilement et panneau flottant (palette de commandes). Tout est dessiné par `SoftRenderer`
+//! dans la même DIB que le texte ; les coordonnées sont celles de la fenêtre (une translation
+//! de la cible Direct2D ramène à la bande en cours).
+
+use windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U;
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1Bitmap, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_PROPERTIES,
+    D2D1_ELLIPSE, D2D1_ROUNDED_RECT,
+};
+use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_RANGE};
+
+use super::*;
+
+// --- Types publics ---------------------------------------------------------------------------
+
+/// Position de la fenêtre de rangées dans le document, pour la barre de défilement et la minimap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scroll {
+    /// Première ligne visible.
+    pub first: usize,
+    /// Nombre de rangées visibles.
+    pub visible: usize,
+    /// Nombre de lignes du document.
+    pub total: usize,
+}
+
+/// État de l'interface fourni à chaque image.
+#[derive(Clone, Copy, Debug)]
+pub struct Chrome<'a> {
+    /// Nombre de chiffres du plus grand numéro de ligne (0 : pas de gouttière).
+    pub line_digits: usize,
+    /// Texte à gauche de la barre d'état (« Line 1, Column 1 »).
+    pub status_left: &'a str,
+    /// Textes à droite de la barre d'état, de gauche à droite (« Tab Size: 4 », « Rust »).
+    pub status_right: &'a [&'a str],
+    /// Position dans le document (`None` : ni minimap ni barre de défilement).
+    pub scroll: Option<Scroll>,
+}
+
+/// Source de texte de la minimap (tout le document, pas seulement les rangées visibles).
+pub trait MinimapSource {
+    /// Nombre de lignes du document.
+    fn len(&self) -> usize;
+    /// Texte de la ligne `index`, sans fin de ligne, copié dans `out` (vidé par l'appelant).
+    fn line(&self, index: usize, out: &mut String);
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Boutons de la barre d'onglets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabButton {
+    Previous,
+    Next,
+    New,
+    /// Liste des onglets ouverts (flèche en haut à droite).
+    List,
+}
+
+/// Ce que l'on touche dans la zone de droite.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StripHit {
+    /// La minimap, sur la ligne du document indiquée.
+    Minimap { line: usize },
+    /// La barre de défilement, à cette fraction (0..1) de sa hauteur.
+    Scrollbar { fraction: f32 },
+}
+
+// --- État interne ------------------------------------------------------------------------------
+
+#[derive(Default)]
+pub(super) struct Status {
+    pub digits: usize,
+    left: String,
+    right: Vec<String>,
+    pub scroll: Option<Scroll>,
+}
+
+pub(super) struct UiLayout {
+    layout: IDWriteTextLayout,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Default)]
+pub(super) struct MinimapState {
+    bitmap: Option<ID2D1Bitmap>,
+    key: Option<(u64, usize, usize, i32, i32)>,
+    /// Première ligne du document représentée en haut de la minimap.
+    first: usize,
+}
+
+#[derive(Clone, Copy)]
+enum UiFont {
+    Tab = 0,
+    Small = 1,
+    Panel = 2,
+}
+
+/// Sel pour que les mises en page de l'interface n'entrent pas en collision avec celles du texte.
+const UI_SALT: u64 = 0x9e37_79b9_7f4a_7c15;
+const MAX_UI_LAYOUTS: usize = 512;
+
+fn d2d_rect(l: f32, t: f32, r: f32, b: f32) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: l,
+        top: t,
+        right: r,
+        bottom: b,
+    }
+}
+
+impl SoftRenderer {
+    // --- Texte de l'interface ----------------------------------------------------------------
+
+    fn ui_layout(
+        &mut self,
+        text: &str,
+        font: UiFont,
+    ) -> Result<Option<(IDWriteTextLayout, f32, f32)>> {
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let key = hash_bytes(text.as_bytes()) ^ UI_SALT.wrapping_mul(font as u64 + 1);
+        if let Some(c) = self.ui_layouts.get(&key) {
+            return Ok(Some((c.layout.clone(), c.width, c.height)));
+        }
+        if self.ui_layouts.len() >= MAX_UI_LAYOUTS {
+            self.ui_layouts.clear();
+        }
+        let wide: Vec<u16> = displayed(text).encode_utf16().collect();
+        // SAFETY: création d'une mise en page DirectWrite à partir de données valides.
+        let (layout, m) = unsafe {
+            let layout =
+                self.dwrite
+                    .CreateTextLayout(&wide, &self.ui[font as usize], 1.0e6, 1000.0)?;
+            let mut m = DWRITE_TEXT_METRICS::default();
+            layout.GetMetrics(&mut m)?;
+            (layout, m)
+        };
+        self.ui_layouts.insert(
+            key,
+            UiLayout {
+                layout: layout.clone(),
+                width: m.width,
+                height: m.height,
+            },
+        );
+        Ok(Some((layout, m.width, m.height)))
+    }
+
+    /// Largeur d'un texte de l'interface.
+    fn ui_width(&mut self, text: &str, font: UiFont) -> Result<f32> {
+        Ok(self.ui_layout(text, font)?.map_or(0.0, |(_, w, _)| w))
+    }
+
+    /// Dessine un texte de l'interface centré verticalement dans `[top, bottom)` ; renvoie sa
+    /// largeur.
+    unsafe fn ui_text(
+        &mut self,
+        text: &str,
+        font: UiFont,
+        x: f32,
+        (top, bottom): (f32, f32),
+        brush: usize,
+    ) -> Result<f32> {
+        let Some((layout, width, height)) = self.ui_layout(text, font)? else {
+            return Ok(0.0);
+        };
+        self.rt.DrawTextLayout(
+            Vector2 {
+                X: x,
+                Y: top + ((bottom - top - height) / 2.0).floor(),
+            },
+            &layout,
+            &self.brushes[brush],
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        Ok(width)
+    }
+
+    // --- État fourni par l'application -------------------------------------------------------
+
+    /// Fournit la gouttière, la barre d'état et la position de défilement de cette image. Seules
+    /// les régions dont le contenu change sont redessinées.
+    pub fn set_chrome(&mut self, c: &Chrome<'_>) {
+        if self.status.left != c.status_left {
+            c.status_left.clone_into(&mut self.status.left);
+            self.status_clean = false;
+        }
+        if self.status.right.len() != c.status_right.len()
+            || self
+                .status
+                .right
+                .iter()
+                .zip(c.status_right)
+                .any(|(a, b)| a != b)
+        {
+            self.status.right = c.status_right.iter().map(|s| (*s).to_owned()).collect();
+            self.status_clean = false;
+        }
+        if self.status.scroll != c.scroll {
+            self.status.scroll = c.scroll;
+            self.strip_dirty = true;
+        }
+        self.status.digits = c.line_digits;
+        self.refresh_metrics();
+    }
+
+    // --- Barre d'onglets ---------------------------------------------------------------------
+
+    /// Définit les onglets affichés (liste vide : pas de barre). Un changement de contenu ne
+    /// redessine que la barre ; l'apparition ou la disparition de la barre décale les rangées
+    /// et force un redessin complet.
+    pub fn set_tabs(&mut self, tabs: &[TabInfo<'_>]) {
+        let entries: Vec<TabEntry> = tabs
+            .iter()
+            .map(|t| TabEntry {
+                label: t.label.to_owned(),
+                modified: t.modified,
+                active: t.active,
+            })
+            .collect();
+        if entries != self.tabs {
+            self.tabs = entries;
+            self.tabs_clean = false;
+        }
+        self.refresh_metrics();
+    }
+
+    /// Largeur réservée aux boutons à gauche des onglets.
+    fn tabs_left(&self) -> f32 {
+        (40.0 * self.scale).round()
+    }
+
+    /// Largeur réservée au bouton « + » à droite des onglets.
+    fn tabs_right(&self) -> f32 {
+        (56.0 * self.scale).round()
+    }
+
+    /// Géométrie des onglets : `(x0, x1)`. Chaque onglet a une largeur d'au moins 170 px logiques
+    /// (comme Sublime Text) qui grandit avec son libellé ; si tout ne tient pas, les onglets se
+    /// resserrent. Indépendante de la mesure du texte : elle sert aussi aux clics.
+    pub(super) fn tab_geometry(&self) -> Vec<(i32, i32)> {
+        let s = self.scale;
+        let wants: Vec<f32> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let chars = t.label.chars().count() as f32;
+                ((40.0 + chars * 6.6) * s).clamp(170.0 * s, 320.0 * s)
+            })
+            .collect();
+        let avail = (self.size.0 as f32 - self.tabs_left() - self.tabs_right()).max(1.0);
+        let total: f32 = wants.iter().sum();
+        let k = if total > avail { avail / total } else { 1.0 };
+        let mut x = self.tabs_left();
+        wants
+            .iter()
+            .map(|w| {
+                let x0 = x;
+                x += (w * k).floor();
+                (x0 as i32, x as i32)
+            })
+            .collect()
+    }
+
+    /// Onglet situé sous le point `(x, y)` (pixels de la zone cliente) et, si le point est sur la
+    /// croix/pastille de fermeture, `true`.
+    #[must_use]
+    pub fn tab_at(&self, x: f32, y: f32) -> Option<(usize, bool)> {
+        if self.tabs.is_empty() || y < 0.0 || y >= self.metrics.tab_bar as f32 {
+            return None;
+        }
+        let close = (26.0 * self.scale).round();
+        for (i, (x0, x1)) in self.tab_geometry().into_iter().enumerate() {
+            if x >= x0 as f32 && x < x1 as f32 {
+                return Some((i, x >= x1 as f32 - close));
+            }
+        }
+        None
+    }
+
+    /// Bouton de la barre d'onglets sous le point `(x, y)`.
+    #[must_use]
+    pub fn tab_button_at(&self, x: f32, y: f32) -> Option<TabButton> {
+        if self.tabs.is_empty() || y < 0.0 || y >= self.metrics.tab_bar as f32 {
+            return None;
+        }
+        let left = self.tabs_left();
+        let w = self.size.0 as f32;
+        if x < left {
+            return Some(if x < left / 2.0 {
+                TabButton::Previous
+            } else {
+                TabButton::Next
+            });
+        }
+        let s = self.scale;
+        if x >= w - 24.0 * s {
+            Some(TabButton::List)
+        } else if x >= w - 46.0 * s {
+            Some(TabButton::New)
+        } else {
+            None
+        }
+    }
+
+    /// Dessine la barre d'onglets (en entier ; la cible Direct2D rogne à la bande en cours).
+    pub(super) unsafe fn paint_tabs(&mut self, w: i32) -> Result<()> {
+        let s = self.scale;
+        let bar_h = self.metrics.tab_bar as f32;
+        self.rt.FillRectangle(
+            &d2d_rect(0.0, 0.0, w as f32, bar_h),
+            &self.brushes[BR_TAB_BAR],
+        );
+        // Boutons de défilement des onglets (triangles) à gauche.
+        let cy = (bar_h / 2.0).round();
+        let t = (4.5 * s).round().max(2.0);
+        for (cx, dir) in [(12.0 * s, -1.0_f32), (26.0 * s, 1.0)] {
+            self.triangle(cx.round(), cy, t, dir, BR_TAB_BUTTON);
+        }
+        let geometry = self.tab_geometry();
+        let radius = (4.0 * s).round();
+        let label_pad = (11.0 * s).round();
+        let close_w = (26.0 * s).round();
+        for (i, (x0, x1)) in geometry.iter().copied().enumerate() {
+            let tab = self.tabs[i].clone();
+            let (xf0, xf1) = (x0 as f32, x1 as f32);
+            if tab.active {
+                self.rt.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: d2d_rect(xf0, (s).round(), xf1, bar_h + radius),
+                        radiusX: radius,
+                        radiusY: radius,
+                    },
+                    &self.brushes[BR_BG],
+                );
+            }
+            let brush = if tab.active {
+                BR_TAB_TEXT_ACTIVE
+            } else {
+                BR_TAB_TEXT
+            };
+            // Libellé rogné à sa place.
+            let clip = d2d_rect(xf0 + label_pad, 0.0, xf1 - close_w, bar_h);
+            self.rt
+                .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            self.ui_text(
+                &tab.label,
+                UiFont::Tab,
+                xf0 + label_pad,
+                (0.0, bar_h),
+                brush,
+            )?;
+            self.rt.PopAxisAlignedClip();
+            // Pastille (modifié) ou croix (fermer).
+            let mx = xf1 - (14.0 * s).round();
+            if tab.modified {
+                self.rt.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 { X: mx, Y: cy },
+                        radiusX: 3.5 * s,
+                        radiusY: 3.5 * s,
+                    },
+                    &self.brushes[BR_TAB_BUTTON],
+                );
+            } else {
+                let a = 3.5 * s;
+                let width = (1.2 * s).max(1.0);
+                for (p0, p1) in [
+                    ((mx - a, cy - a), (mx + a, cy + a)),
+                    ((mx - a, cy + a), (mx + a, cy - a)),
+                ] {
+                    self.rt.DrawLine(
+                        Vector2 { X: p0.0, Y: p0.1 },
+                        Vector2 { X: p1.0, Y: p1.1 },
+                        &self.brushes[BR_TAB_CLOSE],
+                        width,
+                        None,
+                    );
+                }
+            }
+        }
+        // Bouton « + » et flèche de la liste des onglets, à droite.
+        let px = (w as f32 - 34.0 * s).round();
+        let a = (4.0 * s).round().max(2.0);
+        let width = (1.2 * s).max(1.0);
+        for (p0, p1) in [((px - a, cy), (px + a, cy)), ((px, cy - a), (px, cy + a))] {
+            self.rt.DrawLine(
+                Vector2 { X: p0.0, Y: p0.1 },
+                Vector2 { X: p1.0, Y: p1.1 },
+                &self.brushes[BR_TAB_BUTTON],
+                width,
+                None,
+            );
+        }
+        let ax = (w as f32 - 13.0 * s).round();
+        let half = (4.5 * s).round().max(2.0);
+        let rows = (half * 1.6) as i32;
+        for r in 0..=rows {
+            let len = half - r as f32 * half / (rows as f32 + 0.5);
+            self.rt.FillRectangle(
+                &d2d_rect(ax - len, cy - 2.0 + r as f32, ax + len, cy - 1.0 + r as f32),
+                &self.brushes[BR_TAB_BUTTON],
+            );
+        }
+        Ok(())
+    }
+
+    /// Triangle plein, pointe vers la gauche (`dir < 0`) ou la droite, centré en `(cx, cy)`.
+    unsafe fn triangle(&self, cx: f32, cy: f32, half: f32, dir: f32, brush: usize) {
+        // Dessin par rangées (1 px de haut) : de la base à la pointe.
+        let h = (half * 2.0) as i32;
+        for r in 0..=h {
+            let dy = r as f32 - half;
+            let len = (half - dy.abs()).max(0.0) + 1.0;
+            let (l, rr) = if dir > 0.0 {
+                (cx - half, cx - half + len)
+            } else {
+                (cx + half - len, cx + half)
+            };
+            self.rt.FillRectangle(
+                &d2d_rect(l, cy + dy, rr, cy + dy + 1.0),
+                &self.brushes[brush],
+            );
+        }
+    }
+
+    // --- Gouttière ---------------------------------------------------------------------------
+
+    /// Numéro de ligne (aligné à droite, avant l'espace des flèches de repli).
+    pub(super) unsafe fn paint_gutter(&mut self, row: &Row<'_>, y: f32, lh: f32) -> Result<()> {
+        let g = self.metrics.gutter as f32;
+        if g <= 0.0 {
+            return Ok(());
+        }
+        if row.current {
+            self.rt.FillRectangle(
+                &d2d_rect(0.0, y, g, y + lh),
+                &self.brushes[BR_GUTTER_CUR_BG],
+            );
+        }
+        if row.number == 0 {
+            return Ok(());
+        }
+        let text = row.number.to_string();
+        let width = text.len() as f32 * self.metrics.advance;
+        let x = g - (GUTTER_FOLD * self.scale).round() - width;
+        let hash = hash_bytes(text.as_bytes()) ^ UI_SALT;
+        if let Some((layout, _)) = self.layout_for(&text, hash)? {
+            let brush = if row.current {
+                BR_GUTTER_CUR_NUM
+            } else {
+                BR_GUTTER_NUM
+            };
+            self.rt.DrawTextLayout(
+                Vector2 { X: x, Y: y },
+                &layout,
+                &self.brushes[brush],
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+        }
+        Ok(())
+    }
+
+    /// Guides d'indentation : un trait pointillé à chaque multiple de 4 colonnes situé avant le
+    /// premier caractère de la ligne.
+    pub(super) unsafe fn paint_indent_guides(&self, text: &str, pad: f32, y: f32, lh: f32) {
+        let mut cols = 0usize;
+        for c in text.chars() {
+            match c {
+                ' ' => cols += 1,
+                '\t' => cols = (cols / 4 + 1) * 4,
+                _ => break,
+            }
+        }
+        let step = (2.0 * self.scale).round().max(2.0);
+        let mut k = 1;
+        while k * 4 < cols {
+            let x = (pad + (k * 4) as f32 * self.metrics.advance).round();
+            let mut yy = y;
+            while yy < y + lh {
+                self.rt.FillRectangle(
+                    &d2d_rect(x, yy, x + 1.0, (yy + 1.0).min(y + lh)),
+                    &self.brushes[BR_INDENT],
+                );
+                yy += step;
+            }
+            k += 1;
+        }
+    }
+
+    // --- Barre d'état ------------------------------------------------------------------------
+
+    /// Rectangle du bouton de barre latérale (icône à gauche de la barre d'état).
+    pub(super) unsafe fn paint_status(&mut self, w: i32, top: i32, bottom: i32) -> Result<()> {
+        let s = self.scale;
+        let (t, b) = (top as f32, bottom as f32);
+        self.rt
+            .FillRectangle(&d2d_rect(0.0, t, w as f32, b), &self.brushes[BR_STATUS_BG]);
+        // Icône : un cadre dont le tiers gauche est plein (afficher/masquer la barre latérale).
+        let (iw, ih) = ((15.0 * s).round(), (12.0 * s).round());
+        let ix = (8.0 * s).round();
+        let iy = (t + ((b - t - ih) / 2.0).floor()).round();
+        let line = s.round().max(1.0);
+        let icon = &self.brushes[BR_STATUS_ICON];
+        self.rt
+            .FillRectangle(&d2d_rect(ix, iy, ix + iw, iy + line), icon);
+        self.rt
+            .FillRectangle(&d2d_rect(ix, iy + ih - line, ix + iw, iy + ih), icon);
+        self.rt
+            .FillRectangle(&d2d_rect(ix, iy, ix + line, iy + ih), icon);
+        self.rt
+            .FillRectangle(&d2d_rect(ix + iw - line, iy, ix + iw, iy + ih), icon);
+        self.rt
+            .FillRectangle(&d2d_rect(ix, iy, ix + (6.0 * s).round(), iy + ih), icon);
+
+        let left = self.status.left.clone();
+        self.ui_text(
+            &left,
+            UiFont::Small,
+            (34.0 * s).round(),
+            (t, b),
+            BR_STATUS_TEXT,
+        )?;
+        // Éléments de droite : alignés à droite, séparés de 65 px.
+        let items = self.status.right.clone();
+        let mut x = w as f32 - (48.0 * s).round();
+        for text in items.iter().rev() {
+            let width = self.ui_width(text, UiFont::Small)?;
+            x -= width;
+            self.ui_text(text, UiFont::Small, x, (t, b), BR_STATUS_TEXT)?;
+            x -= (65.0 * s).round();
+        }
+        Ok(())
+    }
+
+    /// Le point est sur l'icône de la barre latérale (barre d'état, à gauche).
+    #[must_use]
+    pub fn status_sidebar_button_at(&self, x: f32, y: f32) -> bool {
+        let h = self.size.1 as f32;
+        y >= h - self.metrics.status_bar as f32 && x < (30.0 * self.scale).round()
+    }
+
+    // --- Minimap et barre de défilement ------------------------------------------------------
+
+    fn minimap_geometry(&self) -> Option<(i32, i32, i32, i32)> {
+        // (pitch, lignes visibles dans la minimap, largeur, hauteur)
+        let mm_w = self.minimap_width() as i32;
+        if self.status.scroll.is_none() || mm_w <= 0 {
+            return None;
+        }
+        let s = self.scale.round().max(1.0) as i32;
+        let area_h = self.size.1 as i32 - self.metrics.top - self.metrics.status_bar;
+        if area_h <= 0 {
+            return None;
+        }
+        let pitch = 2 * s;
+        Some((pitch, area_h / pitch, mm_w, area_h))
+    }
+
+    /// Reconstruit l'image de la minimap si le texte ou la position ont changé. Rapide (un
+    /// passage sur les lignes affichées) mais à n'appeler qu'une fois par image.
+    ///
+    /// # Errors
+    /// Échec Direct2D (création de l'image).
+    pub fn set_minimap(&mut self, src: &dyn MinimapSource, revision: u64) -> Result<()> {
+        let (Some((pitch, fit, mm_w, area_h)), Some(scroll)) =
+            (self.minimap_geometry(), self.status.scroll)
+        else {
+            self.minimap.bitmap = None;
+            self.minimap.key = None;
+            return Ok(());
+        };
+        let (pitch, fit) = (pitch as usize, fit as usize);
+        let total = src.len();
+        let first = if total <= fit {
+            0
+        } else {
+            let max_first = (total - fit) as f64;
+            let frac = scroll.first as f64 / total.saturating_sub(1).max(1) as f64;
+            (frac * max_first).round() as usize
+        };
+        let key = (revision, first, total, mm_w, area_h);
+        if self.minimap.key == Some(key) && self.minimap.bitmap.is_some() {
+            return Ok(());
+        }
+        let bg = argb(self.colors.background);
+        let mut text = self.colors.text;
+        for (t, b) in text.iter_mut().zip(self.colors.background) {
+            *t = *t * 0.38 + b * 0.62;
+        }
+        let fg = argb(text);
+        let (w, h) = (mm_w as usize, area_h as usize);
+        let mut pixels = vec![bg; w * h];
+        let s = self.scale.round().max(1.0) as usize;
+        let mut line = String::new();
+        for li in first..total.min(first + fit + 1) {
+            line.clear();
+            src.line(li, &mut line);
+            let y0 = (li - first) * pitch;
+            let mut col = 0usize;
+            'chars: for c in line.chars().take(600) {
+                match c {
+                    '\t' => col = (col / 4 + 1) * 4,
+                    c if c.is_whitespace() => col += 1,
+                    _ => {
+                        let x0 = col * s;
+                        if x0 >= w {
+                            break 'chars;
+                        }
+                        for dy in 0..pitch {
+                            let y = y0 + dy;
+                            if y >= h {
+                                break;
+                            }
+                            for dx in 0..s {
+                                if x0 + dx < w {
+                                    pixels[y * w + x0 + dx] = fg;
+                                }
+                            }
+                        }
+                        col += 1;
+                    }
+                }
+            }
+        }
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_IGNORE,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        // SAFETY: `pixels` contient `w * h` pixels de 32 bits, valides pendant l'appel (Direct2D
+        // copie les données).
+        let bitmap = unsafe {
+            self.rt.CreateBitmap(
+                D2D_SIZE_U {
+                    width: w as u32,
+                    height: h as u32,
+                },
+                Some(pixels.as_ptr().cast()),
+                (w * 4) as u32,
+                &props,
+            )?
+        };
+        self.minimap.bitmap = Some(bitmap);
+        self.minimap.key = Some(key);
+        self.minimap.first = first;
+        self.strip_dirty = true;
+        Ok(())
+    }
+
+    /// Zone de droite : minimap puis barre de défilement.
+    pub(super) unsafe fn paint_strip(
+        &mut self,
+        left: i32,
+        right: i32,
+        top: i32,
+        bottom: i32,
+    ) -> Result<()> {
+        let s = self.scale;
+        let (l, r, t, b) = (left as f32, right as f32, top as f32, bottom as f32);
+        self.rt
+            .FillRectangle(&d2d_rect(l, t, r, b), &self.brushes[BR_BG]);
+        if let (Some(bitmap), Some((_, _, mm_w, area_h))) =
+            (self.minimap.bitmap.clone(), self.minimap_geometry())
+        {
+            self.rt.DrawBitmap(
+                &bitmap,
+                Some(&d2d_rect(l, t, l + mm_w as f32, t + area_h as f32)),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                None,
+            );
+        }
+        if let Some((ty, th)) = self.thumb(top, bottom) {
+            let tx0 = r - (10.0 * s).round();
+            let tx1 = r - (2.0 * s).round();
+            let radius = (4.0 * s).round();
+            self.rt.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: d2d_rect(tx0, t, tx1, b),
+                    radiusX: radius,
+                    radiusY: radius,
+                },
+                &self.brushes[BR_SCROLL_TRACK],
+            );
+            self.rt.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: d2d_rect(tx0, ty, tx1, ty + th),
+                    radiusX: radius,
+                    radiusY: radius,
+                },
+                &self.brushes[BR_SCROLL_THUMB],
+            );
+        }
+        Ok(())
+    }
+
+    /// Ordonnée et hauteur du curseur de la barre de défilement. Le document peut défiler
+    /// jusqu'à sa dernière ligne en haut de la fenêtre : la plage est `total - 1 + visible`.
+    fn thumb(&self, top: i32, bottom: i32) -> Option<(f32, f32)> {
+        let sc = self.status.scroll?;
+        let track = (bottom - top) as f32;
+        if track <= 0.0 {
+            return None;
+        }
+        let range = (sc.total.saturating_sub(1) + sc.visible).max(1) as f32;
+        let min = (24.0 * self.scale).round();
+        let len = (track * sc.visible as f32 / range).clamp(min.min(track), track);
+        let pos = (track - len) * (sc.first as f32 / sc.total.saturating_sub(1).max(1) as f32);
+        Some((top as f32 + pos.round(), len.round()))
+    }
+
+    /// Minimap ou barre de défilement sous le point `(x, y)`.
+    #[must_use]
+    pub fn strip_hit(&self, x: f32, y: f32) -> Option<StripHit> {
+        let sc = self.status.scroll?;
+        let (ex1, w) = (
+            self.size.0 as i32 - self.metrics.minimap,
+            self.size.0 as f32,
+        );
+        let top = self.metrics.top as f32;
+        let bottom = (self.size.1 as i32 - self.metrics.status_bar) as f32;
+        if self.metrics.minimap == 0 || x < ex1 as f32 || y < top || y >= bottom {
+            return None;
+        }
+        if x >= w - (SCROLLBAR_W * self.scale).round() {
+            return Some(StripHit::Scrollbar {
+                fraction: ((y - top) / (bottom - top)).clamp(0.0, 1.0),
+            });
+        }
+        let (pitch, _, _, _) = self.minimap_geometry()?;
+        let line = self.minimap.first + ((y - top) as i32 / pitch) as usize;
+        Some(StripHit::Minimap {
+            line: line.min(sc.total.saturating_sub(1)),
+        })
+    }
+
+    // --- Panneau flottant --------------------------------------------------------------------
+
+    /// Affiche, remplace ou retire (`None`) le panneau flottant. Seules les rangées dont le
+    /// contenu change sont redessinées.
+    pub fn set_overlay(&mut self, overlay: Option<&Overlay>) {
+        match overlay {
+            Some(o) if self.overlay.as_ref() == Some(o) => {}
+            Some(o) => {
+                self.overlay_hashes = o.rows.iter().map(overlay_row_hash).collect();
+                self.overlay = Some(o.clone());
+            }
+            None => {
+                self.overlay = None;
+                self.overlay_hashes.clear();
+            }
+        }
+    }
+
+    /// `(largeur, marge, hauteur de la saisie, hauteur d'une rangée)` du panneau.
+    fn panel_metrics(&self) -> (f32, f32, f32, f32) {
+        let s = self.scale;
+        let w = self.size.0 as f32;
+        (
+            (600.0 * s).min(w - 20.0 * s).max(60.0 * s).round(),
+            (4.0 * s).round(),
+            (31.0 * s).round(),
+            (26.0 * s).round(),
+        )
+    }
+
+    /// Rectangle du panneau et rectangle de chacune de ses rangées (0 : saisie).
+    pub(super) fn panel_geometry(&self) -> Option<(Band, Vec<Band>)> {
+        let o = self.overlay.as_ref()?;
+        let (pw, m, input_h, row_h) = self.panel_metrics();
+        let x0 = ((self.size.0 as f32 - pw) / 2.0).floor();
+        let (l, r) = (x0 as i32, (x0 + pw) as i32);
+        let mut rows = Vec::with_capacity(o.rows.len());
+        let mut y = m;
+        for (i, _) in o.rows.iter().enumerate() {
+            let h = if i == 0 { input_h } else { row_h };
+            rows.push(Band {
+                left: l + m as i32,
+                right: r - m as i32,
+                top: y as i32,
+                bottom: (y + h) as i32,
+            });
+            y += h;
+            if i == 0 {
+                y += m;
+            }
+        }
+        let rect = Band {
+            left: l,
+            right: r,
+            top: 0,
+            bottom: (y + m) as i32,
+        };
+        Some((rect, rows))
+    }
+
+    /// Bandes à redessiner pour passer du panneau dessiné au panneau courant.
+    pub(super) fn overlay_bands(&mut self, now: Option<&(Band, Vec<Band>)>) {
+        match (self.drawn_overlay.as_ref(), now) {
+            (None, None) => {}
+            (Some((old, _)), None) => self.bands.push(*old),
+            (None, Some((rect, _))) => self.bands.push(*rect),
+            (Some((old, old_hashes)), Some((rect, rows))) => {
+                if old != rect || old_hashes.len() != self.overlay_hashes.len() {
+                    self.bands.push(*old);
+                    self.bands.push(*rect);
+                } else {
+                    for (i, band) in rows.iter().enumerate() {
+                        if old_hashes[i] != self.overlay_hashes[i] {
+                            self.bands.push(*band);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Nombre approximatif de caractères qui tiennent sur une rangée du panneau.
+    #[must_use]
+    pub fn overlay_columns(&self) -> usize {
+        let (pw, ..) = self.panel_metrics();
+        let inner = pw - 2.0 * (22.0 * self.scale);
+        (inner / (6.2 * self.scale)).floor().max(8.0) as usize
+    }
+
+    /// Rangée du panneau située sous le point `(x, y)` (pixels de la zone cliente), ou `None`
+    /// si le point est hors du panneau (ou s'il n'y en a pas). 0 : la ligne de saisie.
+    #[must_use]
+    pub fn overlay_row_at(&self, x: f32, y: f32) -> Option<usize> {
+        let (_, rows) = self.panel_geometry()?;
+        rows.iter().position(|b| {
+            x >= b.left as f32 && x < b.right as f32 && y >= b.top as f32 && y < b.bottom as f32
+        })
+    }
+
+    /// Dessine les rangées du panneau qui recouvrent la bande `band`.
+    pub(super) unsafe fn paint_overlay(&mut self, band: &Band) -> Result<()> {
+        let Some((rect, rows)) = self.panel_geometry() else {
+            return Ok(());
+        };
+        if !rect.intersects(band) {
+            return Ok(());
+        }
+        let Some(overlay) = self.overlay.clone() else {
+            return Ok(());
+        };
+        let s = self.scale;
+        let (px0, px1) = (rect.left as f32, rect.right as f32);
+        // Fond du panneau (marges comprises) ; la saisie et les rangées se dessinent par-dessus.
+        self.rt.FillRectangle(
+            &d2d_rect(px0, rect.top as f32, px1, rect.bottom as f32),
+            &self.brushes[BR_PANEL_BG],
+        );
+        let scrolled = overlay
+            .scroll
+            .filter(|&(_, visible, total)| total > visible && rows.len() > 1);
+        for (i, (row, geo)) in overlay.rows.iter().zip(&rows).enumerate() {
+            if !geo.intersects(band) {
+                continue;
+            }
+            let (x0, t, b) = (geo.left as f32, geo.top as f32, geo.bottom as f32);
+            // Une barre de défilement réduit la largeur des rangées de la liste.
+            let x1 = if i > 0 && scrolled.is_some() {
+                geo.right as f32 - (11.0 * s).round()
+            } else {
+                geo.right as f32
+            };
+            let clip = d2d_rect(x0, t, x1, b);
+            self.rt
+                .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            if i == 0 {
+                self.rt
+                    .FillRectangle(&d2d_rect(x0, t, x1, b), &self.brushes[BR_PANEL_INPUT]);
+                let tx = x0 + (6.0 * s).round();
+                let caret_x = self.panel_text(&row.text, tx, (t, b), BR_PANEL_TEXT, &[])?;
+                if let Some(c) = row.caret {
+                    let cx = tx + self.panel_caret_offset(&row.text, c)?;
+                    let _ = caret_x;
+                    self.rt.FillRectangle(
+                        &d2d_rect(
+                            cx,
+                            t + (6.0 * s).round(),
+                            cx + s.round().max(1.0),
+                            b - (6.0 * s).round(),
+                        ),
+                        &self.brushes[BR_PANEL_TEXT],
+                    );
+                }
+            } else {
+                if row.kind == OverlayRowKind::Selected {
+                    self.rt.FillRectangle(
+                        &d2d_rect(x0, t + s.round(), x1, b - s.round()),
+                        &self.brushes[BR_PANEL_SEL],
+                    );
+                }
+                let tx = x0 + (6.0 * s).round();
+                let brush = match row.kind {
+                    OverlayRowKind::Note => BR_PANEL_NOTE,
+                    OverlayRowKind::Selected => BR_PANEL_SEL_TEXT,
+                    _ => BR_PANEL_TEXT,
+                };
+                self.panel_text(&row.text, tx, (t, b), brush, &row.highlights)?;
+                if !row.hint.is_empty() {
+                    let width = self.ui_width(&row.hint, UiFont::Small)?;
+                    let hx = x1 - (10.0 * s).round() - width;
+                    self.ui_text(&row.hint, UiFont::Small, hx, (t, b), BR_PANEL_HINT)?;
+                }
+            }
+            self.rt.PopAxisAlignedClip();
+        }
+        // Barre de défilement de la liste.
+        if let Some((first, visible, total)) = scrolled {
+            let list_top = rows[1].top as f32;
+            let list_bottom = rows[rows.len() - 1].bottom as f32;
+            let track = list_bottom - list_top;
+            let len = (track * visible as f32 / total as f32)
+                .max(16.0 * s)
+                .min(track);
+            let pos = (track - len) * first as f32 / (total - visible).max(1) as f32;
+            let right = px1 - (4.0 * s).round();
+            self.rt.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: d2d_rect(
+                        right - (7.0 * s).round(),
+                        list_top + pos.round(),
+                        right,
+                        list_top + pos.round() + len.round(),
+                    ),
+                    radiusX: 3.0 * s,
+                    radiusY: 3.0 * s,
+                },
+                &self.brushes[BR_PANEL_THUMB],
+            );
+        }
+        Ok(())
+    }
+
+    /// Texte du panneau ; les plages `highlights` (UTF-16) sont soulignées et en gras. Renvoie
+    /// la largeur du texte.
+    unsafe fn panel_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        (top, bottom): (f32, f32),
+        brush: usize,
+        highlights: &[(usize, usize)],
+    ) -> Result<f32> {
+        if highlights.is_empty() {
+            return self.ui_text(text, UiFont::Panel, x, (top, bottom), brush);
+        }
+        // Mise en page propre à cette rangée (les attributs ne doivent pas fuir dans le cache).
+        let wide: Vec<u16> = displayed(text).encode_utf16().collect();
+        let layout =
+            self.dwrite
+                .CreateTextLayout(&wide, &self.ui[UiFont::Panel as usize], 1.0e6, 1000.0)?;
+        for &(a, b) in highlights {
+            let (a, b) = (a.min(wide.len()), b.min(wide.len()));
+            if a < b {
+                let range = DWRITE_TEXT_RANGE {
+                    startPosition: a as u32,
+                    length: (b - a) as u32,
+                };
+                layout.SetUnderline(true, range)?;
+                layout.SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, range)?;
+            }
+        }
+        let mut m = DWRITE_TEXT_METRICS::default();
+        layout.GetMetrics(&mut m)?;
+        self.rt.DrawTextLayout(
+            Vector2 {
+                X: x,
+                Y: top + ((bottom - top - m.height) / 2.0).floor(),
+            },
+            &layout,
+            &self.brushes[brush],
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        Ok(m.width)
+    }
+
+    /// Décalage horizontal de la position UTF-16 `caret` dans un texte du panneau.
+    unsafe fn panel_caret_offset(&mut self, text: &str, caret: usize) -> Result<f32> {
+        let Some((layout, units)) = self.ui_layout(text, UiFont::Panel)?.map(|(l, _, _)| {
+            let n = displayed(text).encode_utf16().count();
+            (l, n)
+        }) else {
+            return Ok(0.0);
+        };
+        let (mut x, mut y) = (0.0_f32, 0.0_f32);
+        let mut m = DWRITE_HIT_TEST_METRICS::default();
+        let _ = layout.HitTestTextPosition(caret.min(units) as u32, false, &mut x, &mut y, &mut m);
+        Ok(x)
+    }
+}
+
+/// Pixel opaque `0xAARRGGBB` d'une couleur.
+fn argb(c: [f32; 3]) -> u32 {
+    let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    0xFF00_0000 | (to(c[0]) << 16) | (to(c[1]) << 8) | to(c[2])
+}

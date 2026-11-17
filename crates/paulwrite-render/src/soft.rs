@@ -25,31 +25,92 @@ use windows::Win32::Graphics::Gdi::{
     SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
     SRCCOPY,
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
-/// Marge gauche du texte, en pixels logiques (multipliée par l'échelle DPI).
-const PAD_X: f32 = 8.0;
-/// Largeur maximale affichée d'une ligne, en unités UTF-16 (au-delà : tronquée à l'affichage
+/// Marge entre la gouttière et le texte, en pixels logiques (multipliée par l'échelle DPI).
+const TEXT_PAD: f32 = 6.0;
+/// Marge à gauche des numéros de ligne.
+const GUTTER_LEFT: f32 = 16.0;
+/// Espace à droite des numéros (réservé aux flèches de repli, comme Sublime Text).
+const GUTTER_FOLD: f32 = 19.0;
+/// Hauteur de la barre d'onglets et de la barre d'état, en pixels logiques.
+const TAB_BAR_H: f32 = 33.0;
+const STATUS_BAR_H: f32 = 25.0;
+/// Largeur de la barre de défilement (à l'extrême droite).
+const SCROLLBAR_W: f32 = 12.0;
+/// Largeur maximale d'une ligne affichée, en unités UTF-16 (au-delà : tronquée à l'affichage
 /// pour qu'une ligne de plusieurs Mo ne fige pas DirectWrite).
 const MAX_UNITS: usize = 8192;
 /// Nombre de mises en page conservées avant vidage du cache.
 const MAX_CACHED_LAYOUTS: usize = 1024;
-/// Largeur du texte de police : taille en pixels logiques.
+/// Taille de la police du texte, en pixels logiques.
 const FONT_PX: f32 = 15.0;
 
-/// Indices des pinceaux de la barre d'onglets (après texte, fond, sélection, curseur et les
-/// catégories de coloration).
-const BR_TABBAR: usize = 3 + KIND_SLOTS;
-const BR_TAB_DIM: usize = BR_TABBAR + 1;
-const BR_TAB_ACCENT: usize = BR_TABBAR + 2;
-/// Fond du panneau flottant (palette de commandes, Goto Anything).
-const BR_OVERLAY_BG: usize = BR_TABBAR + 3;
+mod chrome;
+pub use chrome::{Chrome, MinimapSource, Scroll, StripHit, TabButton};
+
+/// Pinceaux : 0 texte, 1 fond, 2 sélection, 3 curseur, puis `3 + catégorie` (1..`KIND_SLOTS`) ;
+/// ensuite ceux de l'interface (voir `CHROME_COLORS`), dans l'ordre.
+const BR_BG: usize = 1;
+const BR_CHROME: usize = 3 + KIND_SLOTS;
+const BR_TAB_BAR: usize = BR_CHROME;
+const BR_TAB_TEXT: usize = BR_CHROME + 1;
+const BR_TAB_TEXT_ACTIVE: usize = BR_CHROME + 2;
+const BR_TAB_BUTTON: usize = BR_CHROME + 3;
+const BR_TAB_CLOSE: usize = BR_CHROME + 4;
+const BR_GUTTER_NUM: usize = BR_CHROME + 5;
+const BR_GUTTER_CUR_BG: usize = BR_CHROME + 6;
+const BR_GUTTER_CUR_NUM: usize = BR_CHROME + 7;
+const BR_INDENT: usize = BR_CHROME + 8;
+const BR_STATUS_BG: usize = BR_CHROME + 9;
+const BR_STATUS_TEXT: usize = BR_CHROME + 10;
+const BR_STATUS_ICON: usize = BR_CHROME + 11;
+const BR_PANEL_INPUT: usize = BR_CHROME + 12;
+const BR_PANEL_BG: usize = BR_CHROME + 13;
+const BR_PANEL_SEL: usize = BR_CHROME + 14;
+const BR_PANEL_TEXT: usize = BR_CHROME + 15;
+const BR_PANEL_HINT: usize = BR_CHROME + 16;
+const BR_PANEL_NOTE: usize = BR_CHROME + 17;
+const BR_SCROLL_TRACK: usize = BR_CHROME + 18;
+const BR_SCROLL_THUMB: usize = BR_CHROME + 19;
 /// Soulignements des diagnostics : erreur, avertissement, information (3 pinceaux consécutifs).
-const BR_SQUIGGLE: usize = BR_TABBAR + 4;
-/// Index de la première rangée de l'éditeur recouverte par le panneau flottant.
-const OVERLAY_FIRST_ROW: usize = 1;
-/// Catégorie de coloration des caractères qui correspondent à la saisie dans le panneau.
-const OVERLAY_MATCH_KIND: u8 = 4;
+const BR_PANEL_SEL_TEXT: usize = BR_CHROME + 20;
+const BR_PANEL_THUMB: usize = BR_CHROME + 21;
+const BR_SQUIGGLE: usize = BR_CHROME + 22;
+
+/// Couleurs de l'interface (thème « Mariana » de Sublime Text, mesurées sur une capture), dans
+/// l'ordre des `BR_*` ci-dessus.
+const CHROME_COLORS: [[f32; 3]; 25] = [
+    rgb8(0x72, 0x78, 0x7e), // barre d'onglets
+    rgb8(0xc6, 0xc9, 0xcb), // onglet inactif : texte
+    rgb8(0xff, 0xff, 0xff), // onglet actif : texte
+    rgb8(0xc6, 0xc9, 0xcb), // boutons de la barre d'onglets
+    rgb8(0x8c, 0x91, 0x96), // croix de fermeture
+    rgb8(0x84, 0x8b, 0x95), // numéros de ligne
+    rgb8(0x4c, 0x58, 0x63), // gouttière : ligne du curseur (fond)
+    rgb8(0xc0, 0xc5, 0xce), // gouttière : ligne du curseur (numéro)
+    rgb8(0x3d, 0x46, 0x4f), // guides d'indentation
+    rgb8(0xc7, 0xcb, 0xd1), // barre d'état : fond
+    rgb8(0x40, 0x40, 0x40), // barre d'état : texte
+    rgb8(0x76, 0x79, 0x7c), // barre d'état : icône
+    rgb8(0xff, 0xff, 0xff), // panneau : saisie (fond)
+    rgb8(0xe3, 0xe5, 0xe8), // panneau : liste (fond)
+    rgb8(0xc7, 0xcb, 0xd1), // panneau : sélection
+    rgb8(0x44, 0x4b, 0x54), // panneau : texte
+    rgb8(0x44, 0x4b, 0x54), // panneau : raccourci
+    rgb8(0x6b, 0x72, 0x7a), // panneau : message
+    rgb8(0x44, 0x4b, 0x53), // barre de défilement : rail
+    rgb8(0x69, 0x6f, 0x75), // barre de défilement : curseur
+    rgb8(0x2d, 0x32, 0x39), // panneau : texte de la sélection
+    rgb8(0xb3, 0xb7, 0xbc), // panneau : barre de défilement
+    rgb8(0xec, 0x5f, 0x67), // erreur
+    rgb8(0xfa, 0xc8, 0x63), // avertissement
+    rgb8(0x66, 0x99, 0xcc), // information
+];
+
+const fn rgb8(r: u8, g: u8, b: u8) -> [f32; 3] {
+    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+}
 
 /// Couleurs (RGB, 0..1).
 #[derive(Clone, Copy, Debug)]
@@ -69,35 +130,35 @@ pub const KIND_SLOTS: usize = 16;
 impl Default for Colors {
     fn default() -> Self {
         Self {
-            background: [0.11, 0.12, 0.14],
-            text: [0.85, 0.86, 0.88],
-            selection: [0.22, 0.34, 0.55],
-            caret: [0.95, 0.95, 0.95],
+            background: rgb8(0x30, 0x38, 0x41),
+            text: rgb8(0xd8, 0xde, 0xe9),
+            selection: rgb8(0x4e, 0x5a, 0x65),
+            caret: rgb8(0xf9, 0xae, 0x58),
             kinds: DEFAULT_KINDS,
         }
     }
 }
 
-/// Palette par défaut (thème sombre). Ordre = catégories du crate `paulwrite-syntax` :
+/// Palette par défaut (thème « Mariana »). Ordre = catégories du crate `paulwrite-syntax` :
 /// 1 commentaire, 2 chaîne, 3 nombre, 4 mot-clé, 5 fonction, 6 type, 7 constante, 8 propriété,
 /// 9 opérateur, 10 ponctuation, 11 attribut/macro, 12 balise, 13 échappement, 14 prédéfini.
 const DEFAULT_KINDS: [[f32; 3]; KIND_SLOTS] = [
-    [0.85, 0.86, 0.88],
-    [0.42, 0.52, 0.40],
-    [0.81, 0.60, 0.47],
-    [0.71, 0.81, 0.66],
-    [0.34, 0.61, 0.84],
-    [0.86, 0.86, 0.67],
-    [0.31, 0.79, 0.69],
-    [0.31, 0.76, 1.00],
-    [0.61, 0.86, 1.00],
-    [0.85, 0.86, 0.88],
-    [0.62, 0.64, 0.68],
-    [0.77, 0.52, 0.75],
-    [0.34, 0.61, 0.84],
-    [0.84, 0.74, 0.40],
-    [0.34, 0.61, 0.84],
-    [0.85, 0.86, 0.88],
+    rgb8(0xd8, 0xde, 0xe9),
+    rgb8(0xa7, 0xad, 0xba),
+    rgb8(0x99, 0xc7, 0x94),
+    rgb8(0xf9, 0xae, 0x58),
+    rgb8(0xc6, 0x95, 0xc6),
+    rgb8(0x66, 0x99, 0xcc),
+    rgb8(0xfa, 0xc8, 0x63),
+    rgb8(0xec, 0x5f, 0x67),
+    rgb8(0xd8, 0xde, 0xe9),
+    rgb8(0xf9, 0x7b, 0x58),
+    rgb8(0xd8, 0xde, 0xe9),
+    rgb8(0x5f, 0xb3, 0xb3),
+    rgb8(0xec, 0x5f, 0x67),
+    rgb8(0x5f, 0xb3, 0xb3),
+    rgb8(0x66, 0x99, 0xcc),
+    rgb8(0xd8, 0xde, 0xe9),
 ];
 
 /// Dimensions d'un caractère à l'échelle courante, en pixels physiques.
@@ -107,19 +168,26 @@ pub struct Metrics {
     pub advance: f32,
     /// Hauteur d'une rangée.
     pub line_height: i32,
-    /// Décalage horizontal du texte (marge gauche).
+    /// Abscisse du texte (gouttière comprise) : le caractère 0 d'une rangée commence ici.
     pub pad_x: f32,
     /// Hauteur de la barre d'onglets lorsqu'elle est affichée.
     pub tab_bar: i32,
     /// Ordonnée de la première rangée : 0 sans onglets, `tab_bar` avec.
     pub top: i32,
+    /// Hauteur de la barre d'état (en bas).
+    pub status_bar: i32,
+    /// Largeur de la gouttière (numéros de ligne) ; 0 si elle est masquée.
+    pub gutter: i32,
+    /// Largeur de la zone de droite (minimap et barre de défilement) ; 0 si elle est masquée.
+    pub minimap: i32,
 }
 
 impl Metrics {
-    /// Nombre de rangées **entières** qui tiennent dans `height` pixels (sous la barre d'onglets).
+    /// Nombre de rangées **entières** qui tiennent dans `height` pixels (entre la barre d'onglets
+    /// et la barre d'état).
     #[must_use]
     pub fn rows_for(&self, height: u32) -> usize {
-        ((height as i32 - self.top).max(0) / self.line_height.max(1)) as usize
+        ((height as i32 - self.top - self.status_bar).max(0) / self.line_height.max(1)) as usize
     }
 }
 
@@ -165,6 +233,8 @@ pub struct OverlayRow {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Overlay {
     pub rows: Vec<OverlayRow>,
+    /// Barre de défilement de la liste : `(première rangée affichée, rangées affichées, total)`.
+    pub scroll: Option<(usize, usize, usize)>,
 }
 
 fn overlay_row_hash(r: &OverlayRow) -> u64 {
@@ -206,6 +276,10 @@ pub struct Row<'a> {
     /// Soulignements ondulés `(début, fin, gravité)` en UTF-16 : diagnostics d'un serveur de
     /// langage. Gravité : 0 erreur, 1 avertissement, 2 information.
     pub squiggles: &'a [(usize, usize, u8)],
+    /// Numéro de ligne affiché dans la gouttière (à partir de 1) ; 0 : aucun (au-delà de la fin).
+    pub number: u32,
+    /// Ligne du curseur principal : sa gouttière est mise en évidence.
+    pub current: bool,
 }
 
 /// Source des rangées visibles (évite d'allouer un tableau par image).
@@ -217,11 +291,34 @@ pub trait RowSource {
     }
 }
 
-/// Bande horizontale de pixels `[top, bottom)` redessinée.
+/// Rectangle de pixels `[left, right) x [top, bottom)` redessiné.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Band {
+    pub left: i32,
+    pub right: i32,
     pub top: i32,
     pub bottom: i32,
+}
+
+impl Band {
+    /// Bande pleine largeur.
+    #[must_use]
+    pub fn rows(top: i32, bottom: i32, width: i32) -> Self {
+        Self {
+            left: 0,
+            right: width,
+            top,
+            bottom,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.left >= self.right || self.top >= self.bottom
+    }
+
+    fn intersects(&self, o: &Band) -> bool {
+        self.left < o.right && o.left < self.right && self.top < o.bottom && o.top < self.bottom
+    }
 }
 
 /// Signature d'une rangée dessinée : si elle est identique, les pixels le sont aussi.
@@ -265,6 +362,8 @@ fn deco_hash(row: &Row<'_>) -> u64 {
         mix(b);
         mix(usize::from(k));
     }
+    mix(row.number as usize);
+    mix(usize::from(row.current));
     h
 }
 
@@ -312,7 +411,10 @@ pub struct SoftRenderer {
     rt: ID2D1DCRenderTarget,
     dwrite: IDWriteFactory,
     format: IDWriteTextFormat,
-    /// 0 : texte, 1 : fond, 2 : sélection, 3 : curseur.
+    /// Polices de l'interface (proportionnelles) : onglets, texte discret, panneau.
+    ui: [IDWriteTextFormat; 3],
+    ui_layouts: HashMap<u64, chrome::UiLayout>,
+    /// Voir `BR_*` pour l'ordre des pinceaux.
     brushes: Vec<ID2D1Brush>,
     layouts: HashMap<u64, CachedLayout>,
     // Régions sales
@@ -328,9 +430,17 @@ pub struct SoftRenderer {
     // Barre d'onglets
     tabs: Vec<TabEntry>,
     tabs_clean: bool,
+    // Gouttière, barre d'état
+    status: chrome::Status,
+    status_clean: bool,
+    // Minimap et barre de défilement (zone de droite)
+    minimap: chrome::MinimapState,
+    strip_dirty: bool,
     // Panneau flottant
     overlay: Option<Overlay>,
     overlay_hashes: Vec<u64>,
+    /// Ce qui est actuellement dessiné du panneau : rectangle et empreintes des rangées.
+    drawn_overlay: Option<(Band, Vec<u64>)>,
 }
 
 impl std::fmt::Debug for SoftRenderer {
@@ -377,9 +487,9 @@ impl SoftRenderer {
             let rt = factory.CreateDCRenderTarget(&props)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let (format, metrics) = make_format(&dwrite, scale)?;
+            let ui = make_ui_formats(&dwrite, scale)?;
 
-            // 0 texte, 1 fond, 2 sélection, 3 curseur, puis 3 + catégorie (1..KIND_SLOTS).
-            let mut brushes = Vec::with_capacity(6 + KIND_SLOTS);
+            let mut brushes = Vec::with_capacity(BR_SQUIGGLE + 3);
             for c in [
                 colors.text,
                 colors.background,
@@ -388,30 +498,14 @@ impl SoftRenderer {
             ]
             .into_iter()
             .chain(colors.kinds.iter().skip(1).copied())
+            .chain(CHROME_COLORS)
             {
                 brushes.push(
                     rt.CreateSolidColorBrush(&rgb(c), None)?
                         .cast::<ID2D1Brush>()?,
                 );
             }
-
-            // Barre d'onglets : fond, texte discret, accent.
-            let dim = |c: [f32; 3], k: f32| [c[0] * k, c[1] * k, c[2] * k];
-            let lift = |c: [f32; 3]| [c[0] + 0.07, c[1] + 0.07, c[2] + 0.07];
-            for c in [
-                dim(colors.background, 0.72),
-                dim(colors.text, 0.58),
-                colors.kinds[4],
-                lift(colors.background),
-                [0.93, 0.33, 0.33],
-                [0.90, 0.75, 0.30],
-                [0.35, 0.65, 0.95],
-            ] {
-                brushes.push(
-                    rt.CreateSolidColorBrush(&rgb(c), None)?
-                        .cast::<ID2D1Brush>()?,
-                );
-            }
+            debug_assert_eq!(brushes.len(), BR_SQUIGGLE + 3);
 
             let mem_dc = CreateCompatibleDC(None);
             let (dib, old, bits) = make_dib(mem_dc, size.0, size.1)?;
@@ -427,6 +521,8 @@ impl SoftRenderer {
                 rt,
                 dwrite,
                 format,
+                ui,
+                ui_layouts: HashMap::new(),
                 brushes,
                 layouts: HashMap::new(),
                 prev: Vec::new(),
@@ -437,8 +533,13 @@ impl SoftRenderer {
                 valid: false,
                 tabs: Vec::new(),
                 tabs_clean: false,
+                status: chrome::Status::default(),
+                status_clean: false,
+                minimap: chrome::MinimapState::default(),
+                strip_dirty: false,
                 overlay: None,
                 overlay_hashes: Vec::new(),
+                drawn_overlay: None,
             })
         }
     }
@@ -497,6 +598,8 @@ impl SoftRenderer {
         }
         self.size = size;
         self.valid = false;
+        self.minimap = chrome::MinimapState::default();
+        self.refresh_metrics();
         Ok(())
     }
 
@@ -510,16 +613,14 @@ impl SoftRenderer {
         }
         // SAFETY: création d'objets DirectWrite sur la fabrique possédée.
         let (format, metrics) = unsafe { make_format(&self.dwrite, scale)? };
+        self.ui = unsafe { make_ui_formats(&self.dwrite, scale)? };
         self.format = format;
         self.metrics = metrics;
         self.scale = scale;
-        // La hauteur de la barre d'onglets dépend de l'échelle.
-        self.metrics.top = if self.tabs.is_empty() {
-            0
-        } else {
-            self.metrics.tab_bar
-        };
+        self.refresh_metrics();
         self.layouts.clear();
+        self.ui_layouts.clear();
+        self.minimap = chrome::MinimapState::default();
         self.tabs_clean = false;
         self.valid = false;
         Ok(())
@@ -558,6 +659,55 @@ impl SoftRenderer {
         Ok(Some((layout, units)))
     }
 
+    /// Recalcule la géométrie qui dépend de l'état (barre d'onglets, gouttière, zone de droite) ;
+    /// un changement décale les rangées et force un redessin complet.
+    fn refresh_metrics(&mut self) {
+        let s = self.scale;
+        let top = if self.tabs.is_empty() {
+            0
+        } else {
+            self.metrics.tab_bar
+        };
+        let gutter = if self.status.digits == 0 {
+            0
+        } else {
+            (GUTTER_LEFT * s + self.status.digits as f32 * self.metrics.advance + GUTTER_FOLD * s)
+                .round() as i32
+        };
+        let minimap = if self.status.scroll.is_some() {
+            (SCROLLBAR_W * s + self.minimap_width()).round() as i32
+        } else {
+            0
+        };
+        let pad_x = gutter as f32 + (TEXT_PAD * s).round();
+        let m = &mut self.metrics;
+        if (m.top, m.gutter, m.minimap) != (top, gutter, minimap) || (m.pad_x - pad_x).abs() > 0.1 {
+            m.top = top;
+            m.gutter = gutter;
+            m.minimap = minimap;
+            m.pad_x = pad_x;
+            self.valid = false;
+        }
+    }
+
+    /// Largeur de la minimap (sans la barre de défilement) : ~8 % de la fenêtre, 150 px au plus,
+    /// absente dans une fenêtre étroite.
+    fn minimap_width(&self) -> f32 {
+        let s = self.scale;
+        let w = self.size.0 as f32;
+        if w < 560.0 * s {
+            0.0
+        } else {
+            (w * 0.078).clamp(60.0 * s, 150.0 * s).round()
+        }
+    }
+
+    /// Abscisses `[gauche, droite)` de la zone des rangées (entre le bord gauche et la zone de
+    /// droite).
+    fn editor_x(&self) -> (i32, i32) {
+        (0, self.size.0 as i32 - self.metrics.minimap)
+    }
+
     /// Redessine ce qui a changé. `scrolled_by` : de combien de rangées le contenu a défilé depuis
     /// la dernière image (positif : le texte monte, on voit des lignes plus basses). Une valeur
     /// fausse n'altère pas le résultat (les signatures sont revérifiées), elle coûte seulement du
@@ -573,27 +723,25 @@ impl SoftRenderer {
         let lh = self.metrics.line_height.max(1);
         let top = self.metrics.top;
         let rows = src.len().min(self.metrics.rows_for(self.size.1));
+        let (ex0, ex1) = self.editor_x();
+        let status_top = h - self.metrics.status_bar;
 
         self.cur.clear();
         for r in 0..rows {
             let row = src.row(r);
-            let mut deco = deco_hash(&row);
-            // Les rangées recouvertes par le panneau dépendent aussi de son contenu : elles sont
-            // redessinées (texte puis panneau par-dessus) quand l'un ou l'autre change.
-            if r >= OVERLAY_FIRST_ROW {
-                if let Some(h) = self.overlay_hashes.get(r - OVERLAY_FIRST_ROW) {
-                    deco ^= *h | 1;
-                }
-            }
             self.cur.push(Some(Sig {
                 hash: hash_bytes(row.text.as_bytes()),
-                deco,
+                deco: deco_hash(&row),
             }));
         }
         self.bands.clear();
 
+        // Décaler les pixels sous un panneau ouvert laisserait des résidus du panneau : redessin.
+        if scrolled_by != 0 && self.drawn_overlay.is_some() {
+            self.valid = false;
+        }
         if self.valid {
-            self.shift_for_scroll(scrolled_by, rows, w, lh, top)?;
+            self.shift_for_scroll(scrolled_by, rows, lh, top, (ex0, ex1))?;
         } else {
             self.prev.clear();
         }
@@ -604,12 +752,10 @@ impl SoftRenderer {
             self.dirty.push(!clean);
         }
 
+        let overlay_now = self.panel_geometry();
         if self.valid {
             if !self.tabs_clean && top > 0 {
-                self.bands.push(Band {
-                    top: 0,
-                    bottom: top,
-                });
+                self.bands.push(Band::rows(0, top, w));
             }
             let mut r = 0;
             while r < rows {
@@ -622,20 +768,37 @@ impl SoftRenderer {
                     r += 1;
                 }
                 self.bands.push(Band {
+                    left: ex0,
+                    right: ex1,
                     top: top + start as i32 * lh,
                     bottom: (top + r as i32 * lh).min(h),
                 });
             }
+            if self.strip_dirty && ex1 < w {
+                self.bands.push(Band {
+                    left: ex1,
+                    right: w,
+                    top,
+                    bottom: status_top,
+                });
+            }
+            if !self.status_clean && self.metrics.status_bar > 0 {
+                self.bands.push(Band::rows(status_top, h, w));
+            }
+            self.overlay_bands(overlay_now.as_ref());
         } else {
             // Redessin complet : tout l'écran, y compris la marge sous la dernière rangée.
-            self.bands.push(Band { top: 0, bottom: h });
+            self.bands.push(Band::rows(0, h, w));
         }
 
         let bands = std::mem::take(&mut self.bands);
-        let result = self.paint_bands(&bands, src, rows, w, lh);
+        let result = self.paint_bands(&bands, src, rows);
         self.bands = bands;
         result?;
         self.tabs_clean = true;
+        self.status_clean = true;
+        self.strip_dirty = false;
+        self.drawn_overlay = overlay_now.map(|(rect, _)| (rect, self.overlay_hashes.clone()));
 
         std::mem::swap(&mut self.prev, &mut self.cur);
         self.valid = true;
@@ -647,9 +810,9 @@ impl SoftRenderer {
         &mut self,
         scrolled_by: isize,
         rows: usize,
-        w: i32,
         lh: i32,
         top: i32,
+        (ex0, ex1): (i32, i32),
     ) -> Result<()> {
         let d = scrolled_by.unsigned_abs();
         if d == 0 || d >= rows.min(self.prev.len()) || self.prev.is_empty() {
@@ -657,7 +820,10 @@ impl SoftRenderer {
         }
         let dy = d as i32 * lh;
         let region = self.prev.len() as i32 * lh;
+        let width = ex1 - ex0;
         self.shift_region = Some(Band {
+            left: ex0,
+            right: ex1,
             top,
             bottom: (top + region).min(self.size.1 as i32),
         });
@@ -667,12 +833,12 @@ impl SoftRenderer {
             if scrolled_by > 0 {
                 BitBlt(
                     self.mem_dc,
-                    0,
+                    ex0,
                     top,
-                    w,
+                    width,
                     region - dy,
                     Some(self.mem_dc),
-                    0,
+                    ex0,
                     top + dy,
                     SRCCOPY,
                 )?;
@@ -680,12 +846,12 @@ impl SoftRenderer {
             } else {
                 BitBlt(
                     self.mem_dc,
-                    0,
+                    ex0,
                     top + dy,
-                    w,
+                    width,
                     region - dy,
                     Some(self.mem_dc),
-                    0,
+                    ex0,
                     top,
                     SRCCOPY,
                 )?;
@@ -695,388 +861,69 @@ impl SoftRenderer {
         Ok(())
     }
 
-    fn paint_bands(
-        &mut self,
-        bands: &[Band],
-        src: &dyn RowSource,
-        rows: usize,
-        w: i32,
-        lh: i32,
-    ) -> Result<()> {
+    /// Redessine chaque bande **entièrement** (toutes les couches qui la recouvrent) : une bande
+    /// ne dépend que de l'état courant, jamais de ce qui était dessiné avant.
+    fn paint_bands(&mut self, bands: &[Band], src: &dyn RowSource, rows: usize) -> Result<()> {
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let lh = self.metrics.line_height.max(1);
+        let top = self.metrics.top;
         let pad = self.metrics.pad_x;
-        let first_row_y = self.metrics.top;
-        for &Band {
-            top: bt,
-            bottom: bb,
-        } in bands
-        {
-            if bt >= bb {
+        let (_, ex1) = self.editor_x();
+        let status_top = h - self.metrics.status_bar;
+        for band in bands {
+            let b = Band {
+                left: band.left.max(0),
+                right: band.right.min(w),
+                top: band.top.max(0),
+                bottom: band.bottom.min(h),
+            };
+            if b.is_empty() {
                 continue;
             }
             // On ne lie à la cible Direct2D que la bande modifiée : `BindDC` et `EndDraw`
             // copient toute la zone liée (lier l'écran entier coûtait ~5 ms pour une ligne).
-            // Les coordonnées de dessin sont relatives au haut de la bande.
+            // Le dessin se fait en coordonnées de la fenêtre, une translation les ramène à la bande.
             let rect = RECT {
-                left: 0,
-                top: bt,
-                right: w,
-                bottom: bb,
+                left: b.left,
+                top: b.top,
+                right: b.right,
+                bottom: b.bottom,
             };
-            let band_h = (bb - bt) as f32;
             // SAFETY: appels Direct2D entre `BeginDraw` et `EndDraw` ; `rect` borne la DIB.
             unsafe {
                 self.rt.BindDC(self.mem_dc, &rect)?;
                 self.rt.BeginDraw();
+                self.rt
+                    .SetTransform(&Matrix3x2::translation(-(b.left as f32), -(b.top as f32)));
                 self.rt.FillRectangle(
                     &D2D_RECT_F {
-                        left: 0.0,
-                        top: 0.0,
-                        right: w as f32,
-                        bottom: band_h,
+                        left: b.left as f32,
+                        top: b.top as f32,
+                        right: b.right as f32,
+                        bottom: b.bottom as f32,
                     },
-                    &self.brushes[1],
+                    &self.brushes[BR_BG],
                 );
-                if bt < first_row_y {
-                    self.paint_tabs(w, -(bt as f32))?;
+                if b.top < top {
+                    self.paint_tabs(w)?;
                 }
-                if bb > first_row_y {
-                    let r0 = ((bt - first_row_y).max(0) / lh) as usize;
-                    let r1 = ((bb - first_row_y + lh - 1) / lh) as usize;
+                if b.bottom > top && b.top < status_top && rows > 0 {
+                    let r0 = ((b.top - top).max(0) / lh) as usize;
+                    let r1 = ((b.bottom - top + lh - 1) / lh) as usize;
                     for row_idx in r0..r1.min(rows) {
                         let row = src.row(row_idx);
-                        let y = (first_row_y + row_idx as i32 * lh - bt) as f32;
+                        let y = (top + row_idx as i32 * lh) as f32;
                         self.paint_row(&row, pad, y, lh as f32)?;
-                        if row_idx >= OVERLAY_FIRST_ROW {
-                            let i = row_idx - OVERLAY_FIRST_ROW;
-                            if i < self.overlay_hashes.len() {
-                                self.paint_overlay_row(i, y, lh as f32)?;
-                            }
-                        }
                     }
                 }
-                self.rt.EndDraw(None, None)?;
-            }
-        }
-        Ok(())
-    }
-
-    // --- Panneau flottant --------------------------------------------------------------------
-
-    fn overlay_pad(&self) -> f32 {
-        (10.0 * self.scale).round()
-    }
-
-    /// Abscisses `(gauche, droite)` du panneau : centré, ~80 % de la largeur (20 à 90 colonnes).
-    fn overlay_box(&self) -> (i32, i32) {
-        let w = self.size.0 as f32;
-        let adv = self.metrics.advance.max(1.0);
-        let pad = self.overlay_pad();
-        let cols = (((w * 0.8 - 2.0 * pad) / adv).floor() as usize).clamp(20, 90);
-        let box_w = (cols as f32 * adv + 2.0 * pad).min(w);
-        let x0 = ((w - box_w) / 2.0).floor();
-        (x0 as i32, (x0 + box_w) as i32)
-    }
-
-    /// Nombre de caractères qui tiennent sur une rangée du panneau.
-    #[must_use]
-    pub fn overlay_columns(&self) -> usize {
-        let (x0, x1) = self.overlay_box();
-        let inner = (x1 - x0) as f32 - 2.0 * self.overlay_pad();
-        (inner / self.metrics.advance.max(1.0)).floor().max(1.0) as usize
-    }
-
-    /// Affiche, remplace ou retire (`None`) le panneau flottant. Seules les rangées dont le
-    /// contenu change sont redessinées.
-    pub fn set_overlay(&mut self, overlay: Option<&Overlay>) {
-        match overlay {
-            Some(o) if self.overlay.as_ref() == Some(o) => {}
-            Some(o) => {
-                self.overlay_hashes = o.rows.iter().map(overlay_row_hash).collect();
-                self.overlay = Some(o.clone());
-            }
-            None => {
-                self.overlay = None;
-                self.overlay_hashes.clear();
-            }
-        }
-    }
-
-    /// Rangée du panneau située sous le point `(x, y)` (pixels de la zone cliente), ou `None`
-    /// si le point est hors du panneau (ou s'il n'y en a pas).
-    #[must_use]
-    pub fn overlay_row_at(&self, x: f32, y: f32) -> Option<usize> {
-        let o = self.overlay.as_ref()?;
-        let (x0, x1) = self.overlay_box();
-        if x < x0 as f32 || x >= x1 as f32 || y < self.metrics.top as f32 {
-            return None;
-        }
-        let row = ((y as i32 - self.metrics.top) / self.metrics.line_height.max(1)) as usize;
-        let i = row.checked_sub(OVERLAY_FIRST_ROW)?;
-        (i < o.rows.len()).then_some(i)
-    }
-
-    /// Dessine la rangée `i` du panneau à l'ordonnée `y` de la bande en cours.
-    unsafe fn paint_overlay_row(&mut self, i: usize, y: f32, lh: f32) -> Result<()> {
-        let Some((row, last)) = self
-            .overlay
-            .as_ref()
-            .map(|o| (o.rows[i].clone(), o.rows.len() - 1))
-        else {
-            return Ok(());
-        };
-        let (x0, x1) = self.overlay_box();
-        let (x0, x1) = (x0 as f32, x1 as f32);
-        let pad = self.overlay_pad();
-        let adv = self.metrics.advance;
-        let fill = if row.kind == OverlayRowKind::Selected {
-            2
-        } else {
-            BR_OVERLAY_BG
-        };
-        let rect = |l: f32, t: f32, r: f32, b: f32| D2D_RECT_F {
-            left: l,
-            top: t,
-            right: r,
-            bottom: b,
-        };
-        self.rt
-            .FillRectangle(&rect(x0, y, x1, y + lh), &self.brushes[fill]);
-        // Bordure : traits latéraux sur chaque rangée, haut et bas sur la première et la dernière.
-        let dim = &self.brushes[BR_TAB_DIM];
-        self.rt.FillRectangle(&rect(x0, y, x0 + 1.0, y + lh), dim);
-        self.rt.FillRectangle(&rect(x1 - 1.0, y, x1, y + lh), dim);
-        if i == 0 {
-            self.rt.FillRectangle(&rect(x0, y, x1, y + 1.0), dim);
-        }
-        if i == last {
-            self.rt
-                .FillRectangle(&rect(x0, y + lh - 1.0, x1, y + lh), dim);
-        }
-
-        self.rt.PushAxisAlignedClip(
-            &rect(x0 + 1.0, y, x1 - 1.0, y + lh),
-            D2D1_ANTIALIAS_MODE_ALIASED,
-        );
-        let spans: Vec<(usize, usize, u8)> = row
-            .highlights
-            .iter()
-            .map(|&(a, b)| (a, b, OVERLAY_MATCH_KIND))
-            .collect();
-        let hash = hash_bytes(row.text.as_bytes());
-        let entry = self.layout_for(&row.text, hash)?;
-        if let Some((layout, units)) = &entry {
-            self.apply_colors(hash, layout, *units, &spans)?;
-            let brush = if row.kind == OverlayRowKind::Note {
-                BR_TAB_DIM
-            } else {
-                0
-            };
-            self.rt.DrawTextLayout(
-                Vector2 { X: x0 + pad, Y: y },
-                layout,
-                &self.brushes[brush],
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
-        if !row.hint.is_empty() {
-            let hhash = hash_bytes(row.hint.as_bytes());
-            let chars = row.hint.chars().count() as f32;
-            if let Some((layout, units)) = self.layout_for(&row.hint, hhash)? {
-                self.apply_colors(hhash, &layout, units, &[])?;
-                self.rt.DrawTextLayout(
-                    Vector2 {
-                        X: x1 - pad - chars * adv,
-                        Y: y,
-                    },
-                    &layout,
-                    &self.brushes[BR_TAB_DIM],
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
-        }
-        if let Some(c) = row.caret {
-            let x = match &entry {
-                None => x0 + pad,
-                Some((layout, units)) => {
-                    let (mut cx, mut cy) = (0.0_f32, 0.0_f32);
-                    let mut m = DWRITE_HIT_TEST_METRICS::default();
-                    let _ = layout.HitTestTextPosition(
-                        c.min(*units) as u32,
-                        false,
-                        &mut cx,
-                        &mut cy,
-                        &mut m,
-                    );
-                    x0 + pad + cx
+                if b.right > ex1 && ex1 < w && b.bottom > top && b.top < status_top {
+                    self.paint_strip(ex1, w, top, status_top)?;
                 }
-            };
-            self.rt.FillRectangle(
-                &rect(
-                    x,
-                    y + 2.0,
-                    x + (2.0 * self.scale).round().max(1.0),
-                    y + lh - 2.0,
-                ),
-                &self.brushes[3],
-            );
-        }
-        self.rt.PopAxisAlignedClip();
-        Ok(())
-    }
-
-    // --- Barre d'onglets ---------------------------------------------------------------------
-
-    /// Définit les onglets affichés (liste vide : pas de barre). Un changement de contenu ne
-    /// redessine que la barre ; l'apparition ou la disparition de la barre décale les rangées
-    /// et force un redessin complet.
-    pub fn set_tabs(&mut self, tabs: &[TabInfo<'_>]) {
-        let entries: Vec<TabEntry> = tabs
-            .iter()
-            .map(|t| TabEntry {
-                label: t.label.to_owned(),
-                modified: t.modified,
-                active: t.active,
-            })
-            .collect();
-        if entries != self.tabs {
-            self.tabs = entries;
-            self.tabs_clean = false;
-        }
-        let top = if self.tabs.is_empty() {
-            0
-        } else {
-            self.metrics.tab_bar
-        };
-        if top != self.metrics.top {
-            self.metrics.top = top;
-            self.valid = false;
-        }
-    }
-
-    /// Géométrie des onglets : `(x0, x1, nombre de caractères du libellé affiché)`.
-    fn tab_geometry(&self) -> Vec<(i32, i32, usize)> {
-        let n = self.tabs.len().max(1) as i32;
-        let adv = self.metrics.advance;
-        let pad = (12.0 * self.scale).round();
-        let gap = (8.0 * self.scale).round();
-        let w = self.size.0 as f32;
-        let share = w / n as f32;
-        let max_chars = (((share - 2.0 * pad - gap - adv) / adv).floor() as usize).clamp(4, 28);
-        let mut x = 0.0_f32;
-        self.tabs
-            .iter()
-            .map(|t| {
-                let chars = t.label.chars().count().min(max_chars);
-                let width = 2.0 * pad + chars as f32 * adv + gap + adv;
-                let x0 = x;
-                x += width;
-                (x0 as i32, x as i32, chars)
-            })
-            .collect()
-    }
-
-    /// Onglet situé sous le point `(x, y)` (pixels de la zone cliente) et, si le point est sur la
-    /// croix/pastille de fermeture, `true`.
-    #[must_use]
-    pub fn tab_at(&self, x: f32, y: f32) -> Option<(usize, bool)> {
-        if self.tabs.is_empty() || y < 0.0 || y >= self.metrics.tab_bar as f32 {
-            return None;
-        }
-        let pad = (12.0 * self.scale).round();
-        let slot = self.metrics.advance + pad;
-        for (i, (x0, x1, _)) in self.tab_geometry().into_iter().enumerate() {
-            if x >= x0 as f32 && x < x1 as f32 {
-                return Some((i, x >= x1 as f32 - slot - 2.0));
-            }
-        }
-        None
-    }
-
-    /// Dessine la barre d'onglets ; `y0` est l'ordonnée du haut de la barre dans la bande en cours.
-    unsafe fn paint_tabs(&mut self, w: i32, y0: f32) -> Result<()> {
-        let bar_h = self.metrics.tab_bar as f32;
-        self.rt.FillRectangle(
-            &D2D_RECT_F {
-                left: 0.0,
-                top: y0,
-                right: w as f32,
-                bottom: y0 + bar_h,
-            },
-            &self.brushes[BR_TABBAR],
-        );
-        let geometry = self.tab_geometry();
-        let pad = (12.0 * self.scale).round();
-        let adv = self.metrics.advance;
-        let lh = self.metrics.line_height as f32;
-        let ty = y0 + ((bar_h - lh) / 2.0).floor();
-        let accent_h = (2.0 * self.scale).round().max(1.0);
-        for (i, (x0, x1, chars)) in geometry.into_iter().enumerate() {
-            let tab = self.tabs[i].clone();
-            let (xf0, xf1) = (x0 as f32, x1 as f32);
-            if tab.active {
-                self.rt.FillRectangle(
-                    &D2D_RECT_F {
-                        left: xf0,
-                        top: y0,
-                        right: xf1,
-                        bottom: y0 + bar_h,
-                    },
-                    &self.brushes[1],
-                );
-                self.rt.FillRectangle(
-                    &D2D_RECT_F {
-                        left: xf0,
-                        top: y0,
-                        right: xf1,
-                        bottom: y0 + accent_h,
-                    },
-                    &self.brushes[BR_TAB_ACCENT],
-                );
-            }
-            // Libellé tronqué avec une ellipse s'il dépasse la place disponible.
-            let total = tab.label.chars().count();
-            let shown: String = if total > chars {
-                tab.label
-                    .chars()
-                    .take(chars.saturating_sub(1))
-                    .chain(std::iter::once('\u{2026}'))
-                    .collect()
-            } else {
-                tab.label.clone()
-            };
-            let text_brush = if tab.active { 0 } else { BR_TAB_DIM };
-            let hash = hash_bytes(shown.as_bytes());
-            if let Some((layout, units)) = self.layout_for(&shown, hash)? {
-                self.apply_colors(hash, &layout, units, &[])?;
-                self.rt.DrawTextLayout(
-                    Vector2 {
-                        X: xf0 + pad,
-                        Y: ty,
-                    },
-                    &layout,
-                    &self.brushes[text_brush],
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
-            // Pastille (modifié) ou croix (fermer), dans la dernière colonne de l'onglet.
-            let mark = if tab.modified { "\u{25CF}" } else { "\u{00D7}" };
-            let mhash = hash_bytes(mark.as_bytes());
-            if let Some((layout, units)) = self.layout_for(mark, mhash)? {
-                self.apply_colors(mhash, &layout, units, &[])?;
-                let brush = if tab.modified {
-                    BR_TAB_ACCENT
-                } else {
-                    BR_TAB_DIM
-                };
-                self.rt.DrawTextLayout(
-                    Vector2 {
-                        X: xf1 - pad - adv,
-                        Y: ty,
-                    },
-                    &layout,
-                    &self.brushes[brush],
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
+                if b.bottom > status_top && self.metrics.status_bar > 0 {
+                    self.paint_status(w, status_top, h)?;
+                }
+                self.paint_overlay(&b)?;
+                self.rt.EndDraw(None, None)?;
             }
         }
         Ok(())
@@ -1126,6 +973,8 @@ impl SoftRenderer {
 
     /// Dessine une rangée dans la bande en cours (appelé entre `BeginDraw` et `EndDraw`).
     unsafe fn paint_row(&mut self, row: &Row<'_>, pad: f32, y: f32, lh: f32) -> Result<()> {
+        self.paint_gutter(row, y, lh)?;
+        self.paint_indent_guides(row.text, pad, y, lh);
         let hash = hash_bytes(row.text.as_bytes());
         let entry = self.layout_for(row.text, hash)?;
         let adv = self.metrics.advance;
@@ -1252,10 +1101,7 @@ impl SoftRenderer {
     /// # Errors
     /// Échec GDI.
     pub fn present_all(&mut self, hwnd: isize) -> Result<()> {
-        let all = [Band {
-            top: 0,
-            bottom: self.size.1 as i32,
-        }];
+        let all = [Band::rows(0, self.size.1 as i32, self.size.0 as i32)];
         self.bands.clear();
         self.shift_region = None;
         self.blit(hwnd, &all)
@@ -1277,18 +1123,17 @@ impl SoftRenderer {
 
     /// Copie les bandes de la DIB vers `dc` (la fenêtre, ou une cible de test).
     fn blit_to_dc(&self, dc: HDC, bands: &[Band]) -> Result<()> {
-        let w = self.size.0 as i32;
         for b in bands {
             // SAFETY: `dc` est un DC valide fourni par l'appelant ; `mem_dc` contient la DIB.
             unsafe {
                 BitBlt(
                     dc,
-                    0,
+                    b.left,
                     b.top,
-                    w,
+                    b.right - b.left,
                     b.bottom - b.top,
                     Some(self.mem_dc),
-                    0,
+                    b.left,
                     b.top,
                     SRCCOPY,
                 )?;
@@ -1361,11 +1206,32 @@ unsafe fn make_format(dwrite: &IDWriteFactory, scale: f32) -> Result<(IDWriteTex
         Metrics {
             advance,
             line_height: m.height.ceil() as i32,
-            pad_x: (PAD_X * scale).round(),
-            tab_bar: m.height.ceil() as i32 + (10.0 * scale).round() as i32,
+            pad_x: (TEXT_PAD * scale).round(),
+            tab_bar: (TAB_BAR_H * scale).round() as i32,
             top: 0,
+            status_bar: (STATUS_BAR_H * scale).round() as i32,
+            gutter: 0,
+            minimap: 0,
         },
     ))
+}
+
+/// Polices de l'interface (Segoe UI) : onglets, texte discret (barre d'état, raccourcis), panneau.
+unsafe fn make_ui_formats(dwrite: &IDWriteFactory, scale: f32) -> Result<[IDWriteTextFormat; 3]> {
+    let make = |px: f32| -> Result<IDWriteTextFormat> {
+        let f = dwrite.CreateTextFormat(
+            w!("Segoe UI"),
+            None,
+            DWRITE_FONT_WEIGHT_REGULAR,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            px * scale,
+            w!("en-us"),
+        )?;
+        f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        Ok(f)
+    };
+    Ok([make(12.0)?, make(11.0)?, make(13.0)?])
 }
 
 /// Crée une DIB 32 bits « top-down » et la sélectionne dans `mem_dc`.
@@ -1455,12 +1321,56 @@ mod tests {
                 underline: None,
                 spans: &[],
                 squiggles: &[],
+                number: number_of(&self.texts[i], i),
+                current: i == 2,
             }
         }
     }
 
+    /// Numéro de ligne d'une rangée de test : celui écrit dans « ligne N », sinon sa position.
+    fn number_of(text: &str, row: usize) -> u32 {
+        text.split("ligne ")
+            .nth(1)
+            .and_then(|r| r.split(' ').next())
+            .and_then(|n| n.parse::<u32>().ok())
+            .map_or(row as u32 + 1, |n| n + 1)
+    }
+
+    /// Document de test de la minimap.
+    struct Doc;
+
+    impl MinimapSource for Doc {
+        fn len(&self) -> usize {
+            200
+        }
+        fn line(&self, index: usize, out: &mut String) {
+            out.push_str(&format!(
+                "{}let x = {index}; // essai",
+                " ".repeat(index % 4 * 4)
+            ));
+        }
+    }
+
+    fn chrome(left: &str, first: usize, visible: usize) -> Chrome<'_> {
+        Chrome {
+            line_digits: 4,
+            status_left: left,
+            status_right: &["Tab Size: 4", "Rust"],
+            scroll: Some(Scroll {
+                first,
+                visible,
+                total: 200,
+            }),
+        }
+    }
+
+    /// Moteur de test avec gouttière, barre d'état, minimap et barre de défilement.
     fn renderer() -> SoftRenderer {
-        SoftRenderer::new(1.0, (640, 300), Colors::default()).expect("renderer")
+        let mut r = SoftRenderer::new(1.0, (640, 300), Colors::default()).expect("renderer");
+        let visible = r.metrics().rows_for(300);
+        r.set_chrome(&chrome("Line 1, Column 1", 0, visible));
+        r.set_minimap(&Doc, 1).unwrap();
+        r
     }
 
     fn lines(first: usize, n: usize) -> Vec<String> {
@@ -1557,9 +1467,12 @@ mod tests {
         s.texts[3].push('a');
         let lh = r.metrics().line_height;
         let bands = r.draw(&s, 0).unwrap().to_vec();
+        let right = 640 - r.metrics().minimap;
         assert_eq!(
             bands,
             vec![Band {
+                left: 0,
+                right,
                 top: 3 * lh,
                 bottom: 4 * lh
             }]
@@ -1570,13 +1483,14 @@ mod tests {
 
     #[test]
     fn le_texte_dessine_des_pixels_et_le_fond_est_uni() {
-        let mut r = renderer();
+        // sans gouttière ni barre d'état : le dernier pixel est du fond
+        let mut r = SoftRenderer::new(1.0, (640, 300), Colors::default()).expect("renderer");
         let s = Rows::new(vec!["Hello".into(), String::new()], None, None);
         r.draw(&s, 0).unwrap();
         let (w, _) = r.size();
         let lh = r.metrics().line_height as usize;
         let px = r.pixels();
-        let bg = px[px.len() - 1];
+        let bg = px[5 * lh * w as usize + w as usize - 1];
         assert!(
             px[..lh * w as usize].iter().any(|&p| p != bg),
             "texte absent"
@@ -1797,10 +1711,7 @@ mod tests {
         let bar = r.metrics().tab_bar;
         assert_eq!(
             r.draw(&s, 0).unwrap().to_vec(),
-            vec![Band {
-                top: 0,
-                bottom: bar
-            }]
+            vec![Band::rows(0, bar, 640)]
         );
         // rien ne change : plus rien à dessiner
         r.set_tabs(&[tab("a.rs", true, true), tab("b.rs", false, false)]);
@@ -1819,14 +1730,110 @@ mod tests {
         let bar = r.metrics().tab_bar as f32;
         // sous la barre : pas un onglet
         assert_eq!(r.tab_at(5.0, bar + 1.0), None);
-        let (i0, close0) = r.tab_at(5.0, 5.0).unwrap();
+        let geo = r.tab_geometry();
+        assert_eq!(
+            r.tab_at(geo[0].0 as f32 - 3.0, 5.0),
+            None,
+            "boutons à gauche des onglets"
+        );
+        let (i0, close0) = r.tab_at(geo[0].0 as f32 + 5.0, 5.0).unwrap();
         assert_eq!((i0, close0), (0, false));
         // la fin du premier onglet est sa zone de fermeture ; juste après commence le second
-        let geo = r.tab_geometry();
         let end0 = geo[0].1 as f32;
         assert_eq!(r.tab_at(end0 - 3.0, 5.0), Some((0, true)));
         assert_eq!(r.tab_at(end0 + 3.0, 5.0), Some((1, false)));
         assert_eq!(r.tab_at(geo[1].1 as f32 + 50.0, 5.0), None);
+    }
+
+    #[test]
+    fn la_gouttiere_decale_le_texte_et_affiche_les_numeros() {
+        let mut with = renderer();
+        let mut without = SoftRenderer::new(1.0, (640, 300), Colors::default()).unwrap();
+        let n = with.metrics().rows_for(300);
+        assert!(
+            with.metrics().gutter > 40,
+            "gouttière large pour 4 chiffres"
+        );
+        assert_eq!(without.metrics().gutter, 0);
+        assert!(with.metrics().pad_x > without.metrics().pad_x + 40.0);
+        let s = Rows::new(lines(0, n), None, None);
+        with.draw(&s, 0).unwrap();
+        without.draw(&s, 0).unwrap();
+        // la ligne du curseur (rangée 2) a un fond de gouttière différent des autres
+        let g = with.metrics().gutter as usize;
+        let lh = with.metrics().line_height as usize;
+        let top = with.metrics().top as usize;
+        let at =
+            |r: &SoftRenderer, row: usize, x: usize| r.pixels()[(top + row * lh + 1) * 640 + x];
+        assert_ne!(
+            at(&with, 2, 2),
+            at(&with, 3, 2),
+            "ligne courante mise en évidence"
+        );
+        assert_eq!(
+            at(&with, 3, 2),
+            at(&with, 3, g + 1),
+            "autres lignes : fond de l'éditeur"
+        );
+        // des pixels de numéro dans la gouttière
+        let bg = at(&with, 3, g + 1);
+        let digits =
+            (0..lh).any(|dy| (0..g).any(|x| with.pixels()[(top + 3 * lh + dy) * 640 + x] != bg));
+        assert!(digits, "numéro de ligne dessiné");
+    }
+
+    #[test]
+    fn la_barre_d_etat_ne_redessine_que_sa_bande() {
+        let mut r = renderer();
+        let n = r.metrics().rows_for(300);
+        let s = Rows::new(lines(0, n), None, None);
+        r.draw(&s, 0).unwrap();
+        r.set_chrome(&chrome("Line 9, Column 2", 0, n));
+        let (h, st) = (r.size().1 as i32, r.metrics().status_bar);
+        assert_eq!(
+            r.draw(&s, 0).unwrap().to_vec(),
+            vec![Band::rows(h - st, h, 640)]
+        );
+        r.set_chrome(&chrome("Line 9, Column 2", 0, n));
+        assert!(r.draw(&s, 0).unwrap().is_empty(), "rien ne change");
+    }
+
+    #[test]
+    fn le_defilement_ne_redessine_que_la_zone_de_droite() {
+        let mut r = renderer();
+        let n = r.metrics().rows_for(300);
+        let s = Rows::new(lines(0, n), None, None);
+        r.draw(&s, 0).unwrap();
+        // la barre de défilement bouge, le texte de la minimap ne change pas de page
+        r.set_chrome(&chrome("Line 1, Column 1", 3, n));
+        r.set_minimap(&Doc, 1).unwrap();
+        let m = r.metrics();
+        let h = r.size().1 as i32;
+        assert_eq!(
+            r.draw(&s, 0).unwrap().to_vec(),
+            vec![Band {
+                left: 640 - m.minimap,
+                right: 640,
+                top: m.top,
+                bottom: h - m.status_bar
+            }]
+        );
+        // un texte modifié reconstruit la minimap
+        r.set_minimap(&Doc, 2).unwrap();
+        assert_eq!(r.draw(&s, 0).unwrap().len(), 1);
+        // clics : minimap, barre de défilement, hors zone
+        let x_map = 640.0 - m.minimap as f32 + 5.0;
+        let y = m.top as f32 + 40.0;
+        assert!(matches!(
+            r.strip_hit(x_map, y),
+            Some(StripHit::Minimap { .. })
+        ));
+        assert!(matches!(
+            r.strip_hit(639.0, y),
+            Some(StripHit::Scrollbar { .. })
+        ));
+        assert_eq!(r.strip_hit(100.0, y), None);
+        assert_eq!(r.strip_hit(x_map, h as f32 - 2.0), None, "barre d'état");
     }
 
     fn overlay(selected: usize, query: &str, n_items: usize) -> Overlay {
@@ -1849,7 +1856,10 @@ mod tests {
                 highlights: vec![(0, 3)],
             });
         }
-        Overlay { rows }
+        Overlay {
+            rows,
+            scroll: (n_items > 3).then_some((1, 3, n_items + 20)),
+        }
     }
 
     #[test]
@@ -1898,26 +1908,14 @@ mod tests {
         let s = Rows::new(lines(0, n), None, None);
         r.set_overlay(Some(&overlay(0, "a", 4)));
         r.draw(&s, 0).unwrap();
-        // l'élément sélectionné passe de la rangée 0 à la rangée 1 : deux rangées d'éditeur
-        // (2 et 3) changent, contiguës donc une seule bande
+        // l'élément sélectionné passe de la rangée 1 à la rangée 2 du panneau : seules ces deux
+        // rangées sont redessinées
+        let (rect, rows) = r.panel_geometry().unwrap();
         r.set_overlay(Some(&overlay(1, "a", 4)));
-        let lh = r.metrics().line_height;
-        assert_eq!(
-            r.draw(&s, 0).unwrap().to_vec(),
-            vec![Band {
-                top: 2 * lh,
-                bottom: 4 * lh
-            }]
-        );
-        // fermer le panneau repeint toutes les rangées qu'il recouvrait (1 à 5)
+        assert_eq!(r.draw(&s, 0).unwrap().to_vec(), vec![rows[1], rows[2]]);
+        // fermer le panneau repeint la zone qu'il recouvrait
         r.set_overlay(None);
-        assert_eq!(
-            r.draw(&s, 0).unwrap().to_vec(),
-            vec![Band {
-                top: lh,
-                bottom: 6 * lh
-            }]
-        );
+        assert_eq!(r.draw(&s, 0).unwrap().to_vec(), vec![rect]);
         // aucun changement : rien à faire
         assert!(r.draw(&s, 0).unwrap().is_empty());
     }
@@ -1927,16 +1925,16 @@ mod tests {
         let mut r = renderer();
         assert_eq!(r.overlay_row_at(300.0, 40.0), None, "pas de panneau");
         r.set_overlay(Some(&overlay(0, "", 3)));
-        let lh = r.metrics().line_height as f32;
-        // rangée 1 de l'éditeur = rangée 0 du panneau (saisie), rangée 2 = premier résultat
-        assert_eq!(r.overlay_row_at(320.0, lh * 1.5), Some(0));
-        assert_eq!(r.overlay_row_at(320.0, lh * 2.5), Some(1));
-        assert_eq!(r.overlay_row_at(320.0, lh * 4.5), Some(3));
-        // au-dessus, en dessous et à gauche du panneau
-        assert_eq!(r.overlay_row_at(320.0, lh * 0.5), None);
-        assert_eq!(r.overlay_row_at(320.0, lh * 5.5), None);
-        assert_eq!(r.overlay_row_at(2.0, lh * 2.5), None);
-        assert!(r.overlay_columns() >= 20);
+        let (rect, rows) = r.panel_geometry().unwrap();
+        let cx = (rect.left + rect.right) as f32 / 2.0;
+        let mid = |i: usize| (rows[i].top + rows[i].bottom) as f32 / 2.0;
+        assert_eq!(r.overlay_row_at(cx, mid(0)), Some(0), "saisie");
+        assert_eq!(r.overlay_row_at(cx, mid(1)), Some(1));
+        assert_eq!(r.overlay_row_at(cx, mid(3)), Some(3));
+        // sous le panneau et à gauche du panneau
+        assert_eq!(r.overlay_row_at(cx, rect.bottom as f32 + 2.0), None);
+        assert_eq!(r.overlay_row_at(rect.left as f32 - 2.0, mid(1)), None);
+        assert!(r.overlay_columns() >= 8);
     }
 
     /// Cible de test qui joue le rôle de la fenêtre : un DC mémoire avec sa propre DIB.

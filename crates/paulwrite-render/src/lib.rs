@@ -14,11 +14,14 @@
 #![allow(unsafe_code)]
 
 pub mod platform;
+mod png;
 mod soft;
 
+pub use png::write_png;
+
 pub use soft::{
-    Band, Colors, Metrics, Overlay, OverlayRow, OverlayRowKind, Row, RowSource, SoftRenderer,
-    TabInfo, KIND_SLOTS,
+    Band, Chrome, Colors, Metrics, MinimapSource, Overlay, OverlayRow, OverlayRowKind, Row,
+    RowSource, Scroll, SoftRenderer, StripHit, TabButton, TabInfo, KIND_SLOTS,
 };
 
 use std::time::Duration;

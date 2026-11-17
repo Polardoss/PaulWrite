@@ -3,7 +3,8 @@
 //! Usage : `cargo run -p paulwrite-render --example snapshot -- sortie.png [échelle]`
 
 use paulwrite_render::{
-    Colors, Overlay, OverlayRow, OverlayRowKind, Row, RowSource, SoftRenderer, TabInfo,
+    Chrome, Colors, MinimapSource, Overlay, OverlayRow, OverlayRowKind, Row, RowSource, Scroll,
+    SoftRenderer, TabInfo,
 };
 
 /// Couleurs de la deuxième rangée de la démo : « let » mot-clé, la chaîne, le point-virgule.
@@ -24,6 +25,18 @@ struct Demo {
     lines: Vec<DemoRow>,
 }
 
+/// Texte de la minimap : les rangées de la démo répétées.
+struct Doc(Vec<String>);
+
+impl MinimapSource for Doc {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn line(&self, index: usize, out: &mut String) {
+        out.push_str(&self.0[index]);
+    }
+}
+
 impl RowSource for Demo {
     fn len(&self) -> usize {
         self.lines.len()
@@ -41,67 +54,10 @@ impl RowSource for Demo {
                 5 => &SQUIGGLES[1..],
                 _ => &[],
             },
+            number: i as u32 + 1,
+            current: i == 1,
         }
     }
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFF_u32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
-
-fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    out.extend((data.len() as u32).to_be_bytes());
-    let mut body = kind.to_vec();
-    body.extend(data);
-    out.extend(&body);
-    out.extend(crc32(&body).to_be_bytes());
-}
-
-/// PNG RVB non compressé (blocs « stored » zlib) : suffisant pour une image de contrôle.
-fn write_png(path: &str, w: u32, h: u32, bgra: &[u32]) {
-    let mut raw = Vec::with_capacity((w as usize * 3 + 1) * h as usize);
-    for y in 0..h as usize {
-        raw.push(0);
-        for x in 0..w as usize {
-            let p = bgra[y * w as usize + x];
-            raw.extend([(p >> 16) as u8, (p >> 8) as u8, p as u8]);
-        }
-    }
-    let mut z = vec![0x78, 0x01];
-    let mut chunks = raw.chunks(65_535).peekable();
-    while let Some(c) = chunks.next() {
-        z.push(u8::from(chunks.peek().is_none()));
-        z.extend((c.len() as u16).to_le_bytes());
-        z.extend((!(c.len() as u16)).to_le_bytes());
-        z.extend(c);
-    }
-    let (mut a, mut b) = (1u32, 0u32);
-    for &x in &raw {
-        a = (a + u32::from(x)) % 65_521;
-        b = (b + a) % 65_521;
-    }
-    z.extend(((b << 16) | a).to_be_bytes());
-
-    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    let mut ihdr = Vec::new();
-    ihdr.extend(w.to_be_bytes());
-    ihdr.extend(h.to_be_bytes());
-    ihdr.extend([8, 2, 0, 0, 0]);
-    chunk(&mut png, b"IHDR", &ihdr);
-    chunk(&mut png, b"IDAT", &z);
-    chunk(&mut png, b"IEND", &[]);
-    std::fs::write(path, png).expect("écriture du PNG");
 }
 
 fn main() {
@@ -110,7 +66,12 @@ fn main() {
         .next()
         .expect("usage : snapshot <sortie.png> [échelle]");
     let scale: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-    let (w, h) = ((760.0 * scale) as u32, (300.0 * scale) as u32);
+    let big = std::env::args().any(|a| a == "--grand");
+    let (w, h) = if big {
+        ((1917.0 * scale) as u32, (988.0 * scale) as u32)
+    } else {
+        ((760.0 * scale) as u32, (300.0 * scale) as u32)
+    };
     let mut r = SoftRenderer::new(scale, (w, h), Colors::default()).expect("rendu");
     let demo = Demo {
         lines: vec![
@@ -152,9 +113,27 @@ fn main() {
             active: false,
         },
     ]);
+    let doc = Doc(demo
+        .lines
+        .iter()
+        .cycle()
+        .take(if big { 400 } else { 140 })
+        .map(|l| l.0.to_owned())
+        .collect());
+    r.set_chrome(&Chrome {
+        line_digits: 3,
+        status_left: "Line 2, Column 5",
+        status_right: &["Tab Size: 4", "Rust"],
+        scroll: Some(Scroll {
+            first: 0,
+            visible: r.metrics().rows_for(h),
+            total: doc.len(),
+        }),
+    });
+    r.set_minimap(&doc, 1).expect("minimap");
     let rows = r.metrics().rows_for(h);
     let demo = Demo {
-        lines: demo.lines.into_iter().take(rows).collect(),
+        lines: demo.lines.into_iter().cycle().take(rows).collect(),
     };
     if std::env::args().any(|a| a == "--panneau") {
         let item = |kind, text: &str, hint: &str, hl: Vec<(usize, usize)>| OverlayRow {
@@ -187,10 +166,12 @@ fn main() {
                     vec![],
                 ),
             ],
+            scroll: Some((0, 3, 30)),
         }));
     }
     r.draw(&demo, 0).expect("dessin");
     let (pw, ph) = r.size();
-    write_png(&out, pw, ph, r.pixels());
+    paulwrite_render::write_png(std::path::Path::new(&out), pw, ph, r.pixels())
+        .expect("écriture du PNG");
     println!("écrit {out} ({pw}x{ph}, échelle {scale})");
 }

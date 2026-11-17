@@ -15,6 +15,20 @@ pub enum Language {
 }
 
 impl Language {
+    /// Nom affiché dans la barre d'état.
+    #[must_use]
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Language::Rust => "Rust",
+            Language::Json => "JSON",
+            Language::Toml => "TOML",
+            Language::Python => "Python",
+            Language::JavaScript => "JavaScript",
+            Language::Html => "HTML",
+            Language::Css => "CSS",
+        }
+    }
+
     /// Tous les langages.
     pub const ALL: [Language; 7] = [
         Language::Rust,

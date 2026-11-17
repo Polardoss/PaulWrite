@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use paulwrite_core::motion;
 use paulwrite_core::{Document, Motion, Selection, SelectionSet, TextChange, TextEdit};
-use paulwrite_render::{Row, RowSource};
+use paulwrite_render::{MinimapSource, Row, RowSource, Scroll};
 use paulwrite_syntax::Span;
 
 use crate::command::{Command, Effect, LspAction};
@@ -70,6 +70,8 @@ pub struct Editor {
     /// Diagnostics du serveur de langage (positions telles que le serveur les a envoyées).
     squiggles: Vec<Squiggle>,
     ime_anchor: Option<(usize, usize)>,
+    /// Ligne du curseur principal (construite par `build_view`).
+    cursor_line: usize,
     /// Plages colorées (coloration syntaxique) ; vide si la coloration est inactive.
     spans: SpanCache,
 }
@@ -108,6 +110,7 @@ impl Editor {
             row_squiggles: Vec::new(),
             squiggles: Vec::new(),
             ime_anchor: None,
+            cursor_line: 0,
             spans: SpanCache::default(),
         }
     }
@@ -538,6 +541,97 @@ impl Editor {
         self.caret_on = true;
     }
 
+    // --- Interface autour du texte -----------------------------------------------------------
+
+    /// Nombre de chiffres du plus grand numéro de ligne.
+    #[must_use]
+    pub fn line_digits(&self) -> usize {
+        self.line_count().max(1).ilog10() as usize + 1
+    }
+
+    /// Position de la vue dans le document.
+    #[must_use]
+    pub fn scroll(&self) -> Scroll {
+        Scroll {
+            first: self.first_line,
+            visible: self.rows,
+            total: self.line_count(),
+        }
+    }
+
+    /// Texte du document pour la minimap.
+    #[must_use]
+    pub fn minimap(&self) -> BufferLines<'_> {
+        BufferLines(self.doc.buffer())
+    }
+
+    /// Place la première ligne visible (sans bouger le curseur).
+    pub fn set_first_line(&mut self, line: usize) {
+        self.first_line = line.min(self.max_first_line());
+    }
+
+    /// Fait défiler la vue pour que `line` soit au milieu de la fenêtre.
+    pub fn scroll_to_center(&mut self, line: usize) {
+        self.set_first_line(line.saturating_sub(self.rows / 2));
+    }
+
+    /// Fait défiler la vue à une fraction (0..1) du document : barre de défilement.
+    pub fn scroll_to_fraction(&mut self, fraction: f32) {
+        let last = self.max_first_line() as f32;
+        self.set_first_line((fraction.clamp(0.0, 1.0) * last).round() as usize);
+    }
+
+    /// Sélectionne la ligne de la rangée `row` en entier, fin de ligne comprise (clic dans la
+    /// gouttière).
+    pub fn select_row(&mut self, row: usize) {
+        let buf = self.doc.buffer();
+        let line = (self.first_line + row).min(buf.len_lines().saturating_sub(1));
+        let start = buf.line_start(line);
+        let end = if line + 1 < buf.len_lines() {
+            buf.line_start(line + 1)
+        } else {
+            buf.len_chars()
+        };
+        self.doc
+            .set_selections(SelectionSet::single(Selection::new(start, end)));
+        self.caret_on = true;
+    }
+
+    /// Texte de la barre d'état : position du curseur ou taille de la sélection, comme Sublime
+    /// Text (« Line 3, Column 7 », « 12 characters selected », « 3 selection regions »).
+    pub fn write_status(&self, out: &mut String) {
+        use std::fmt::Write as _;
+        let buf = self.doc.buffer();
+        let sels = self.doc.selections();
+        if sels.len() > 1 {
+            let _ = write!(out, "{} selection regions", sels.len());
+            return;
+        }
+        let sel = sels.primary();
+        if sel.is_empty() {
+            let line = buf.char_to_line(sel.head);
+            let upto = sel.head - buf.line_start(line);
+            let mut col = 0usize;
+            for c in buf.line(line).chars().take(upto) {
+                col = if c == '\t' {
+                    (col / 4 + 1) * 4
+                } else {
+                    col + 1
+                };
+            }
+            let _ = write!(out, "Line {}, Column {}", line + 1, col + 1);
+        } else {
+            let chars = sel.end() - sel.start();
+            let lines = buf.char_to_line(sel.end()) - buf.char_to_line(sel.start()) + 1;
+            let s = if chars == 1 { "" } else { "s" };
+            if lines > 1 {
+                let _ = write!(out, "{lines} lines, {chars} character{s} selected");
+            } else {
+                let _ = write!(out, "{chars} character{s} selected");
+            }
+        }
+    }
+
     // --- Construction des rangées ------------------------------------------------------------
 
     /// Prépare les rangées visibles. À appeler avant de dessiner.
@@ -553,6 +647,7 @@ impl Editor {
         let buf = self.doc.buffer();
         let total = buf.len_lines();
         let first = self.first_line;
+        self.cursor_line = buf.char_to_line(self.doc.selections().primary().head);
 
         for r in 0..rows {
             let s = &mut self.row_text[r];
@@ -742,13 +837,39 @@ impl RowSource for ViewRows<'_> {
 
     fn row(&self, index: usize) -> Row<'_> {
         let e = self.editor;
+        let line = e.first_line + index;
         Row {
+            number: if line < e.line_count() {
+                line as u32 + 1
+            } else {
+                0
+            },
+            current: line == e.cursor_line,
             text: &e.row_text[index],
             selections: &e.row_sels[index],
             carets: &e.row_carets[index],
             underline: e.row_underline[index],
             spans: &e.row_spans[index],
             squiggles: &e.row_squiggles[index],
+        }
+    }
+}
+
+/// Lignes du document, vues par la minimap.
+#[derive(Debug)]
+pub struct BufferLines<'a>(&'a paulwrite_core::Buffer);
+
+impl MinimapSource for BufferLines<'_> {
+    fn len(&self) -> usize {
+        self.0.len_lines()
+    }
+
+    fn line(&self, index: usize, out: &mut String) {
+        for chunk in self.0.line(index).chunks() {
+            out.push_str(chunk);
+        }
+        while out.ends_with(['\n', '\r']) {
+            out.pop();
         }
     }
 }
