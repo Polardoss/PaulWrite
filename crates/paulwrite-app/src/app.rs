@@ -27,7 +27,9 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::platform::windows::{EventLoopBuilderExtWindows, IconExtWindows, WindowAttributesExtWindows};
+use winit::platform::windows::{
+    EventLoopBuilderExtWindows, IconExtWindows, WindowAttributesExtWindows,
+};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Cursor, CursorIcon, Icon, Window, WindowId};
 
