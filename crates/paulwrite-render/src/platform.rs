@@ -23,8 +23,9 @@ use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateMenu, CreatePopupMenu, MessageBoxW, SetMenu, IDNO, IDYES, MB_ICONERROR,
-    MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, WM_COMMAND,
+    AppendMenuW, CreateMenu, CreatePopupMenu, DestroyMenu, DrawMenuBar, GetMenu, MessageBoxW,
+    SetMenu, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MSG, WM_COMMAND,
 };
 
 /// Texte du presse-papiers (s'il y en a).
@@ -97,11 +98,8 @@ pub enum SaveChoice {
 
 /// Demande s'il faut enregistrer avant de fermer ou de remplacer le document.
 #[must_use]
-pub fn confirm_save(owner: isize, file_name: &str) -> SaveChoice {
-    let text: Vec<u16> = format!("Enregistrer les modifications de « {file_name} » ?")
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+pub fn confirm_save(owner: isize, prompt: &str) -> SaveChoice {
+    let text: Vec<u16> = prompt.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: `text` est terminé par 0 et vit pendant l'appel (bloquant).
     let r = unsafe {
         MessageBoxW(
@@ -134,13 +132,13 @@ pub fn show_error(owner: isize, text: &str) {
     }
 }
 
-fn file_dialog(owner: isize, save: bool, initial: &str) -> Option<PathBuf> {
+fn file_dialog(owner: isize, save: bool, initial: &str, all_files: &str) -> Option<PathBuf> {
     let mut buf = vec![0u16; 32_768];
     for (i, u) in initial.encode_utf16().take(buf.len() - 1).enumerate() {
         buf[i] = u;
     }
     // Filtre : paires « libellé\0motif\0 », terminées par un double 0.
-    let filter: Vec<u16> = "Tous les fichiers\0*.*\0\0".encode_utf16().collect();
+    let filter: Vec<u16> = format!("{all_files}\0*.*\0\0").encode_utf16().collect();
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: HWND(owner as *mut _),
@@ -171,15 +169,15 @@ fn file_dialog(owner: isize, save: bool, initial: &str) -> Option<PathBuf> {
 
 /// Boîte « Ouvrir » ; `None` si l'utilisateur annule. Bloquante : à appeler depuis un worker.
 #[must_use]
-pub fn pick_open_file(owner: isize) -> Option<PathBuf> {
-    file_dialog(owner, false, "")
+pub fn pick_open_file(owner: isize, all_files: &str) -> Option<PathBuf> {
+    file_dialog(owner, false, "", all_files)
 }
 
 /// Boîte « Enregistrer sous » ; `None` si l'utilisateur annule. Bloquante : à appeler depuis un
 /// worker.
 #[must_use]
-pub fn pick_save_file(owner: isize, suggested_name: &str) -> Option<PathBuf> {
-    file_dialog(owner, true, suggested_name)
+pub fn pick_save_file(owner: isize, suggested_name: &str, all_files: &str) -> Option<PathBuf> {
+    file_dialog(owner, true, suggested_name, all_files)
 }
 
 /// Boîte « Ouvrir un dossier » ; `None` si l'utilisateur annule. Bloquante : à appeler depuis un
@@ -242,7 +240,16 @@ pub fn set_menu(hwnd: isize, menus: &[(String, Vec<MenuEntry>)]) -> bool {
             let text = wide(title);
             let _ = AppendMenuW(bar, MF_POPUP, popup.0 as usize, PCWSTR(text.as_ptr()));
         }
-        SetMenu(HWND(hwnd as *mut _), Some(bar)).is_ok()
+        // le menu précédent (changement de langue) appartient à la fenêtre jusqu'ici : on le libère
+        let old = GetMenu(HWND(hwnd as *mut _));
+        let ok = SetMenu(HWND(hwnd as *mut _), Some(bar)).is_ok();
+        if ok {
+            if !old.is_invalid() {
+                let _ = DestroyMenu(old);
+            }
+            let _ = DrawMenuBar(HWND(hwnd as *mut _));
+        }
+        ok
     }
 }
 
@@ -258,4 +265,16 @@ pub fn menu_command(msg: *const std::ffi::c_void) -> Option<u32> {
     // Menu : mot de poids fort de `wParam` = 0 et `lParam` = 0 (sinon contrôle ou accélérateur).
     (m.message == WM_COMMAND && (m.wParam.0 >> 16) & 0xffff == 0 && m.lParam.0 == 0)
         .then_some((m.wParam.0 & 0xffff) as u32)
+}
+
+extern "system" {
+    fn GetUserDefaultUILanguage() -> u16;
+}
+
+/// La langue d'affichage de Windows est le français (choix de la langue par défaut de l'interface).
+#[must_use]
+pub fn ui_language_is_french() -> bool {
+    // SAFETY: appel Win32 sans argument ni effet de bord.
+    let id = unsafe { GetUserDefaultUILanguage() };
+    id & 0x03ff == 0x000c // identifiant de langue principal : LANG_FRENCH
 }

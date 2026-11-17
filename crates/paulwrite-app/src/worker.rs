@@ -10,6 +10,8 @@ use crossbeam_channel::{unbounded, Sender};
 use paulwrite_core::io::{self, LoadOptions};
 use paulwrite_core::{Buffer, Document, Encoding};
 use paulwrite_render::platform::{self, SaveChoice};
+
+use crate::i18n::Lang;
 use ropey::Rope;
 
 use crate::config::Config;
@@ -38,13 +40,14 @@ pub enum Job {
         owner: isize,
         name: String,
         for_: ConfirmFor,
+        lang: Lang,
     },
     /// Affiche un message d'erreur (sans réponse).
     ShowError { owner: isize, text: String },
     /// Lire et décoder un fichier pour l'onglet `tab`.
     Open { tab: TabId, path: PathBuf },
     /// Boîte « Ouvrir » (bloquante).
-    PickOpen { owner: isize },
+    PickOpen { owner: isize, lang: Lang },
     /// Boîte « Ouvrir un dossier » (bloquante).
     PickFolder { owner: isize },
     /// Liste le contenu d'un dossier (barre latérale).
@@ -54,7 +57,11 @@ pub enum Job {
         tab: TabId,
         owner: isize,
         suggested: String,
+        lang: Lang,
     },
+    /// Enregistre un réglage dans `config.toml` (clé et valeur texte) ; le fichier est créé au
+    /// besoin, le reste de son contenu est conservé.
+    SaveSetting { key: &'static str, value: String },
     /// Écriture atomique ; `rope` est un clone O(1) du contenu au moment de la demande.
     Save {
         tab: TabId,
@@ -75,6 +82,7 @@ impl std::fmt::Debug for Job {
             Job::PickFolder { .. } => write!(f, "PickFolder"),
             Job::ListDir { path } => write!(f, "ListDir({path:?})"),
             Job::PickSave { tab, .. } => write!(f, "PickSave({tab})"),
+            Job::SaveSetting { key, .. } => write!(f, "SaveSetting({key})"),
             Job::Save { tab, path, .. } => write!(f, "Save({tab}, {path:?})"),
         }
     }
@@ -173,7 +181,21 @@ const CONFIG_TEMPLATE: &str =
 # highlight = true                # false : pas de coloration syntaxique\n\
 # highlight_max_bytes = 1048576   # au-delà de cette taille (octets), pas de coloration\n\
 # lsp = false                     # true : serveurs de langage (programmes externes)\n\
-# lsp_rust = \"rust-analyzer\"\n";
+# lsp_rust = \"rust-analyzer\"\n\
+# language = \"auto\"              # \"en\", \"fr\" ou \"auto\" (langue de Windows)\n\
+# word_wrap = true                # false : pas de retour \u{e0} la ligne automatique\n";
+
+/// Écrit `key = "value"` dans `config.toml` (appelé sur le worker).
+fn save_setting(key: &str, value: &str) -> std::io::Result<()> {
+    let Some(path) = Config::path() else {
+        return Ok(());
+    };
+    let current = std::fs::read_to_string(&path).unwrap_or_else(|_| CONFIG_TEMPLATE.to_owned());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, Config::with_setting(&current, key, value))
+}
 
 /// Charge un fichier en document (appelé sur le worker).
 fn load(tab: TabId, path: &Path, notify: &dyn Fn(Done)) -> Result<Document, String> {
@@ -205,9 +227,20 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
             notify(Done::Config(Config::load()));
             for job in rx {
                 match job {
-                    Job::ConfirmSave { owner, name, for_ } => notify(Done::SaveConfirmed {
+                    Job::ConfirmSave {
+                        owner,
+                        name,
                         for_,
-                        choice: platform::confirm_save(owner, &name),
+                        lang,
+                    } => notify(Done::SaveConfirmed {
+                        for_,
+                        choice: platform::confirm_save(
+                            owner,
+                            &lang.pick(
+                                format!("Save changes to \u{ab} {name} \u{bb}?"),
+                                format!("Enregistrer les modifications de \u{ab} {name} \u{bb} ?"),
+                            ),
+                        ),
                     }),
                     Job::ShowError { owner, text } => platform::show_error(owner, &text),
                     Job::Open { tab, path } => {
@@ -225,8 +258,9 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                             notify(Done::Loaded { tab, path, result });
                         }
                     }
-                    Job::PickOpen { owner } => {
-                        notify(Done::OpenPicked(platform::pick_open_file(owner)));
+                    Job::PickOpen { owner, lang } => {
+                        let all = lang.pick("All files", "Tous les fichiers");
+                        notify(Done::OpenPicked(platform::pick_open_file(owner, all)));
                     }
                     Job::PickFolder { owner } => {
                         notify(Done::FolderPicked(platform::pick_folder(owner)));
@@ -239,10 +273,20 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                         tab,
                         owner,
                         suggested,
+                        lang,
                     } => notify(Done::SavePicked {
                         tab,
-                        path: platform::pick_save_file(owner, &suggested),
+                        path: platform::pick_save_file(
+                            owner,
+                            &suggested,
+                            lang.pick("All files", "Tous les fichiers"),
+                        ),
                     }),
+                    Job::SaveSetting { key, value } => {
+                        if let Err(e) = save_setting(key, &value) {
+                            eprintln!("r\u{e9}glage {key} non enregistr\u{e9} : {e}");
+                        }
+                    }
                     Job::Save {
                         tab,
                         path,

@@ -33,6 +33,7 @@ use winit::window::{Cursor, CursorIcon, Window, WindowId};
 use crate::command::{Command, Effect, LspAction};
 use crate::config::Config;
 use crate::editor::{Preedit, Squiggle};
+use crate::i18n::Lang;
 use crate::keymap;
 use crate::menu;
 use crate::metrics::Samples;
@@ -45,6 +46,8 @@ const BLINK: Duration = Duration::from_millis(530);
 /// Délai minimal entre deux reconstructions de la minimap pendant la frappe : elle se met à jour
 /// au plus tous les 150 ms (et à la fin de la frappe), jamais à chaque touche.
 const MINIMAP_DELAY: Duration = Duration::from_millis(150);
+/// Silence après la dernière frappe avant de redemander la coloration du document entier (minimap).
+const OVERVIEW_DELAY: Duration = Duration::from_millis(400);
 
 /// Éditeur de l'onglet actif (macro plutôt que méthode : emprunt disjoint des autres champs).
 macro_rules! ed {
@@ -322,6 +325,8 @@ struct App {
     /// Retour à la ligne automatique voulu (commun à tous les onglets ; désactivé de fait pour
     /// un fichier trop gros, voir `Config::can_wrap`).
     word_wrap: bool,
+    /// Langue de l'interface (réglage `language`, sinon celle de Windows).
+    lang: Lang,
     /// La souris survole la gouttière : les flèches de repli sont affichées.
     fold_hover: bool,
     /// Dernier survol transmis au moteur de rendu : gouttière, flèche, onglet, barre latérale.
@@ -364,7 +369,9 @@ struct App {
     /// Mesures : durée de chaque étape d'une image (préparation, interface, dessin, copie).
     stages: [Samples; 6],
     /// Dernière minimap fournie au rendu : clé (onglet, révision, première ligne) et instant.
-    minimap_key: Option<(TabId, u64, usize)>,
+    minimap_key: Option<(TabId, u64, usize, u64)>,
+    /// Échéance de la prochaine demande de coloration du document entier (après une frappe).
+    overview_due: Option<Instant>,
     minimap_at: Instant,
     /// La minimap est en retard sur le texte : une image est à redemander à l'échéance.
     minimap_pending: bool,
@@ -439,6 +446,7 @@ impl App {
             dragging: false,
             wheel_lines: 0.0,
             word_wrap,
+            lang: Lang::system(),
             fold_hover: false,
             hover: Hover::default(),
             next_blink: Instant::now() + BLINK,
@@ -468,6 +476,7 @@ impl App {
             status_buf: String::new(),
             stages: Default::default(),
             minimap_key: None,
+            overview_due: None,
             minimap_at: Instant::now(),
             minimap_pending: false,
             strip_drag: None,
@@ -567,7 +576,9 @@ impl App {
         let len = ed!(self).document().buffer().len_bytes();
         let wrap = self.word_wrap && self.config.can_wrap(len);
         let marks = self.fold_hover;
+        let lang = self.lang;
         let e = &mut self.tabs[self.active].editor;
+        e.set_lang(lang);
         e.set_wrap(wrap);
         e.set_fold_marks(marks);
         e.set_viewport_cols(cols);
@@ -669,6 +680,8 @@ impl App {
                     range: range.clone(),
                 })
                 .ok();
+                // la minimap colorée : le worker colore tout le document quand il est au repos
+                tx.send(syntax::Request::Overview { tab: tab.id }).ok();
                 tab.requested = Some(range);
             }
             _ => {
@@ -691,6 +704,7 @@ impl App {
         }
         let edits = tab.editor.take_edits();
         if !edits.is_empty() {
+            self.overview_due = Some(Instant::now() + OVERVIEW_DELAY);
             let range = tab.editor.view_bytes(SYNTAX_MARGIN_LINES);
             self.syntax_tx
                 .send(syntax::Request::Edit {
@@ -766,6 +780,7 @@ impl App {
                 owner: self.hwnd,
                 name: self.tabs[index].editor.display_name(),
                 for_,
+                lang: self.lang,
             })
             .ok();
     }
@@ -791,6 +806,7 @@ impl App {
                         tab: tab.id,
                         owner: self.hwnd,
                         suggested: tab.editor.display_name(),
+                        lang: self.lang,
                     })
                     .ok();
             }
@@ -952,12 +968,18 @@ impl App {
             return;
         }
         if !self.config.lsp {
-            self.toast("Serveurs de langage désactivés : ajoutez « lsp = true » à config.toml");
+            self.toast(self.lang.pick(
+                "Language servers are off: add \u{ab} lsp = true \u{bb} to config.toml",
+                "Serveurs de langage désactivés : ajoutez « lsp = true » à config.toml",
+            ));
             return;
         }
         let tab = &self.tabs[self.active];
         let Some(path) = tab.lsp_path.clone() else {
-            self.toast("Pas de serveur de langage pour ce document");
+            self.toast(self.lang.pick(
+                "No language server for this document",
+                "Pas de serveur de langage pour ce document",
+            ));
             return;
         };
         let (line, col16) = tab.editor.caret_lsp_position();
@@ -1002,7 +1024,7 @@ impl App {
     fn open_list_palette(&mut self, mode: PaletteMode, items: Vec<Item>, note: String) {
         self.close_palette();
         let mut st = PaletteState {
-            palette: Palette::new(mode),
+            palette: self.new_palette(mode),
             root: self.palette_root(),
             finder: None,
             commands: Vec::new(),
@@ -1026,7 +1048,7 @@ impl App {
         let finder = FuzzyFinder::new(self.wake_callback());
         let injector = finder.injector();
         let mut st = PaletteState {
-            palette: Palette::new(PaletteMode::Completion),
+            palette: self.new_palette(PaletteMode::Completion),
             root: self.palette_root(),
             finder: None,
             commands: Vec::new(),
@@ -1083,6 +1105,7 @@ impl App {
         };
         match self.sidebar.as_mut() {
             Some(tree) if self.sidebar_open => {
+                tree.set_lang(self.lang);
                 for dir in tree.take_listing_requests() {
                     self.jobs.send(Job::ListDir { path: dir }).ok();
                 }
@@ -1157,9 +1180,14 @@ impl App {
             })
             .collect();
         let note = if items.is_empty() {
-            "Aucun diagnostic".to_owned()
+            self.lang
+                .pick("No diagnostics", "Aucun diagnostic")
+                .to_owned()
         } else {
-            format!("{} diagnostic(s)", items.len())
+            self.lang.pick(
+                format!("{} diagnostic(s)", items.len()),
+                format!("{} diagnostic(s)", items.len()),
+            )
         };
         self.open_list_palette(PaletteMode::Diagnostics, items, note);
     }
@@ -1197,7 +1225,7 @@ impl App {
                     return;
                 };
                 if items.is_empty() {
-                    self.toast("Aucune complétion");
+                    self.toast(self.lang.pick("No completions", "Aucune complétion"));
                 } else {
                     self.open_completion(&items, p.prefix);
                 }
@@ -1213,7 +1241,10 @@ impl App {
                     return;
                 }
                 match text {
-                    None => self.toast("Rien à afficher sous le curseur"),
+                    None => self.toast(self.lang.pick(
+                        "Nothing to show at the cursor",
+                        "Rien à afficher sous le curseur",
+                    )),
                     Some(text) => {
                         let items: Vec<Item> = text
                             .lines()
@@ -1235,7 +1266,10 @@ impl App {
                     return;
                 }
                 match locations.as_slice() {
-                    [] => self.toast("Définition introuvable"),
+                    [] => self.toast(
+                        self.lang
+                            .pick("Definition not found", "Définition introuvable"),
+                    ),
                     [one] => self.open_path_at(one.path.clone(), Some(one.line + 1)),
                     many => {
                         let root = self.palette_root();
@@ -1265,7 +1299,10 @@ impl App {
                 }
             }
             lsp::Event::ServerStarted { language } => {
-                self.toast(format!("Serveur de langage « {language} » prêt"));
+                self.toast(self.lang.pick(
+                    format!("Language server \u{ab} {language} \u{bb} ready"),
+                    format!("Serveur de langage « {language} » prêt"),
+                ));
                 if let Some(BenchKind::Lsp(n)) = self.opts.bench {
                     self.start_bench_typing(n);
                 }
@@ -1273,13 +1310,21 @@ impl App {
             lsp::Event::ServerError { language, message } => {
                 // une seule boîte de message par langage (sinon une par document ouvert)
                 if self.lsp_errors_shown.insert(language.clone()) {
-                    self.show_error(format!(
-                        "Serveur de langage « {language} » indisponible :\n{message}\n\nInstallez-le ou changez `lsp_{language}` dans la configuration."
+                    self.show_error(self.lang.pick(
+                        format!(
+                            "Language server \u{ab} {language} \u{bb} unavailable:\n{message}\n\nInstall it or change `lsp_{language}` in the configuration."
+                        ),
+                        format!(
+                            "Serveur de langage « {language} » indisponible :\n{message}\n\nInstallez-le ou changez `lsp_{language}` dans la configuration."
+                        ),
                     ));
                 }
             }
             lsp::Event::ServerExited { language } => {
-                self.toast(format!("Le serveur de langage « {language} » s'est arrêté"));
+                self.toast(self.lang.pick(
+                    format!("Language server \u{ab} {language} \u{bb} stopped"),
+                    format!("Le serveur de langage « {language} » s'est arrêté"),
+                ));
             }
         }
     }
@@ -1318,7 +1363,7 @@ impl App {
 
     fn invoke_plugin(&mut self, command: String) {
         if self.plugins_tx.is_none() {
-            self.toast("Plugins non chargés");
+            self.toast(self.lang.pick("Plugins not loaded", "Plugins non chargés"));
             return;
         }
         self.plugin_next_id += 1;
@@ -1353,7 +1398,10 @@ impl App {
                 plugins::Action::Message(m) => self.toast(m),
                 plugins::Action::Run(name) => match Command::from_name(&name) {
                     Some(cmd) => self.execute(cmd, el),
-                    None => self.toast(format!("Commande inconnue : {name}")),
+                    None => self.toast(self.lang.pick(
+                        format!("Unknown command: {name}"),
+                        format!("Commande inconnue : {name}"),
+                    )),
                 },
                 plugins::Action::GotoLine(n) => ed!(self).goto(n, 0),
             }
@@ -1411,12 +1459,53 @@ impl App {
         }
     }
 
+    /// Panneau vide dans la langue de l'interface.
+    fn new_palette(&self, mode: PaletteMode) -> Palette {
+        let mut p = Palette::new(mode);
+        p.set_lang(self.lang);
+        p
+    }
+
+    /// Applique la langue de l'interface partout : éditeurs, barre latérale, panneau, menus.
+    fn apply_lang(&mut self) {
+        let lang = self.lang;
+        for t in &mut self.tabs {
+            t.editor.set_lang(lang);
+        }
+        if let Some(st) = self.palette.as_mut() {
+            st.palette.set_lang(lang);
+        }
+        if self.hwnd != 0 {
+            let (bar, table) = menu::build(lang);
+            if platform::set_menu(self.hwnd, &bar) {
+                self.menu_commands = table;
+            }
+        }
+        self.tabs_dirty = true;
+        self.overlay_dirty = true;
+        self.request_redraw();
+    }
+
+    /// Choix de la langue dans les préférences : appliqué tout de suite et enregistré dans
+    /// `config.toml` (sur le worker).
+    fn set_language(&mut self, lang: Lang) {
+        self.lang = lang;
+        self.apply_lang();
+        self.jobs
+            .send(Job::SaveSetting {
+                key: "language",
+                value: lang.code().to_owned(),
+            })
+            .ok();
+        self.toast(lang.pick("Language: English", "Langue : Français"));
+    }
+
     /// Ouvre le panneau dans ce mode (remplace celui qui était ouvert).
     fn open_palette(&mut self, mode: PaletteMode) {
         self.close_palette();
         let root = self.palette_root();
         let mut st = PaletteState {
-            palette: Palette::new(mode),
+            palette: self.new_palette(mode),
             root: root.clone(),
             finder: None,
             commands: Vec::new(),
@@ -1456,7 +1545,7 @@ impl App {
                 let finder = FuzzyFinder::new(self.wake_callback());
                 let injector = finder.injector();
                 for cmd in Command::all() {
-                    let title = cmd.title();
+                    let title = cmd.title_in(self.lang);
                     let candidate = format!("{title} {}", cmd.name());
                     let shortcut = keymap::shortcut_label(cmd).unwrap_or_default();
                     let detail = if shortcut.is_empty() {
@@ -1472,7 +1561,10 @@ impl App {
                 }
                 // Commandes déclarées par les plugins Lua.
                 for c in &self.plugin_commands {
-                    let title = format!("Plugin : {}", c.title);
+                    let title = self.lang.pick(
+                        format!("Plugin: {}", c.title),
+                        format!("Plugin : {}", c.title),
+                    );
                     let candidate = format!("{title} {}", c.name);
                     st.candidate_index
                         .insert(candidate.clone(), st.commands.len());
@@ -1491,7 +1583,8 @@ impl App {
             | PaletteMode::Hover => {}
             PaletteMode::Search => {
                 st.palette.set_note(format!(
-                    "Dans {}",
+                    "{} {}",
+                    self.lang.pick("In", "Dans"),
                     root.file_name().map_or_else(
                         || root.display().to_string(),
                         |n| n.to_string_lossy().into_owned()
@@ -1582,7 +1675,9 @@ impl App {
                     Some(n) => {
                         let n = n.min(total_lines);
                         vec![Item {
-                            label: format!("Aller à la ligne {n}"),
+                            label: self
+                                .lang
+                                .pick(format!("Go to line {n}"), format!("Aller à la ligne {n}")),
                             detail: format!("sur {total_lines}"),
                             highlights: Vec::new(),
                             target: Target::Line(n),
@@ -1591,7 +1686,10 @@ impl App {
                     None => Vec::new(),
                 };
                 st.palette.set_note(if items.is_empty() {
-                    format!("Numéro de ligne, de 1 à {total_lines}")
+                    self.lang.pick(
+                        format!("Line number, from 1 to {total_lines}"),
+                        format!("Numéro de ligne, de 1 à {total_lines}"),
+                    )
                 } else {
                     String::new()
                 });
@@ -1651,11 +1749,18 @@ impl App {
         st.search_matches = 0;
         st.palette.set_items(Vec::new(), true);
         if query.chars().count() < 2 {
-            st.palette
-                .set_note("Saisir au moins 2 caractères".to_owned());
+            st.palette.set_note(
+                self.lang
+                    .pick("Type at least 2 characters", "Saisir au moins 2 caractères")
+                    .to_owned(),
+            );
             return;
         }
-        st.palette.set_note("Recherche…".to_owned());
+        st.palette.set_note(
+            self.lang
+                .pick("Searching\u{2026}", "Recherche\u{2026}")
+                .to_owned(),
+        );
         let (generation, root, cancel) = (st.generation, st.root.clone(), st.cancel.clone());
         // Minuscules seulement : insensible à la casse ; une majuscule la rend sensible.
         let case_sensitive = query.chars().any(char::is_uppercase);
@@ -1946,26 +2051,38 @@ impl App {
                 .push_str(text.lines().next().unwrap_or_default()),
             None => tab.editor.write_status(&mut self.status_buf),
         }
-        let language = tab.language.map_or("Plain Text", |l| l.display_name());
+        let language = tab
+            .language
+            .map_or(self.lang.pick("Plain Text", "Texte brut"), |l| {
+                l.display_name()
+            });
+        let tab_size = self.lang.pick("Tab Size: 4", "Tabulation : 4");
         r.set_chrome(&Chrome {
             line_digits: tab.editor.line_digits(),
             status_left: &self.status_buf,
-            status_right: &["Tab Size: 4", language],
+            status_right: &[tab_size, language],
             scroll: Some(tab.editor.scroll()),
         });
         // La minimap suit le défilement tout de suite, mais le texte tapé avec retard.
-        let key = (tab.id, tab.editor.revision(), tab.editor.first_line());
+        let key = (
+            tab.id,
+            tab.editor.revision(),
+            tab.editor.first_line(),
+            tab.editor.overview_version(),
+        );
         let missing = r.minimap_needs_source();
         if self.minimap_key != Some(key) || missing {
             let text_only = !missing
-                && self
-                    .minimap_key
-                    .is_some_and(|(id, _, first)| id == key.0 && first == key.2);
+                && self.minimap_key.is_some_and(|(id, _, first, colors)| {
+                    id == key.0 && first == key.2 && colors == key.3
+                });
             if text_only && self.minimap_at.elapsed() < MINIMAP_DELAY {
                 self.minimap_pending = true;
             } else {
                 // clé d'image : l'onglet fait partie de la révision (deux onglets peuvent avoir la même)
-                let revision = key.1 ^ key.0.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                let revision = key.1
+                    ^ key.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    ^ key.3.wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
                 if let Err(e) = r.set_minimap(&tab.editor.minimap(), revision) {
                     eprintln!("minimap : {e}");
                 }
@@ -2032,11 +2149,16 @@ impl App {
         let tab = &self.tabs[self.active];
         let title = match tab.loading {
             Some((done, total)) if total > 0 => format!(
-                "Chargement… {} % — {}",
+                "{} {} % \u{2014} {}",
+                self.lang.pick("Loading\u{2026}", "Chargement\u{2026}"),
                 done * 100 / total,
                 tab.editor.display_name()
             ),
-            Some(_) => format!("Chargement… — {}", tab.editor.display_name()),
+            Some(_) => format!(
+                "{} \u{2014} {}",
+                self.lang.pick("Loading\u{2026}", "Chargement\u{2026}"),
+                tab.editor.display_name()
+            ),
             None => tab.editor.title(),
         };
         if title != self.title {
@@ -2108,11 +2230,17 @@ impl App {
                         tab: tab.id,
                         owner: self.hwnd,
                         suggested: tab.editor.display_name(),
+                        lang: self.lang,
                     })
                     .ok();
             }
             Effect::Open => {
-                self.jobs.send(Job::PickOpen { owner: self.hwnd }).ok();
+                self.jobs
+                    .send(Job::PickOpen {
+                        owner: self.hwnd,
+                        lang: self.lang,
+                    })
+                    .ok();
             }
             Effect::NewTab => {
                 let i = self.push_tab();
@@ -2136,23 +2264,39 @@ impl App {
             Effect::ToggleSidebar => self.toggle_sidebar(),
             Effect::OpenSettings => match Config::path() {
                 Some(path) => self.open_path(path),
-                None => self.toast("Dossier de configuration introuvable (%APPDATA%)"),
+                None => self.toast(self.lang.pick(
+                    "Configuration folder not found (%APPDATA%)",
+                    "Dossier de configuration introuvable (%APPDATA%)",
+                )),
             },
-            Effect::About => self.toast(format!(
-                "PaulWrite {} \u{2014} éditeur de texte rapide",
-                env!("CARGO_PKG_VERSION")
+            Effect::About => self.toast(self.lang.pick(
+                format!(
+                    "PaulWrite {} \u{2014} fast text editor",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                format!(
+                    "PaulWrite {} \u{2014} éditeur de texte rapide",
+                    env!("CARGO_PKG_VERSION")
+                ),
             )),
+            Effect::SetLanguage(lang) => self.set_language(lang),
             Effect::ToggleWordWrap => {
                 self.word_wrap = !self.word_wrap;
                 let large = !self
                     .config
                     .can_wrap(ed!(self).document().buffer().len_bytes());
                 let state = match (self.word_wrap, large) {
-                    (true, true) => "on (not applied: file too large)",
-                    (true, false) => "on",
-                    (false, _) => "off",
+                    (true, true) => self.lang.pick(
+                        "on (not applied: file too large)",
+                        "activé (sans effet : fichier trop gros)",
+                    ),
+                    (true, false) => self.lang.pick("on", "activé"),
+                    (false, _) => self.lang.pick("off", "désactivé"),
                 };
-                self.toast(format!("Word wrap: {state}"));
+                self.toast(format!(
+                    "{} {state}",
+                    self.lang.pick("Word wrap:", "Retour à la ligne :")
+                ));
                 self.request_redraw();
             }
             Effect::Lsp(action) => self.lsp_request(action),
@@ -2161,7 +2305,7 @@ impl App {
                     self.plugin_reload_requested = true;
                     tx.send(plugins::Request::Reload).ok();
                 } else {
-                    self.toast("Plugins non chargés");
+                    self.toast(self.lang.pick("Plugins not loaded", "Plugins non chargés"));
                 }
             }
             Effect::Quit => self.request_quit(el),
@@ -2206,6 +2350,14 @@ impl App {
             }
             later(800, 1);
             return;
+        }
+        // `PAULWRITE_SCREENSHOT_LANG=fr|en` : langue de la capture (la configuration l'emporterait).
+        if let Some(lang) = std::env::var("PAULWRITE_SCREENSHOT_LANG")
+            .ok()
+            .and_then(|l| Lang::from_code(&l))
+        {
+            self.lang = lang;
+            self.apply_lang();
         }
         self.redraw(el);
         if let (Some(path), Some(r)) = (&self.opts.screenshot, self.renderer.as_ref()) {
@@ -2649,7 +2801,7 @@ impl ApplicationHandler<UserEvent> for App {
         };
         // Barre de menus native (avant de lire la taille : elle réduit la zone cliente).
         if !self.is_bench() {
-            let (bar, table) = menu::build();
+            let (bar, table) = menu::build(self.lang);
             if platform::set_menu(self.hwnd, &bar) {
                 self.menu_commands = table;
             }
@@ -2790,10 +2942,17 @@ impl ApplicationHandler<UserEvent> for App {
                     if !report.errors.is_empty() {
                         let shown: Vec<&str> =
                             report.errors.iter().take(5).map(String::as_str).collect();
-                        self.show_error(format!(
-                            "Erreurs de plugin ({} au total) :\n{}",
-                            report.errors.len(),
-                            shown.join("\n")
+                        self.show_error(self.lang.pick(
+                            format!(
+                                "Plugin errors ({} in total):\n{}",
+                                report.errors.len(),
+                                shown.join("\n")
+                            ),
+                            format!(
+                                "Erreurs de plugin ({} au total) :\n{}",
+                                report.errors.len(),
+                                shown.join("\n")
+                            ),
                         ));
                     } else if self.plugin_reload_requested {
                         self.toast(format!(
@@ -2810,7 +2969,10 @@ impl ApplicationHandler<UserEvent> for App {
                 plugins::Response::Done { id, actions, error } => {
                     self.apply_plugin_actions(actions, el);
                     if let Some(e) = error {
-                        self.toast(format!("Plugin : {e}"));
+                        self.toast(
+                            self.lang
+                                .pick(format!("Plugin: {e}"), format!("Plugin : {e}")),
+                        );
                     }
                     if id != 0 && matches!(self.opts.bench, Some(BenchKind::Plugin(_))) {
                         if let Some(t) = self.plugin_sent_at.take() {
@@ -2879,6 +3041,14 @@ impl ApplicationHandler<UserEvent> for App {
                 if resp.revision != self.tabs[i].editor.revision() {
                     return;
                 }
+                if resp.overview {
+                    // coloration du document entier : seulement pour la minimap
+                    self.tabs[i].editor.set_overview(resp.range, resp.spans);
+                    if i == self.active {
+                        self.request_redraw();
+                    }
+                    return;
+                }
                 self.worker_time.push(resp.elapsed);
                 self.tabs[i].editor.set_spans(resp.range, resp.spans);
                 if let (Some(t), true) = (self.last_edit_at.take(), i == self.active) {
@@ -2900,8 +3070,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // Les modes de mesure ont leur propre configuration (voir `resumed`).
                     if !self.is_bench() {
                         self.word_wrap = c.word_wrap && !self.opts.no_wrap;
+                        self.lang = c.lang();
                         self.config = c;
-                        self.request_redraw();
+                        self.apply_lang();
                     }
                 }
                 Done::FolderPicked(Some(path)) => self.set_project_root(path),
@@ -2991,9 +3162,9 @@ impl ApplicationHandler<UserEvent> for App {
                             self.lsp_open_tab(i);
                         }
                         Err(e) => {
-                            self.show_error(format!(
-                                "Impossible d'ouvrir « {} » :\n{e}",
-                                path.display()
+                            self.show_error(self.lang.pick(
+                                format!("Cannot open \u{ab} {} \u{bb}:\n{e}", path.display()),
+                                format!("Impossible d'ouvrir « {} » :\n{e}", path.display()),
                             ));
                             // L'onglet créé pour ce fichier n'a plus de raison d'être.
                             if self.tabs.len() > 1 {
@@ -3039,9 +3210,12 @@ impl ApplicationHandler<UserEvent> for App {
                         Err(e) => {
                             self.after_save = None;
                             self.quit_queue.clear();
-                            self.show_error(format!(
-                                "Échec de l'enregistrement de « {} » :\n{e}",
-                                path.display()
+                            self.show_error(self.lang.pick(
+                                format!("Cannot save \u{ab} {} \u{bb}:\n{e}", path.display()),
+                                format!(
+                                    "Échec de l'enregistrement de « {} » :\n{e}",
+                                    path.display()
+                                ),
                             ));
                         }
                     }
@@ -3347,10 +3521,24 @@ impl ApplicationHandler<UserEvent> for App {
         if self.minimap_pending && now >= self.minimap_at + MINIMAP_DELAY {
             self.request_redraw();
         }
+        if let Some(due) = self.overview_due {
+            if now >= due {
+                self.overview_due = None;
+                let tab = &self.tabs[self.active];
+                if tab.syntax_on {
+                    self.syntax_tx
+                        .send(syntax::Request::Overview { tab: tab.id })
+                        .ok();
+                }
+            }
+        }
         let mut wake = self
             .toast
             .as_ref()
             .map_or(self.next_blink, |(_, until)| (*until).min(self.next_blink));
+        if let Some(due) = self.overview_due {
+            wake = wake.min(due);
+        }
         if self.minimap_pending {
             wake = wake.min(self.minimap_at + MINIMAP_DELAY);
         }

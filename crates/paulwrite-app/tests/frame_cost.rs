@@ -178,3 +178,103 @@ fn cout_du_retour_a_la_ligne_et_du_repli() {
         }
     );
 }
+
+/// Coloration du document entier pour la minimap : durée côté worker et coût côté interface
+/// (décalage des plages à chaque frappe, construction de l'image colorée de la minimap).
+#[test]
+#[ignore = "mesure"]
+fn cout_de_la_minimap_coloree() {
+    use paulwrite_core::Buffer;
+    use paulwrite_syntax::{spawn, Language, Request};
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    // ≈ 1 Mo de Rust
+    let mut src = String::from("use std::collections::HashMap;\n\n");
+    let mut i = 0;
+    while src.len() < 1_000_000 {
+        src.push_str(&format!(
+            "/// Fonction {i}.\nfn compute_{i}(a: i32, b: &str) -> Option<usize> {{\n    let mut map: HashMap<String, usize> = HashMap::new();\n    // calcul {i}\n    if a > {n} {{\n        map.insert(format!(\"cle-{{}}\", b), {n});\n    }}\n    map.get(b).copied()\n}}\n\n",
+            n = i * 7 % 1000
+        ));
+        i += 1;
+    }
+    let buf = Buffer::from_text(&src);
+    let (tx_out, rx_out) = mpsc::channel();
+    let tx_out = Mutex::new(tx_out);
+    let tx = spawn(move |r| {
+        let _ = tx_out.lock().unwrap().send(r);
+    });
+    tx.send(Request::Open {
+        tab: 1,
+        language: Language::Rust,
+        rope: buf.rope().clone(),
+        revision: buf.revision(),
+    })
+    .unwrap();
+    let _ = rx_out.recv_timeout(Duration::from_secs(60)).unwrap();
+    let t = Instant::now();
+    tx.send(Request::Overview { tab: 1 }).unwrap();
+    let r = loop {
+        let r = rx_out.recv_timeout(Duration::from_secs(60)).unwrap();
+        if r.overview {
+            break r;
+        }
+    };
+    println!(
+        "document : {:.2} Mo, {} lignes ; coloration entière (worker) : {:.0} ms, {} plages",
+        src.len() as f64 / 1e6,
+        src.lines().count(),
+        ms(t),
+        r.spans.len()
+    );
+
+    // côté interface : décalage des plages à chaque frappe, image de la minimap
+    let size = (1100u32, 720u32);
+    let mut rd = SoftRenderer::new(1.0, size, Colors::default()).unwrap();
+    rd.set_tabs(&[TabInfo {
+        label: "x.rs",
+        modified: false,
+        active: true,
+    }]);
+    let rows = rd.metrics().rows_for(size.1);
+    let mut e = Editor::from_document(Document::from_text(&src), None);
+    e.set_viewport_rows(rows);
+    e.enable_syntax(true);
+    e.set_overview(r.range.clone(), r.spans);
+    let mut status = String::new();
+    e.write_status(&mut status);
+    rd.set_chrome(&Chrome {
+        line_digits: e.line_digits(),
+        status_left: &status,
+        status_right: &["Tab Size: 4", "Rust"],
+        scroll: Some(e.scroll()),
+    });
+    let mut v = Vec::new();
+    for k in 0..300 {
+        let t = Instant::now();
+        e.insert_text("x", k);
+        let _ = e.take_edits();
+        v.push(ms(t));
+    }
+    println!(
+        "frappe + décalage des plages (take_edits) : {}",
+        stats(&mut v)
+    );
+    let mut v = Vec::new();
+    for k in 0..200 {
+        let t = Instant::now();
+        rd.set_minimap(&e.minimap(), 1000 + k).unwrap();
+        v.push(ms(t));
+    }
+    println!("set_minimap, colorée : {}", stats(&mut v));
+    e.enable_syntax(false);
+    let mut v = Vec::new();
+    for k in 0..200 {
+        let t = Instant::now();
+        rd.set_minimap(&e.minimap(), 5000 + k).unwrap();
+        v.push(ms(t));
+    }
+    println!("set_minimap, grise : {}", stats(&mut v));
+}

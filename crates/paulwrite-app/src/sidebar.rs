@@ -4,6 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::i18n::Lang;
+
 use paulwrite_render::{Sidebar, SidebarKind, SidebarRow};
 
 /// Un élément d'un dossier.
@@ -67,6 +69,8 @@ pub struct SidebarTree {
     flat_dirty: bool,
     /// Contenu transmis au moteur de rendu, reconstruit quand il change.
     cache: Option<(usize, usize, Sidebar)>,
+    /// Langue du titre de la colonne.
+    lang: Lang,
 }
 
 impl SidebarTree {
@@ -85,6 +89,15 @@ impl SidebarTree {
             flat: Vec::new(),
             flat_dirty: true,
             cache: None,
+            lang: Lang::En,
+        }
+    }
+
+    /// Change la langue du titre (« Folders » / « Dossiers »).
+    pub fn set_lang(&mut self, lang: Lang) {
+        if self.lang != lang {
+            self.lang = lang;
+            self.cache = None;
         }
     }
 
@@ -223,7 +236,7 @@ impl SidebarTree {
                 .take(capacity)
                 .map(|n| match n {
                     Node::Header => SidebarRow {
-                        label: "Folders".to_owned(),
+                        label: self.lang.pick("Folders", "Dossiers").to_owned(),
                         depth: 0,
                         kind: SidebarKind::Header,
                         selected: false,
@@ -349,5 +362,15 @@ mod tests {
         // un clic tient compte du défilement
         t.scroll_by(4, 10);
         assert_eq!(t.click(0), Click::OpenFile(PathBuf::from("p").join("f02")));
+    }
+
+    #[test]
+    fn titre_dans_la_langue_choisie() {
+        let mut t = SidebarTree::new(PathBuf::from("/proj"));
+        assert_eq!(labels(&mut t, 10)[0], "Folders");
+        t.set_lang(Lang::Fr);
+        assert_eq!(labels(&mut t, 10)[0], "Dossiers");
+        t.set_lang(Lang::En);
+        assert_eq!(labels(&mut t, 10)[0], "Folders");
     }
 }

@@ -8,6 +8,8 @@
 
 use std::path::PathBuf;
 
+use crate::i18n::Lang;
+
 /// Taille maximale (octets) d'un fichier coloré par défaut. Au-delà, la coloration est désactivée
 /// (voir `docs/benchmarks.md` pour les mesures qui fondent cette valeur).
 pub const DEFAULT_HIGHLIGHT_MAX_BYTES: usize = 1024 * 1024;
@@ -19,6 +21,8 @@ pub const DEFAULT_WRAP_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Réglages de l'application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// Langue de l'interface : `language = "en"` ou `"fr"` ; absente ou `"auto"` : celle de Windows.
+    pub language: Option<Lang>,
     /// Retour à la ligne automatique au démarrage (`word_wrap = false` pour le désactiver).
     pub word_wrap: bool,
     /// Au-delà de cette taille, pas de retour à la ligne (`word_wrap_max_bytes`).
@@ -48,6 +52,7 @@ const DEFAULT_SERVERS: [(&str, &str); 7] = [
 impl Default for Config {
     fn default() -> Self {
         Self {
+            language: None,
             word_wrap: true,
             word_wrap_max_bytes: DEFAULT_WRAP_MAX_BYTES,
             highlight_max_bytes: DEFAULT_HIGHLIGHT_MAX_BYTES,
@@ -81,6 +86,7 @@ impl Config {
                         c.highlight = b;
                     }
                 }
+                "language" => c.language = Lang::from_code(value),
                 "word_wrap" => {
                     if let Ok(b) = value.parse::<bool>() {
                         c.word_wrap = b;
@@ -152,6 +158,44 @@ impl Config {
         self.highlight && len_bytes <= self.highlight_max_bytes
     }
 
+    /// Langue de l'interface : celle du réglage, sinon celle de Windows.
+    #[must_use]
+    pub fn lang(&self) -> Lang {
+        self.language.unwrap_or_else(Lang::system)
+    }
+
+    /// Texte de `config.toml` dans lequel la clé `key` vaut `value` : la ligne existante est
+    /// remplacée (commentaire de fin et fin de ligne conservés), sinon la ligne est ajoutée à la
+    /// fin. Le reste du fichier (commentaires, autres clés) est inchangé.
+    #[must_use]
+    pub fn with_setting(text: &str, key: &str, value: &str) -> String {
+        let new_line = format!("{key} = \"{value}\"");
+        let mut out = String::with_capacity(text.len() + new_line.len() + 1);
+        let mut done = false;
+        for line in text.split_inclusive('\n') {
+            let code = line.split('#').next().unwrap_or("");
+            let is_key = code.split_once('=').is_some_and(|(k, _)| k.trim() == key);
+            if is_key && !done {
+                done = true;
+                let eol = &line[line.trim_end_matches(['\r', '\n']).len()..];
+                let comment = line.find('#').map(|i| format!(" {}", line[i..].trim_end()));
+                out.push_str(&new_line);
+                out.push_str(&comment.unwrap_or_default());
+                out.push_str(if eol.is_empty() { "\n" } else { eol });
+            } else {
+                out.push_str(line);
+            }
+        }
+        if !done {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&new_line);
+            out.push('\n');
+        }
+        out
+    }
+
     /// Un document de `len_bytes` octets peut-il être affiché avec retour à la ligne ?
     #[must_use]
     pub fn can_wrap(&self, len_bytes: usize) -> bool {
@@ -219,5 +263,54 @@ mod tests {
             Config::parse("highlight_max_bytes = \"2048\"").highlight_max_bytes,
             2048
         );
+    }
+
+    #[test]
+    fn la_langue_vient_du_fichier() {
+        assert_eq!(Config::parse("language = \"fr\"").language, Some(Lang::Fr));
+        assert_eq!(Config::parse("language = en").language, Some(Lang::En));
+        assert_eq!(Config::parse("language = \"auto\"").language, None);
+        assert_eq!(Config::parse("language = \"klingon\"").language, None);
+        assert_eq!(Config::parse("").language, None);
+        let c = Config {
+            language: Some(Lang::Fr),
+            ..Config::default()
+        };
+        assert_eq!(c.lang(), Lang::Fr);
+    }
+
+    #[test]
+    fn ecrire_un_reglage_sans_toucher_au_reste() {
+        let w = Config::with_setting;
+        // absent : ajouté à la fin
+        assert_eq!(w("", "language", "fr"), "language = \"fr\"\n");
+        assert_eq!(
+            w("highlight = true", "language", "fr"),
+            "highlight = true\nlanguage = \"fr\"\n"
+        );
+        // présent : remplacé sur place, commentaire et fins de ligne conservés
+        assert_eq!(
+            w(
+                "# réglages\nlanguage = \"en\" # langue\nlsp = true\n",
+                "language",
+                "fr"
+            ),
+            "# réglages\nlanguage = \"fr\" # langue\nlsp = true\n"
+        );
+        assert_eq!(
+            w("a = 1\r\nlanguage = en\r\nb = 2\r\n", "language", "fr"),
+            "a = 1\r\nlanguage = \"fr\"\r\nb = 2\r\n"
+        );
+        // une clé qui contient le nom, ou un commentaire, n'est pas la clé
+        assert_eq!(
+            w("# language = en\nlanguage_x = 1\n", "language", "fr"),
+            "# language = en\nlanguage_x = 1\nlanguage = \"fr\"\n"
+        );
+        // le résultat est relu correctement, y compris deux fois de suite
+        let once = w("lsp = true\n", "language", "fr");
+        let twice = w(&once, "language", "en");
+        assert_eq!(Config::parse(&twice).language, Some(Lang::En));
+        assert!(Config::parse(&twice).lsp);
+        assert_eq!(twice.matches("language").count(), 1);
     }
 }

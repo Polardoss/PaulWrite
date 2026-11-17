@@ -3,6 +3,7 @@
 
 use paulwrite_core::Motion;
 
+use crate::i18n::Lang;
 use crate::palette::PaletteMode;
 
 /// Une fonctionnalité de l'éditeur, identifiée par un nom stable (`cursor.left`, `file.save`…).
@@ -79,6 +80,8 @@ pub enum Command {
     UnfoldAll,
     /// Active ou désactive le retour à la ligne automatique.
     ToggleWordWrap,
+    /// Choisit la langue de l'interface (enregistrée dans `config.toml`).
+    SetLanguage(Lang),
     Quit,
 }
 
@@ -158,6 +161,8 @@ impl Command {
             Command::FoldAll => "fold.fold_all",
             Command::UnfoldAll => "fold.unfold_all",
             Command::ToggleWordWrap => "view.toggle_word_wrap",
+            Command::SetLanguage(Lang::En) => "preferences.language_en",
+            Command::SetLanguage(Lang::Fr) => "preferences.language_fr",
             Command::Quit => "app.quit",
         }
     }
@@ -219,6 +224,8 @@ impl Command {
             Command::FoldAll,
             Command::UnfoldAll,
             Command::ToggleWordWrap,
+            Command::SetLanguage(Lang::En),
+            Command::SetLanguage(Lang::Fr),
             Command::Quit,
         ]);
         v
@@ -275,10 +282,108 @@ impl Command {
             Command::FoldAll => "Repli : tout replier",
             Command::UnfoldAll => "Repli : tout déplier",
             Command::ToggleWordWrap => "Affichage : retour à la ligne automatique",
+            Command::SetLanguage(Lang::En) => "Préférences : langue English",
+            Command::SetLanguage(Lang::Fr) => "Préférences : langue Français",
             Command::Quit => "Application : quitter",
         }
     }
 }
+
+impl Command {
+    /// Intitulé dans la langue de l'interface (palette de commandes).
+    #[must_use]
+    pub fn title_in(self, lang: Lang) -> &'static str {
+        match lang {
+            Lang::Fr => self.title(),
+            Lang::En => self.title_en(),
+        }
+    }
+
+    fn title_en(self) -> &'static str {
+        match self {
+            Command::Move(m) => MOVE_TITLES_EN[index_of(m)],
+            Command::Extend(m) => EXTEND_TITLES_EN[index_of(m)],
+            Command::PageUp(false) => "Cursor: page up",
+            Command::PageUp(true) => "Selection: page up",
+            Command::PageDown(false) => "Cursor: page down",
+            Command::PageDown(true) => "Selection: page down",
+            Command::ScrollUp => "View: scroll up",
+            Command::ScrollDown => "View: scroll down",
+            Command::InsertNewline => "Edit: new line",
+            Command::InsertTab => "Edit: tab",
+            Command::DeleteBackward => "Edit: delete backward",
+            Command::DeleteForward => "Edit: delete forward",
+            Command::Undo => "Edit: undo",
+            Command::Redo => "Edit: redo",
+            Command::SelectAll => "Selection: select all",
+            Command::CollapseSelections => "Selection: single selection",
+            Command::AddCursorAbove => "Cursor: add above",
+            Command::AddCursorBelow => "Cursor: add below",
+            Command::Copy => "Edit: copy",
+            Command::Cut => "Edit: cut",
+            Command::Paste => "Edit: paste",
+            Command::Save => "File: save",
+            Command::SaveAs => "File: save as",
+            Command::Open => "File: open",
+            Command::NewFile => "File: new",
+            Command::CloseTab => "Tab: close",
+            Command::NextTab => "Tab: next",
+            Command::PrevTab => "Tab: previous",
+            Command::GotoFile => "Goto project file",
+            Command::CommandPalette => "Command palette",
+            Command::GotoLine => "Goto line",
+            Command::SearchProject => "Find in project",
+            Command::ReloadPlugins => "Plugins: reload",
+            Command::LspCompletion => "Language: auto complete",
+            Command::LspDefinition => "Language: goto definition",
+            Command::LspHover => "Language: show documentation",
+            Command::LspDiagnostics => "Language: show diagnostics",
+            Command::OpenFolder => "Project: open folder",
+            Command::CloseFolder => "Project: close folder",
+            Command::ToggleSidebar => "View: side bar",
+            Command::OpenSettings => "Preferences: open settings",
+            Command::About => "Help: about PaulWrite",
+            Command::Fold => "Fold: fold region",
+            Command::Unfold => "Fold: unfold region",
+            Command::FoldAll => "Fold: fold all",
+            Command::UnfoldAll => "Fold: unfold all",
+            Command::ToggleWordWrap => "View: word wrap",
+            Command::SetLanguage(Lang::En) => "Preferences: language English",
+            Command::SetLanguage(Lang::Fr) => "Preferences: language Français",
+            Command::Quit => "Application: quit",
+        }
+    }
+}
+
+const MOVE_TITLES_EN: [&str; 12] = [
+    "Cursor: left",
+    "Cursor: right",
+    "Cursor: up",
+    "Cursor: down",
+    "Cursor: previous word",
+    "Cursor: next word",
+    "Cursor: line start",
+    "Cursor: line end",
+    "Cursor: previous paragraph",
+    "Cursor: next paragraph",
+    "Cursor: document start",
+    "Cursor: document end",
+];
+
+const EXTEND_TITLES_EN: [&str; 12] = [
+    "Selection: extend left",
+    "Selection: extend right",
+    "Selection: extend up",
+    "Selection: extend down",
+    "Selection: extend to previous word",
+    "Selection: extend to next word",
+    "Selection: extend to line start",
+    "Selection: extend to line end",
+    "Selection: extend to previous paragraph",
+    "Selection: extend to next paragraph",
+    "Selection: extend to document start",
+    "Selection: extend to document end",
+];
 
 fn index_of(m: Motion) -> usize {
     MOTIONS.iter().position(|(x, _)| *x == m).unwrap_or(0)
@@ -371,6 +476,8 @@ pub enum Effect {
     About,
     /// Bascule le retour à la ligne automatique (réglage commun à tous les onglets).
     ToggleWordWrap,
+    /// Change la langue de l'interface.
+    SetLanguage(Lang),
     Quit,
 }
 
@@ -399,6 +506,26 @@ mod tests {
             assert_eq!(Command::from_name(c.name()), Some(c));
         }
         assert_eq!(Command::from_name("n'existe.pas"), None);
+    }
+
+    #[test]
+    fn les_intitules_anglais_sont_complets_et_uniques() {
+        let mut titles: Vec<_> = Command::all()
+            .iter()
+            .map(|c| c.title_in(Lang::En))
+            .collect();
+        assert!(titles.iter().all(|t| !t.is_empty()));
+        let n = titles.len();
+        titles.sort_unstable();
+        titles.dedup();
+        assert_eq!(titles.len(), n, "intitulés anglais en double");
+        // l'anglais et le français diffèrent pour chaque commande (aucune traduction oubliée)
+        let same: Vec<_> = Command::all()
+            .into_iter()
+            .filter(|c| c.title_in(Lang::En) == c.title_in(Lang::Fr))
+            .map(Command::name)
+            .collect();
+        assert!(same.is_empty(), "non traduits : {same:?}");
     }
 
     #[test]

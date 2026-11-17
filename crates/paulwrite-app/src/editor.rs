@@ -12,6 +12,7 @@ use paulwrite_syntax::{kind, Span};
 
 use crate::command::{Command, Effect, LspAction};
 use crate::fold::{self, Folds};
+use crate::i18n::Lang;
 use crate::palette::PaletteMode;
 use crate::spans::SpanCache;
 use crate::view::{Pos, RowInfo, Walker};
@@ -89,6 +90,8 @@ pub struct Editor {
     cols: usize,
     /// Retour à la ligne automatique.
     wrap: bool,
+    /// Langue des textes de l'éditeur (barre d'état, nom d'un document sans fichier).
+    lang: Lang,
     /// Les flèches ▼ des lignes repliables sont calculées (la souris survole la gouttière).
     fold_marks: bool,
     /// Premier caractère affiché de chaque ligne (sans retour à la ligne).
@@ -122,6 +125,9 @@ pub struct Editor {
     cursor_line: usize,
     /// Plages colorées (coloration syntaxique) ; vide si la coloration est inactive.
     spans: SpanCache,
+    /// Coloration du document entier, pour la minimap (calculée par le worker au repos).
+    overview: SpanCache,
+    overview_version: u64,
 }
 
 impl Default for Editor {
@@ -154,6 +160,7 @@ impl Editor {
             rows: 40,
             cols: 0,
             wrap: false,
+            lang: Lang::En,
             fold_marks: false,
             hscroll: 0,
             pending_scroll: 0,
@@ -177,13 +184,17 @@ impl Editor {
             ime_anchor: None,
             cursor_line: 0,
             spans: SpanCache::default(),
+            overview: SpanCache::default(),
+            overview_version: 0,
         }
     }
 
     /// Remplace le document (fichier chargé). La vue repart du haut.
     pub fn load(&mut self, doc: Document, path: Option<PathBuf>) {
         let (rows, cols, wrap, marks) = (self.rows, self.cols, self.wrap, self.fold_marks);
+        let lang = self.lang;
         *self = Self::from_document(doc, path);
+        self.lang = lang;
         self.rows = rows;
         self.cols = cols;
         self.wrap = wrap;
@@ -230,7 +241,7 @@ impl Editor {
     #[must_use]
     pub fn display_name(&self) -> String {
         self.path.as_ref().and_then(|p| p.file_name()).map_or_else(
-            || "untitled".to_owned(),
+            || self.lang.pick("untitled", "sans titre").to_owned(),
             |n| n.to_string_lossy().into_owned(),
         )
     }
@@ -253,6 +264,8 @@ impl Editor {
         self.syntax_edits = on;
         if !on {
             self.spans.clear();
+            self.overview.clear();
+            self.overview_version += 1;
             self.pending_edits.clear();
         }
     }
@@ -328,6 +341,8 @@ impl Editor {
         let edits = std::mem::take(&mut self.pending_edits);
         for e in &edits {
             self.spans.apply_edit(e);
+            // la minimap garde ses couleurs pendant la frappe, décalées comme le texte
+            self.overview.apply_edit(e);
         }
         edits
     }
@@ -396,6 +411,18 @@ impl Editor {
         self.spans.covers(&range)
     }
 
+    /// Reçoit la coloration du document entier (minimap).
+    pub fn set_overview(&mut self, range: std::ops::Range<usize>, spans: Vec<Span>) {
+        self.overview.set(range, spans);
+        self.overview_version += 1;
+    }
+
+    /// Change à chaque nouvelle coloration de la minimap (clé du cache de son image).
+    #[must_use]
+    pub fn overview_version(&self) -> u64 {
+        self.overview_version
+    }
+
     /// Reçoit les plages colorées calculées par le worker pour `range`.
     pub fn set_spans(&mut self, range: std::ops::Range<usize>, spans: Vec<Span>) {
         self.spans.set(range, spans);
@@ -438,6 +465,11 @@ impl Editor {
     #[must_use]
     pub fn wrap(&self) -> bool {
         self.wrap
+    }
+
+    /// Langue des textes de l'éditeur.
+    pub fn set_lang(&mut self, lang: Lang) {
+        self.lang = lang;
     }
 
     /// Calcule (ou non) les flèches ▼ des lignes repliables : à activer pendant que la souris
@@ -729,6 +761,7 @@ impl Editor {
             Command::FoldAll => self.fold_all(),
             Command::UnfoldAll => self.unfold_all(),
             Command::ToggleWordWrap => return Some(Effect::ToggleWordWrap),
+            Command::SetLanguage(l) => return Some(Effect::SetLanguage(l)),
             Command::PageUp(extend) => self.page(false, extend),
             Command::PageDown(extend) => self.page(true, extend),
             Command::ScrollUp => self.scroll_by(-1),
@@ -969,7 +1002,7 @@ impl Editor {
     /// Texte du document pour la minimap.
     #[must_use]
     pub fn minimap(&self) -> BufferLines<'_> {
-        BufferLines(self.doc.buffer())
+        BufferLines(self.doc.buffer(), &self.overview)
     }
 
     /// Place la première ligne visible (sans bouger le curseur).
@@ -1034,7 +1067,11 @@ impl Editor {
         let buf = self.doc.buffer();
         let sels = self.doc.selections();
         if sels.len() > 1 {
-            let _ = write!(out, "{} selection regions", sels.len());
+            let n = sels.len();
+            let _ = match self.lang {
+                Lang::En => write!(out, "{n} selection regions"),
+                Lang::Fr => write!(out, "{n} zones de sélection"),
+            };
             return;
         }
         let sel = sels.primary();
@@ -1049,16 +1086,23 @@ impl Editor {
                     col + 1
                 };
             }
-            let _ = write!(out, "Line {}, Column {}", line + 1, col + 1);
+            let (line, col) = (line + 1, col + 1);
+            let _ = match self.lang {
+                Lang::En => write!(out, "Line {line}, Column {col}"),
+                Lang::Fr => write!(out, "Ligne {line}, colonne {col}"),
+            };
         } else {
             let chars = sel.end() - sel.start();
             let lines = buf.char_to_line(sel.end()) - buf.char_to_line(sel.start()) + 1;
-            let s = if chars == 1 { "" } else { "s" };
-            if lines > 1 {
-                let _ = write!(out, "{lines} lines, {chars} character{s} selected");
-            } else {
-                let _ = write!(out, "{chars} character{s} selected");
-            }
+            let (en, fr) = if chars == 1 { ("", "") } else { ("s", "s") };
+            let _ = match (self.lang, lines > 1) {
+                (Lang::En, true) => write!(out, "{lines} lines, {chars} character{en} selected"),
+                (Lang::En, false) => write!(out, "{chars} character{en} selected"),
+                (Lang::Fr, true) => {
+                    write!(out, "{lines} lignes, {chars} caractère{fr} sélectionné{fr}")
+                }
+                (Lang::Fr, false) => write!(out, "{chars} caractère{fr} sélectionné{fr}"),
+            };
         }
     }
 
@@ -1494,7 +1538,7 @@ impl RowSource for ViewRows<'_> {
 
 /// Lignes du document, vues par la minimap.
 #[derive(Debug)]
-pub struct BufferLines<'a>(&'a paulwrite_core::Buffer);
+pub struct BufferLines<'a>(&'a paulwrite_core::Buffer, &'a SpanCache);
 
 impl MinimapSource for BufferLines<'_> {
     fn len(&self) -> usize {
@@ -1507,6 +1551,36 @@ impl MinimapSource for BufferLines<'_> {
         }
         while out.ends_with(['\n', '\r']) {
             out.pop();
+        }
+    }
+
+    fn colors(&self, index: usize, text: &str, out: &mut Vec<(usize, usize, u8)>) {
+        if self.1.is_empty() || index >= self.0.len_lines() {
+            return;
+        }
+        let bs = self.0.rope().line_to_byte(index);
+        let be = bs + text.len();
+        // octets du document -> caractères de la ligne, en un seul passage (plages triées)
+        let bytes = text.as_bytes();
+        let (mut chars, mut at) = (0usize, 0usize);
+        let mut to_char = |target: usize| {
+            while at < target.min(bytes.len()) {
+                at += match bytes[at] {
+                    0..=0x7f => 1,
+                    0xc0..=0xdf => 2,
+                    0xe0..=0xef => 3,
+                    _ => 4,
+                };
+                chars += 1;
+            }
+            chars
+        };
+        for sp in self.1.overlapping(bs, be) {
+            let (a, b) = (sp.start.max(bs) - bs, sp.end.min(be) - bs);
+            if a < b {
+                let (ca, cb) = (to_char(a), to_char(b));
+                out.push((ca, cb, sp.kind));
+            }
         }
     }
 }
@@ -2013,6 +2087,68 @@ trois",
         // fin du document : bornée
         assert_eq!(e.view_bytes(100).end, rope.len_bytes());
         assert!(!e.spans_cover_view());
+    }
+
+    #[test]
+    fn textes_en_francais() {
+        let mut e = editor(
+            "abc
+def",
+        );
+        e.set_lang(Lang::Fr);
+        assert_eq!(status(&e), "Ligne 1, colonne 1");
+        e.execute(Command::SelectAll, 0);
+        assert_eq!(status(&e), "2 lignes, 7 caractères sélectionnés");
+        e.click(0, 1, false);
+        e.click(0, 2, true);
+        assert_eq!(status(&e), "1 caractère sélectionné");
+        e.execute(Command::AddCursorBelow, 0);
+        assert_eq!(status(&e), "2 zones de sélection");
+        assert_eq!(Editor::new().display_name(), "untitled");
+        let mut n = Editor::new();
+        n.set_lang(Lang::Fr);
+        assert_eq!(n.display_name(), "sans titre");
+        assert_eq!(n.title(), "sans titre - PaulWrite");
+        // la langue survit au chargement d'un autre document
+        n.load(Document::from_text("x"), None);
+        assert_eq!(n.display_name(), "sans titre");
+    }
+
+    #[test]
+    fn la_minimap_recoit_les_couleurs_du_document_entier() {
+        use paulwrite_syntax::{kind, Span};
+        let mut e = editor(
+            "é fn
+let x",
+        );
+        e.enable_syntax(true);
+        let len = e.document().buffer().len_bytes();
+        let span = |start, end, kind| Span { start, end, kind };
+        let colors = |e: &Editor, line: usize, text: &str| {
+            let mut out = Vec::new();
+            e.minimap().colors(line, text, &mut out);
+            out
+        };
+        // sans coloration reçue : rien
+        assert!(colors(&e, 0, "é fn").is_empty());
+        let v0 = e.overview_version();
+        // octets : « é » = 2, « fn » = 3..5 ; la ligne 2 commence à 6 (« let » = 6..9)
+        e.set_overview(
+            0..len,
+            vec![span(3, 5, kind::KEYWORD), span(6, 9, kind::KEYWORD)],
+        );
+        assert!(e.overview_version() > v0);
+        // positions en caractères (« é » compte pour un)
+        assert_eq!(colors(&e, 0, "é fn"), [(2, 4, kind::KEYWORD)]);
+        assert_eq!(colors(&e, 1, "let x"), [(0, 3, kind::KEYWORD)]);
+        assert!(colors(&e, 9, "").is_empty(), "ligne inexistante");
+        // la frappe décale les couleurs en attendant la prochaine coloration complète
+        e.insert_text("ab", 1);
+        let _ = e.take_edits();
+        assert_eq!(colors(&e, 0, "abé fn"), [(4, 6, kind::KEYWORD)]);
+        // coloration coupée : la minimap redevient grise
+        e.enable_syntax(false);
+        assert!(colors(&e, 1, "let x").is_empty());
     }
 
     // --- Retour à la ligne ---------------------------------------------------------------------

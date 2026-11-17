@@ -5,6 +5,7 @@ pub mod command;
 pub mod config;
 pub mod editor;
 pub mod fold;
+pub mod i18n;
 pub mod keymap;
 pub mod menu;
 pub mod metrics;

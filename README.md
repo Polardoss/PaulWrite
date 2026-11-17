@@ -91,6 +91,7 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Clic ou glisser dans la minimap, glisser la barre de défilement | faire défiler |
 | Ctrl+K puis Ctrl+B, icône en bas à gauche | afficher / masquer la barre latérale |
 | Alt+Z (View ▸ Word Wrap) | retour à la ligne automatique (actif par défaut) |
+| Preferences ▸ Language | anglais ou français (enregistré dans `config.toml`) |
 | Ctrl+Maj+[ / Ctrl+Maj+], flèches de la gouttière, clic sur « … » | replier / déplier une région (par indentation) ; Edit ▸ Fold All / Unfold All |
 | Maj+molette, molette latérale | défilement horizontal (sans retour à la ligne) |
 
@@ -102,7 +103,7 @@ fichier courant. `.gitignore` est respecté.
 Les plugins Lua (`%APPDATA%\PaulWrite\plugins`) ajoutent leurs commandes à la palette : voir
 [`docs/plugins.md`](docs/plugins.md).
 
-La barre de menus (File, Edit, Selection, Find, View, Goto, Tools, Project, Preferences, Help)
+La barre de menus (File, Edit, Selection, Find, View, Goto, Tools, Project, Preferences, Help ; en français Fichier, Édition, Sélection, Rechercher, Affichage, Aller à, Outils, Projet, Préférences, Aide)
 donne accès aux mêmes commandes, dont **File ▸ Open Folder…** : le dossier devient le projet et sa
 barre latérale s'affiche (un dossier passé en argument ou glissé sur la fenêtre fait de même).
 
@@ -114,6 +115,7 @@ Réglages (facultatifs) dans `%APPDATA%\PaulWrite\config.toml` :
 ```toml
 highlight = true                # false : pas de coloration syntaxique
 highlight_max_bytes = 1048576   # au-delà de cette taille (octets), pas de coloration
+language = "auto"               # "en", "fr" ou "auto" (langue de Windows)
 word_wrap = true                # false : pas de retour à la ligne automatique
 word_wrap_max_bytes = 16777216  # au-delà de cette taille (octets), pas de retour à la ligne
 lsp = false                     # true : serveurs de langage (programmes externes à installer)

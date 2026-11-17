@@ -6,6 +6,7 @@
 use paulwrite_render::{Overlay, OverlayRow, OverlayRowKind};
 
 use crate::command::Command;
+use crate::i18n::Lang;
 
 /// Nombre de résultats visibles à la fois.
 pub const MAX_VISIBLE: usize = 10;
@@ -49,7 +50,7 @@ impl PaletteMode {
 
 impl PaletteMode {
     /// Invite affichée devant la saisie.
-    fn prompt(self) -> &'static str {
+    fn prompt(self, lang: Lang) -> &'static str {
         match self {
             PaletteMode::Files => "",
             PaletteMode::Commands => "",
@@ -57,9 +58,9 @@ impl PaletteMode {
             PaletteMode::Search => "? ",
             PaletteMode::Completion => "",
             PaletteMode::Diagnostics => "Diagnostics",
-            PaletteMode::Locations => "Définitions",
-            PaletteMode::Hover => "Survol",
-            PaletteMode::Tabs => "Onglets ouverts",
+            PaletteMode::Locations => lang.pick("Definitions", "Définitions"),
+            PaletteMode::Hover => lang.pick("Hover", "Survol"),
+            PaletteMode::Tabs => lang.pick("Open files", "Onglets ouverts"),
         }
     }
 }
@@ -145,6 +146,8 @@ pub struct Palette {
     offset: usize,
     /// Message affiché sous la liste (progression, nombre de résultats).
     note: String,
+    /// Langue des textes du panneau.
+    lang: Lang,
 }
 
 impl Palette {
@@ -159,7 +162,13 @@ impl Palette {
             selected: 0,
             offset: 0,
             note: String::new(),
+            lang: Lang::En,
         }
+    }
+
+    /// Langue des textes propres au panneau (invites, « aucun résultat »).
+    pub fn set_lang(&mut self, lang: Lang) {
+        self.lang = lang;
     }
 
     #[must_use]
@@ -373,7 +382,7 @@ impl Palette {
         let mut rows = Vec::with_capacity(MAX_VISIBLE + 2);
 
         // Saisie : si elle dépasse la largeur, on garde la fin (là où l'on tape).
-        let prompt = self.mode.prompt();
+        let prompt = self.mode.prompt(self.lang);
         let full: Vec<char> = prompt.chars().chain(self.query.chars()).collect();
         let caret = prompt.chars().count() + self.caret;
         let room = columns.saturating_sub(1);
@@ -418,7 +427,7 @@ impl Palette {
 
         let note = if self.items.is_empty() {
             if self.note.is_empty() && !self.query.is_empty() {
-                "Aucun résultat".to_owned()
+                self.lang.pick("No results", "Aucun résultat").to_owned()
             } else {
                 self.note.clone()
             }
@@ -657,7 +666,11 @@ mod tests {
         assert_eq!(o.rows[0].text, "undo");
         assert_eq!(o.rows[0].caret, Some(4));
         // sans résultat : message
+        assert_eq!(o.rows.last().unwrap().text, "No results");
+        p.set_lang(Lang::Fr);
+        let o = p.to_overlay(40);
         assert_eq!(o.rows.last().unwrap().text, "Aucun résultat");
+        p.set_lang(Lang::En);
 
         let mut items = files(12);
         items[0].detail = "Ctrl+Z".into();
