@@ -99,6 +99,13 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+Maj+P | palette de commandes (toutes les commandes, avec leur raccourci) |
 | Ctrl+G | aller à la ligne |
 | Ctrl+Maj+F | rechercher du texte dans le projet |
+| Ctrl+F, F3 / Maj+F3 | rechercher dans le document (occurrences surlignées, compteur « 3 sur 12 »), suivante / précédente |
+| Ctrl+H, puis Tab | rechercher et remplacer : Entrée remplace l'occurrence, Ctrl+Alt+Entrée remplace tout (un seul Annuler) |
+| Alt+C / Alt+W / Alt+R (dans la recherche) | respecter la casse, mot entier, expression régulière |
+| Ctrl+D, Ctrl+L | sélectionner le mot puis l'occurrence suivante (multi-curseurs), sélectionner la ligne |
+| Ctrl+Maj+D, Ctrl+Maj+K, Ctrl+Maj+↑/↓ | dupliquer, supprimer, déplacer la ou les lignes |
+| Ctrl+/ , Tab / Maj+Tab | commenter (selon le langage), indenter / désindenter la sélection |
+| (en tapant) | parenthèses, crochets, accolades et guillemets se ferment seuls ; Entrée garde l'indentation |
 | Ctrl+Espace, F12, F1, Ctrl+Maj+M | serveur de langage (si activé) : complétion, définition, survol, diagnostics |
 | Ctrl+Alt+↑ / Ctrl+Alt+↓ | ajouter un curseur au-dessus / en dessous |
 | Échap | revenir à un seul curseur |

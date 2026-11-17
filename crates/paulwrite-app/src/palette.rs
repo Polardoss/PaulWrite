@@ -32,6 +32,12 @@ pub enum PaletteMode {
     Hover,
     /// Onglets ouverts (liste fixe : on choisit avec les flèches).
     Tabs,
+    /// Rechercher dans le document courant.
+    Find,
+    /// Rechercher et remplacer dans le document courant (deux champs).
+    Replace,
+    /// Le champ « remplacer par » du mode [`Replace`](PaletteMode::Replace).
+    ReplaceWith,
 }
 
 impl PaletteMode {
@@ -61,6 +67,8 @@ impl PaletteMode {
             PaletteMode::Locations => lang.pick("Definitions", "Définitions"),
             PaletteMode::Hover => lang.pick("Hover", "Survol"),
             PaletteMode::Tabs => lang.pick("Open files", "Onglets ouverts"),
+            PaletteMode::Find | PaletteMode::Replace => lang.pick("Find: ", "Chercher : "),
+            PaletteMode::ReplaceWith => lang.pick("Replace: ", "Remplacer : "),
         }
     }
 }
@@ -115,6 +123,8 @@ pub enum PaletteKey {
     PageDown,
     Enter,
     Escape,
+    /// Passe d'un champ à l'autre (recherche et remplacement).
+    Tab,
 }
 
 /// Conséquence d'une touche, pour l'application.
@@ -333,6 +343,7 @@ impl Palette {
                 }
             }
             PaletteKey::Escape => Outcome::Close,
+            PaletteKey::Tab => Outcome::None,
         }
     }
 

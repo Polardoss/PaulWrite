@@ -19,7 +19,9 @@ use paulwrite_render::watch::{self, DirWatcher};
 use paulwrite_render::{
     platform, since_process_start, Chrome, Colors, SoftRenderer, StripHit, TabButton, TabInfo,
 };
-use paulwrite_search::{self as search, FuzzyFinder, IndexOptions, SearchOptions, TextQuery};
+use paulwrite_search::{
+    self as search, FindOptions, FuzzyFinder, IndexOptions, SearchOptions, TextQuery,
+};
 use paulwrite_syntax::{self as syntax, Language};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -62,6 +64,11 @@ macro_rules! ed {
     };
 }
 
+mod find;
+
+use find::FindState;
+pub use find::FoundEvent;
+
 /// Événements envoyés au thread UI par d'autres threads.
 #[derive(Debug)]
 pub enum UserEvent {
@@ -95,6 +102,8 @@ pub enum UserEvent {
     Screenshot(u8),
     /// Entrée choisie dans la barre de menus (identifiant : voir [`menu::build`]).
     Menu(u32),
+    /// Résultat d'une recherche dans le document courant (Ctrl+F).
+    Found(FoundEvent),
 }
 
 /// Pont entre le crochet de messages de la boucle d'événements (créé avant elle) et l'application.
@@ -263,6 +272,9 @@ struct PaletteState {
     /// Génération de la recherche en cours : les messages d'une recherche abandonnée sont ignorés.
     generation: u64,
     search_matches: usize,
+    /// Recherche et remplacement : le champ « remplacer par » et le champ qui a la saisie.
+    replace: Option<Palette>,
+    focus_replace: bool,
 }
 
 /// Ligne de la liste pour une correspondance de la recherche dans le projet.
@@ -436,6 +448,14 @@ struct App {
     color_latency: Samples,
     worker_time: Samples,
     last_edit_at: Option<Instant>,
+    /// Recherche dans le document courant (voir `find.rs`).
+    find: Option<FindState>,
+    find_opts: FindOptions,
+    find_generation: u64,
+    /// Où était le curseur à l'ouverture du panneau : la saisie sélectionne à partir de là.
+    find_origin: usize,
+    /// Dernier texte cherché (préremplit le panneau, sert à F3).
+    last_find: String,
     t_visible: Duration,
     t_first_present: Option<Duration>,
     file_loaded: bool,
@@ -533,6 +553,11 @@ impl App {
             color_latency: Samples::default(),
             worker_time: Samples::default(),
             last_edit_at: None,
+            find: None,
+            find_opts: FindOptions::default(),
+            find_generation: 0,
+            find_origin: 0,
+            last_find: String::new(),
             t_visible: Duration::ZERO,
             t_first_present: None,
             file_loaded: false,
@@ -579,6 +604,9 @@ impl App {
     fn activate(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
+        }
+        if self.find_panel_open() {
+            self.close_palette();
         }
         self.active = index;
         if let Some(r) = self.renderer.as_mut() {
@@ -1065,6 +1093,8 @@ impl App {
             indexing: false,
             generation: 0,
             search_matches: 0,
+            replace: None,
+            focus_replace: false,
         };
         st.palette.set_items(items, true);
         st.palette.set_note(note);
@@ -1089,6 +1119,8 @@ impl App {
             indexing: false,
             generation: 0,
             search_matches: 0,
+            replace: None,
+            focus_replace: false,
         };
         for (i, c) in items.iter().take(5000).enumerate() {
             // Un séparateur invisible + l'indice rend chaque candidat unique (deux éléments
@@ -1561,6 +1593,8 @@ impl App {
             indexing: false,
             generation: 0,
             search_matches: 0,
+            replace: None,
+            focus_replace: false,
         };
         match mode {
             PaletteMode::Files => {
@@ -1621,6 +1655,7 @@ impl App {
                 st.finder = Some(finder);
             }
             // Ces panneaux sont ouverts par les réponses du serveur de langage, pas par un raccourci.
+            PaletteMode::Find | PaletteMode::Replace | PaletteMode::ReplaceWith => {}
             PaletteMode::GotoLine
             | PaletteMode::Completion
             | PaletteMode::Diagnostics
@@ -1638,9 +1673,16 @@ impl App {
                 ));
             }
         }
+        let finding = matches!(mode, PaletteMode::Find | PaletteMode::Replace);
+        if finding {
+            self.find_prepare(&mut st);
+        }
         self.palette = Some(st);
         let settled = self.refresh_palette_items(true);
         self.note_settled(settled);
+        if finding {
+            self.find_opened();
+        }
         self.overlay_dirty = true;
         self.request_redraw();
     }
@@ -1649,6 +1691,9 @@ impl App {
     fn close_palette(&mut self) {
         if let Some(st) = self.palette.take() {
             st.cancel.store(true, Ordering::Relaxed);
+            if matches!(st.palette.mode(), PaletteMode::Find | PaletteMode::Replace) {
+                self.find_closed(st.palette.query());
+            }
             self.overlay_dirty = true;
             self.request_redraw();
         }
@@ -1708,10 +1753,11 @@ impl App {
                 }
                 if mode == PaletteMode::Files {
                     let (total, matched) = (finder.item_count(), finder.matched_count());
-                    st.palette.set_note(if st.indexing {
-                        format!("{total} fichiers indexés…")
-                    } else {
-                        format!("{matched} sur {total} fichiers")
+                    st.palette.set_note(match (st.indexing, self.lang) {
+                        (true, Lang::En) => format!("{total} files indexed\u{2026}"),
+                        (true, Lang::Fr) => format!("{total} fichiers index\u{e9}s\u{2026}"),
+                        (false, Lang::En) => format!("{matched} of {total} files"),
+                        (false, Lang::Fr) => format!("{matched} sur {total} fichiers"),
                     });
                 }
                 !status.running
@@ -1746,6 +1792,9 @@ impl App {
             | PaletteMode::Diagnostics
             | PaletteMode::Locations
             | PaletteMode::Tabs
+            | PaletteMode::Find
+            | PaletteMode::Replace
+            | PaletteMode::ReplaceWith
             | PaletteMode::Hover => true,
         };
         self.overlay_dirty = true;
@@ -1778,6 +1827,9 @@ impl App {
             PaletteMode::Diagnostics
             | PaletteMode::Locations
             | PaletteMode::Tabs
+            | PaletteMode::Find
+            | PaletteMode::Replace
+            | PaletteMode::ReplaceWith
             | PaletteMode::Hover => {}
         }
         self.overlay_dirty = true;
@@ -1906,6 +1958,11 @@ impl App {
 
     /// Transmet une touche au panneau et en tire les conséquences.
     fn palette_apply(&mut self, key: &PaletteKey, el: &ActiveEventLoop) {
+        if self.find_panel_open() {
+            self.find_key(key);
+            self.request_redraw();
+            return;
+        }
         let Some(st) = self.palette.as_mut() else {
             return;
         };
@@ -1939,6 +1996,13 @@ impl App {
                 Command::CommandPalette => Some(PaletteMode::Commands),
                 Command::GotoLine => Some(PaletteMode::GotoLine),
                 Command::SearchProject => Some(PaletteMode::Search),
+                Command::Find => Some(PaletteMode::Find),
+                Command::Replace => Some(PaletteMode::Replace),
+                Command::FindNext | Command::FindPrevious if self.find_panel_open() => {
+                    self.find_step(cmd == Command::FindNext);
+                    self.touch(at);
+                    return;
+                }
                 _ => None,
             };
             if let Some(mode) = mode {
@@ -1955,7 +2019,20 @@ impl App {
                 return;
             }
         }
+        // Alt+C / Alt+W / Alt+R : casse, mot entier, expression régulière (recherche)
+        if self.find_panel_open() && self.mods.alt_key() && !self.mods.control_key() {
+            if let Key::Character(c) = &plain {
+                if let Some(letter) = c.chars().next().map(|l| l.to_ascii_lowercase()) {
+                    if matches!(letter, 'c' | 'w' | 'r') {
+                        self.find_toggle(letter);
+                        self.touch(at);
+                        return;
+                    }
+                }
+            }
+        }
         let key = match &event.logical_key {
+            Key::Named(NamedKey::Tab) => Some(PaletteKey::Tab),
             Key::Named(NamedKey::Backspace) => Some(PaletteKey::Backspace),
             Key::Named(NamedKey::Delete) => Some(PaletteKey::Delete),
             Key::Named(NamedKey::ArrowLeft) => Some(PaletteKey::Left),
@@ -2036,7 +2113,19 @@ impl App {
         }
         match &self.palette {
             Some(st) => {
-                let overlay = st.palette.to_overlay(r.overlay_columns());
+                let columns = r.overlay_columns();
+                let mut overlay = st.palette.to_overlay(columns);
+                // recherche et remplacement : la saisie « remplacer par » vient sous la première ;
+                // seul le champ qui a la saisie montre son curseur
+                if let Some(rep) = &st.replace {
+                    let mut row = rep.to_overlay(columns).rows.remove(0);
+                    if st.focus_replace {
+                        overlay.rows[0].caret = None;
+                    } else {
+                        row.caret = None;
+                    }
+                    overlay.rows.insert(1, row);
+                }
                 r.set_overlay(Some(&overlay));
             }
             // Les messages brefs s'affichent dans la barre d'état (voir `refresh_chrome`).
@@ -2331,6 +2420,7 @@ impl App {
                 ),
             )),
             Effect::SetLanguage(lang) => self.set_language(lang),
+            Effect::FindStep(forward) => self.find_step(forward),
             Effect::ToggleWordWrap => {
                 self.word_wrap = !self.word_wrap;
                 let large = !self
@@ -2384,7 +2474,16 @@ impl App {
             match std::env::var("PAULWRITE_SCREENSHOT_PALETTE").as_deref() {
                 Ok("files") => self.open_palette(PaletteMode::Files),
                 Ok("commands") => self.open_palette(PaletteMode::Commands),
+                Ok("find") => self.open_palette(PaletteMode::Find),
+                Ok("replace") => self.open_palette(PaletteMode::Replace),
                 _ => {}
+            }
+            // `PAULWRITE_SCREENSHOT_TYPE=texte` : saisi dans le panneau ouvert (recherche).
+            if let Ok(text) = std::env::var("PAULWRITE_SCREENSHOT_TYPE") {
+                if self.palette.is_some() {
+                    let key = PaletteKey::Text(text);
+                    self.palette_apply(&key, el);
+                }
             }
             // `PAULWRITE_SCREENSHOT_COMMANDS=fold.fold_all,cursor.down` : commandes de l'éditeur
             // exécutées avant la capture ; `PAULWRITE_SCREENSHOT_HOVER=1` : souris sur la gouttière.
@@ -3050,6 +3149,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.note_settled(settled);
                 self.request_redraw();
             }
+            UserEvent::Found(ev) => self.on_found(ev),
             UserEvent::DirChanged(dir) => {
                 // Seuls comptent les dossiers déjà lus ; les entrailles de `.git` changent sans cesse.
                 let git = dir.components().any(|c| c.as_os_str() == ".git");

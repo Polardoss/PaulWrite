@@ -142,11 +142,22 @@ fn menus() -> Vec<Menu> {
         (
             "F&ind",
             "&Rechercher",
-            vec![Item(
-                Command::SearchProject,
-                "Find in Project\u{2026}",
-                "Rechercher dans le projet\u{2026}",
-            )],
+            vec![
+                Item(Command::Find, "Find\u{2026}", "Rechercher\u{2026}"),
+                Item(Command::FindNext, "Find Next", "Occurrence suivante"),
+                Item(
+                    Command::FindPrevious,
+                    "Find Previous",
+                    "Occurrence pr\u{e9}c\u{e9}dente",
+                ),
+                Item(Command::Replace, "Replace\u{2026}", "Remplacer\u{2026}"),
+                Sep,
+                Item(
+                    Command::SearchProject,
+                    "Find in Project\u{2026}",
+                    "Rechercher dans le projet\u{2026}",
+                ),
+            ],
         ),
         (
             "&View",

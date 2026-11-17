@@ -6,7 +6,9 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use paulwrite_core::motion;
-use paulwrite_core::{Document, Motion, Selection, SelectionSet, TextChange, TextEdit};
+use paulwrite_core::{
+    Document, EditKind, Motion, Replacement, Selection, SelectionSet, TextChange, TextEdit,
+};
 use paulwrite_render::{FoldMark, MinimapSource, Row, RowSource, Scroll};
 use paulwrite_syntax::{kind, Span};
 
@@ -119,6 +121,7 @@ pub struct Editor {
     // Rangées construites par `build_view` (tampons réutilisés d'une image à l'autre).
     row_text: Vec<String>,
     row_sels: Vec<Vec<(usize, usize)>>,
+    row_matches: Vec<Vec<(usize, usize)>>,
     row_carets: Vec<Vec<usize>>,
     row_underline: Vec<Option<(usize, usize)>>,
     row_spans: Vec<Vec<(usize, usize, u8)>>,
@@ -130,6 +133,10 @@ pub struct Editor {
     cursor_line: usize,
     /// Plages colorées (coloration syntaxique) ; vide si la coloration est inactive.
     spans: SpanCache,
+    /// Occurrences d'une recherche (plages de caractères triées), valides pour la révision
+    /// `matches_revision` : au-delà, elles ne sont plus affichées.
+    matches: Vec<(usize, usize)>,
+    matches_revision: u64,
     /// Coloration du document entier, pour la minimap (calculée par le worker au repos).
     overview: SpanCache,
     overview_version: u64,
@@ -183,6 +190,7 @@ impl Editor {
             preedit: None,
             row_text: Vec::new(),
             row_sels: Vec::new(),
+            row_matches: Vec::new(),
             row_carets: Vec::new(),
             row_underline: Vec::new(),
             row_spans: Vec::new(),
@@ -191,6 +199,8 @@ impl Editor {
             ime_anchor: None,
             cursor_line: 0,
             spans: SpanCache::default(),
+            matches: Vec::new(),
+            matches_revision: 0,
             overview: SpanCache::default(),
             overview_version: 0,
         }
@@ -775,6 +785,10 @@ impl Editor {
         match cmd {
             Command::Move(m) => self.move_by(m, false),
             Command::Extend(m) => self.move_by(m, true),
+            Command::Find => return Some(Effect::OpenPalette(PaletteMode::Find)),
+            Command::Replace => return Some(Effect::OpenPalette(PaletteMode::Replace)),
+            Command::FindNext => return Some(Effect::FindStep(true)),
+            Command::FindPrevious => return Some(Effect::FindStep(false)),
             Command::Fold => self.fold_at_caret(),
             Command::Unfold => self.unfold_at_caret(),
             Command::FoldAll => self.fold_all(),
@@ -1039,6 +1053,62 @@ impl Editor {
         self.caret_on = true;
     }
 
+    // --- Recherche -----------------------------------------------------------------------------
+
+    /// Occurrences d'une recherche à surligner, pour la révision `revision` du texte (plages de
+    /// caractères triées). Elles disparaissent d'elles-mêmes dès que le texte change.
+    pub fn set_matches(&mut self, revision: u64, matches: Vec<(usize, usize)>) {
+        self.matches = matches;
+        self.matches_revision = revision;
+    }
+
+    /// Retire la surbrillance.
+    pub fn clear_matches(&mut self) {
+        self.matches.clear();
+    }
+
+    /// Sélectionne la plage `start..end` (le curseur à la fin), déplie ce qui la masque et fait
+    /// défiler pour la montrer.
+    pub fn select_range(&mut self, start: usize, end: usize) {
+        let max = self.doc.buffer().len_chars();
+        let (start, end) = (start.min(max), end.min(max));
+        self.doc
+            .set_selections(SelectionSet::single(Selection::new(start, end)));
+        self.caret_on = true;
+        self.ensure_caret_visible();
+    }
+
+    /// Plage sélectionnée par le curseur principal.
+    #[must_use]
+    pub fn selection_range(&self) -> (usize, usize) {
+        let s = self.doc.selections().primary();
+        (s.start(), s.end())
+    }
+
+    /// Remplace des plages `(début, fin, texte)` (triées, disjointes) en **un seul pas
+    /// d'annulation** ; les sélections suivent le texte. Rend `false` si rien n'a changé.
+    pub fn replace_ranges(&mut self, repl: &[Replacement], now_ms: u64) -> bool {
+        let sels: Vec<Selection> = self
+            .doc
+            .selections()
+            .iter()
+            .map(|s| {
+                Selection::new(
+                    Document::map_position(repl, s.anchor),
+                    Document::map_position(repl, s.head),
+                )
+            })
+            .collect();
+        let sels = SelectionSet::from_vec(sels, self.doc.selections().primary_index());
+        let done = self
+            .doc
+            .apply_replacements(repl, sels, EditKind::Other, now_ms);
+        if done {
+            self.ensure_caret_visible();
+        }
+        done
+    }
+
     // --- Interface autour du texte -----------------------------------------------------------
 
     /// Nombre de chiffres du plus grand numéro de ligne.
@@ -1183,6 +1253,7 @@ impl Editor {
         let rows = self.rows;
         self.row_text.resize_with(rows, String::new);
         self.row_sels.resize_with(rows, Vec::new);
+        self.row_matches.resize_with(rows, Vec::new);
         self.row_carets.resize_with(rows, Vec::new);
         self.row_underline.resize(rows, None);
         self.row_spans.resize_with(rows, Vec::new);
@@ -1196,6 +1267,7 @@ impl Editor {
             let s = &mut self.row_text[r];
             s.clear();
             self.row_sels[r].clear();
+            self.row_matches[r].clear();
             self.row_carets[r].clear();
             self.row_underline[r] = None;
             self.row_spans[r].clear();
@@ -1251,6 +1323,7 @@ impl Editor {
 
         // Décorations : sélections et curseurs, rangée par rangée.
         self.ime_anchor = None;
+        let revision = self.doc.buffer().revision();
         let primary = self.doc.selections().primary_index();
         let sels = self.doc.selections().as_slice();
         for r in 0..rows {
@@ -1263,6 +1336,22 @@ impl Editor {
             let text = &self.row_text[r];
             // longueur UTF-16 du texte, calculée seulement si une décoration en a besoin
             let mut text_units: Option<usize> = None;
+            // occurrences d'une recherche (seulement si elles datent du texte actuel)
+            if !self.matches.is_empty() && self.matches_revision == revision {
+                let first = self.matches.partition_point(|m| m.1 <= from);
+                for m in &self.matches[first..] {
+                    if m.0 >= to {
+                        break;
+                    }
+                    let (a, b) = (m.0.max(from), m.1.min(to));
+                    if b > a {
+                        self.row_matches[r].push((
+                            utf16_of_char_col(text, a - from),
+                            utf16_of_char_col(text, b - from),
+                        ));
+                    }
+                }
+            }
             // les sélections sont triées : on part de la première qui n'est pas avant la rangée
             let first_sel = sels.partition_point(|s| s.end() < from);
             for (i, sel) in sels.iter().enumerate().skip(first_sel) {
@@ -1596,6 +1685,7 @@ impl RowSource for ViewRows<'_> {
             current: real && info.line == e.cursor_line,
             text: &e.row_text[index],
             selections: &e.row_sels[index],
+            matches: &e.row_matches[index],
             carets: &e.row_carets[index],
             underline: e.row_underline[index],
             spans: &e.row_spans[index],
@@ -2770,5 +2860,55 @@ let x",
         assert_eq!(contenu(&e), "    a\n    b\n");
         run(&mut e, &[Command::Unindent]);
         assert_eq!(contenu(&e), "a\nb\n");
+    }
+
+    // --- Recherche ----------------------------------------------------------------------------
+
+    #[test]
+    fn les_occurrences_sont_surlignees_par_rangee_et_disparaissent_avec_le_texte() {
+        let mut e = editor("foo bar foo\nxfoo\n");
+        let rev = e.revision();
+        e.set_matches(rev, vec![(0, 3), (8, 11), (13, 16)]);
+        e.build_view();
+        assert_eq!(e.view().row(0).matches, [(0, 3), (8, 11)]);
+        assert_eq!(e.view().row(1).matches, [(1, 4)]);
+        // une occurrence à cheval sur deux rangées (retour à la ligne) est coupée en deux
+        let mut w = wrapped("aaaa bbbb cccc", 5, 4);
+        let rev = w.revision();
+        w.set_matches(rev, vec![(3, 7)]);
+        w.build_view();
+        assert_eq!(w.view().row(0).matches, [(3, 5)]);
+        assert_eq!(w.view().row(1).matches, [(0, 2)]);
+        // le texte change : la surbrillance (périmée) disparaît
+        e.insert_text("z", 1);
+        e.build_view();
+        assert!(e.view().row(0).matches.is_empty());
+        e.set_matches(e.revision(), vec![(1, 4)]);
+        e.build_view();
+        assert_eq!(e.view().row(0).matches, [(1, 4)]);
+        e.clear_matches();
+        e.build_view();
+        assert!(e.view().row(0).matches.is_empty());
+    }
+
+    #[test]
+    fn selectionner_une_occurrence_et_remplacer() {
+        let mut e = editor("un deux trois\n".repeat(30).as_str());
+        e.select_range(14 * 20 + 3, 14 * 20 + 7);
+        assert_eq!(e.selection_string(100), "deux");
+        // la vue a suivi : la ligne 20 est affichée
+        e.build_view();
+        assert!((0..5).any(|r| e.view().row(r).current));
+        // remplacement groupé : un seul pas d'annulation, sélection qui suit
+        let mut e = editor("a b a b a");
+        let repl: Vec<Replacement> = vec![
+            (0, 1, "XX".into()),
+            (4, 5, "XX".into()),
+            (8, 9, "XX".into()),
+        ];
+        assert!(e.replace_ranges(&repl, 0));
+        assert_eq!(contenu(&e), "XX b XX b XX");
+        e.execute(Command::Undo, 0);
+        assert_eq!(contenu(&e), "a b a b a");
     }
 }

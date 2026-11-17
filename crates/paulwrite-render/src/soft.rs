@@ -89,10 +89,12 @@ const BR_SIDEBAR_DIM: usize = BR_CHROME + 26;
 const BR_SQUIGGLE: usize = BR_CHROME + 27;
 /// Icônes de la barre latérale : dossier, puis une teinte par famille de fichiers.
 const BR_ICON: usize = BR_CHROME + 30;
+/// Fond des occurrences d'une recherche.
+const BR_MATCH: usize = BR_CHROME + 38;
 
 /// Couleurs de l'interface (thème « Mariana » de Sublime Text, mesurées sur une capture), dans
 /// l'ordre des `BR_*` ci-dessus.
-const CHROME_COLORS: [[f32; 3]; 38] = [
+const CHROME_COLORS: [[f32; 3]; 39] = [
     rgb8(0x72, 0x78, 0x7e), // barre d'onglets
     rgb8(0xc6, 0xc9, 0xcb), // onglet inactif : texte
     rgb8(0xff, 0xff, 0xff), // onglet actif : texte
@@ -131,6 +133,7 @@ const CHROME_COLORS: [[f32; 3]; 38] = [
     rgb8(0xec, 0x5f, 0x67), // icône : pages web (HTML, CSS)
     rgb8(0x99, 0xc7, 0x94), // icône : données et configuration (JSON, TOML…)
     rgb8(0xc6, 0x95, 0xc6), // icône : documents (Markdown, texte)
+    rgb8(0x6a, 0x5f, 0x3b), // occurrences d'une recherche
 ];
 
 const fn rgb8(r: u8, g: u8, b: u8) -> [f32; 3] {
@@ -306,6 +309,8 @@ pub struct Row<'a> {
     /// Plages sélectionnées. Une fin supérieure à la longueur UTF-16 du texte signifie que le
     /// saut de ligne est sélectionné (la surbrillance déborde d'un caractère).
     pub selections: &'a [(usize, usize)],
+    /// Occurrences d'une recherche (surlignées derrière le texte), plages UTF-16.
+    pub matches: &'a [(usize, usize)],
     /// Positions des curseurs (vide : aucun curseur dans cette rangée, ou clignotement éteint).
     pub carets: &'a [usize],
     /// Plage soulignée (texte de composition IME).
@@ -385,6 +390,11 @@ fn deco_hash(row: &Row<'_>, fold_hover: bool, fold_hot: bool) -> u64 {
     mix(usize::MAX);
     for &c in row.carets {
         mix(c);
+    }
+    mix(usize::MAX - 5);
+    for &(a, b) in row.matches {
+        mix(a);
+        mix(b);
     }
     mix(usize::MAX - 1);
     if let Some((a, b)) = row.underline {
@@ -567,7 +577,7 @@ impl SoftRenderer {
                         .cast::<ID2D1Brush>()?,
                 );
             }
-            debug_assert_eq!(brushes.len(), BR_ICON + 8);
+            debug_assert_eq!(brushes.len(), BR_MATCH + 1);
 
             let mem_dc = CreateCompatibleDC(None);
             let (dib, old, bits) = make_dib(mem_dc, size.0, size.1)?;
@@ -1133,6 +1143,20 @@ impl SoftRenderer {
                 }
             }
         };
+        for &(a, b) in row.matches {
+            let (x0, x1) = (x_at(a), x_at(b));
+            if x1 > x0 {
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: x0,
+                        top: y,
+                        right: x1,
+                        bottom: y + lh,
+                    },
+                    &self.brushes[BR_MATCH],
+                );
+            }
+        }
         for &(a, b) in row.selections {
             let x0 = x_at(a);
             let mut x1 = x_at(b);
@@ -1458,6 +1482,7 @@ mod tests {
             Row {
                 text: &self.texts[i],
                 selections: &self.sels[i],
+                matches: &[],
                 carets: &self.carets[i],
                 underline: None,
                 spans: &[],

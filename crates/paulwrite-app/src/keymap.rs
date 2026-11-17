@@ -43,6 +43,8 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             NamedKey::PageUp => Some(Command::PageUp(shift)),
             NamedKey::PageDown => Some(Command::PageDown(shift)),
             NamedKey::Space if ctrl && !shift => Some(Command::LspCompletion),
+            NamedKey::F3 if shift => Some(Command::FindPrevious),
+            NamedKey::F3 => Some(Command::FindNext),
             NamedKey::F12 if !ctrl && !shift => Some(Command::LspDefinition),
             NamedKey::F1 if !ctrl && !shift => Some(Command::LspHover),
             NamedKey::Enter => Some(Command::InsertNewline),
@@ -65,6 +67,8 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("s", false) => Some(Command::Save),
             ("s", true) => Some(Command::SaveAs),
             ("o", _) => Some(Command::Open),
+            ("f", false) => Some(Command::Find),
+            ("h", _) => Some(Command::Replace),
             ("d", false) => Some(Command::SelectNextOccurrence),
             ("d", true) => Some(Command::DuplicateLine),
             ("k", true) => Some(Command::DeleteLine),
@@ -97,9 +101,10 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
 #[must_use]
 pub fn shortcut_label(cmd: Command) -> Option<String> {
     use NamedKey::*;
-    let named: [(NamedKey, &str); 16] = [
+    let named: [(NamedKey, &str); 17] = [
         (Space, "Espace"),
         (F1, "F1"),
+        (F3, "F3"),
         (F12, "F12"),
         (ArrowLeft, "←"),
         (ArrowRight, "→"),
@@ -298,8 +303,8 @@ mod tests {
         );
         assert_eq!(
             command_for(&ch("f"), c),
-            None,
-            "Ctrl+F : recherche dans le document, plus tard"
+            Some(Command::Find),
+            "Ctrl+F : recherche dans le document"
         );
     }
 

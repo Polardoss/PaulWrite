@@ -18,6 +18,8 @@ grep-searcher = "0.1"
 grep-matcher = "0.1"
 # Fuzzy matching (algorithme de Helix) avec threads d'arrière-plan : imposé par le brief.
 nucleo = "0.5"
+# Recherche dans un document ouvert : lecture ligne par ligne du rope du document.
+ropey.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

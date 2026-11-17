@@ -72,6 +72,13 @@ pub enum Command {
     OpenSettings,
     /// À propos de PaulWrite.
     About,
+    /// Rechercher dans le document (panneau).
+    Find,
+    /// Occurrence suivante / précédente de la dernière recherche.
+    FindNext,
+    FindPrevious,
+    /// Rechercher et remplacer dans le document (panneau).
+    Replace,
     /// Duplique la ou les lignes du curseur.
     DuplicateLine,
     /// Supprime la ou les lignes du curseur.
@@ -175,6 +182,10 @@ impl Command {
             Command::ToggleSidebar => "view.toggle_sidebar",
             Command::OpenSettings => "preferences.open_settings",
             Command::About => "help.about",
+            Command::Find => "find.find",
+            Command::FindNext => "find.next",
+            Command::FindPrevious => "find.previous",
+            Command::Replace => "find.replace",
             Command::DuplicateLine => "edit.duplicate_line",
             Command::DeleteLine => "edit.delete_line",
             Command::MoveLineUp => "edit.move_line_up",
@@ -248,6 +259,10 @@ impl Command {
             Command::ToggleSidebar,
             Command::OpenSettings,
             Command::About,
+            Command::Find,
+            Command::FindNext,
+            Command::FindPrevious,
+            Command::Replace,
             Command::DuplicateLine,
             Command::DeleteLine,
             Command::MoveLineUp,
@@ -316,6 +331,10 @@ impl Command {
             Command::ToggleSidebar => "Affichage : barre latérale",
             Command::OpenSettings => "Préférences : ouvrir la configuration",
             Command::About => "Aide : à propos de PaulWrite",
+            Command::Find => "Recherche : chercher dans le document",
+            Command::FindNext => "Recherche : occurrence suivante",
+            Command::FindPrevious => "Recherche : occurrence précédente",
+            Command::Replace => "Recherche : remplacer dans le document",
             Command::DuplicateLine => "Édition : dupliquer la ligne",
             Command::DeleteLine => "Édition : supprimer la ligne",
             Command::MoveLineUp => "Édition : déplacer la ligne vers le haut",
@@ -392,6 +411,10 @@ impl Command {
             Command::ToggleSidebar => "View: side bar",
             Command::OpenSettings => "Preferences: open settings",
             Command::About => "Help: about PaulWrite",
+            Command::Find => "Find: find in document",
+            Command::FindNext => "Find: next match",
+            Command::FindPrevious => "Find: previous match",
+            Command::Replace => "Find: replace in document",
             Command::DuplicateLine => "Edit: duplicate line",
             Command::DeleteLine => "Edit: delete line",
             Command::MoveLineUp => "Edit: move line up",
@@ -534,6 +557,8 @@ pub enum Effect {
     ToggleSidebar,
     OpenSettings,
     About,
+    /// Occurrence suivante (`true`) ou précédente de la dernière recherche.
+    FindStep(bool),
     /// Bascule le retour à la ligne automatique (réglage commun à tous les onglets).
     ToggleWordWrap,
     /// Change la langue de l'interface.

@@ -6,9 +6,11 @@
 //! premiers apparaissent avant la fin de la recherche, et chaque recherche est annulable.
 
 mod fuzzy;
+mod inline;
 mod text;
 mod walk;
 
 pub use fuzzy::{FuzzyFinder, FuzzyInjector};
+pub use inline::{find_in_rope, FindOptions, Found, Matches};
 pub use text::{search_text, Event, Match, SearchOptions, Summary, TextQuery};
 pub use walk::{list_files, IndexOptions};

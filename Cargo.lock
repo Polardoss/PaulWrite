@@ -1402,6 +1402,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "nucleo",
+ "ropey",
  "tempfile",
 ]
 

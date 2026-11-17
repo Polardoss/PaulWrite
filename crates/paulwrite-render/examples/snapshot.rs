@@ -46,6 +46,7 @@ impl RowSource for Demo {
         Row {
             text,
             selections: sels,
+            matches: &[],
             carets,
             underline: *underline,
             spans: if i == 1 { &SPANS } else { &[] },
