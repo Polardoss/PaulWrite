@@ -12,9 +12,17 @@ use std::path::PathBuf;
 /// (voir `docs/benchmarks.md` pour les mesures qui fondent cette valeur).
 pub const DEFAULT_HIGHLIGHT_MAX_BYTES: usize = 1024 * 1024;
 
+/// Taille maximale (octets) d'un fichier affiché avec retour à la ligne par défaut : au-delà, les
+/// lignes ne sont pas coupées (voir `docs/benchmarks.md`).
+pub const DEFAULT_WRAP_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// Réglages de l'application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// Retour à la ligne automatique au démarrage (`word_wrap = false` pour le désactiver).
+    pub word_wrap: bool,
+    /// Au-delà de cette taille, pas de retour à la ligne (`word_wrap_max_bytes`).
+    pub word_wrap_max_bytes: usize,
     /// Au-delà de cette taille, pas de coloration syntaxique (`highlight_max_bytes`).
     pub highlight_max_bytes: usize,
     /// Colorer ou non (`highlight = false` la désactive partout).
@@ -40,6 +48,8 @@ const DEFAULT_SERVERS: [(&str, &str); 7] = [
 impl Default for Config {
     fn default() -> Self {
         Self {
+            word_wrap: true,
+            word_wrap_max_bytes: DEFAULT_WRAP_MAX_BYTES,
             highlight_max_bytes: DEFAULT_HIGHLIGHT_MAX_BYTES,
             highlight: true,
             lsp: false,
@@ -69,6 +79,16 @@ impl Config {
                 "highlight" => {
                     if let Ok(b) = value.parse::<bool>() {
                         c.highlight = b;
+                    }
+                }
+                "word_wrap" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        c.word_wrap = b;
+                    }
+                }
+                "word_wrap_max_bytes" => {
+                    if let Ok(n) = value.replace('_', "").parse::<usize>() {
+                        c.word_wrap_max_bytes = n;
                     }
                 }
                 "lsp" => {
@@ -130,6 +150,12 @@ impl Config {
     #[must_use]
     pub fn highlights(&self, len_bytes: usize) -> bool {
         self.highlight && len_bytes <= self.highlight_max_bytes
+    }
+
+    /// Un document de `len_bytes` octets peut-il être affiché avec retour à la ligne ?
+    #[must_use]
+    pub fn can_wrap(&self, len_bytes: usize) -> bool {
+        len_bytes <= self.word_wrap_max_bytes
     }
 }
 

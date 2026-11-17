@@ -125,6 +125,8 @@ pub struct Options {
     /// Écrit une capture PNG de la fenêtre (hors écran) puis quitte : contrôle visuel du rendu.
     /// `PAULWRITE_SCREENSHOT_PALETTE=files|commands` ouvre le panneau avant la capture.
     pub screenshot: Option<PathBuf>,
+    /// Désactive le retour à la ligne (comparaisons de mesures).
+    pub no_wrap: bool,
 }
 
 impl Options {
@@ -165,6 +167,7 @@ impl Options {
                         it.next().ok_or("--screenshot attend un chemin")?,
                     ));
                 }
+                "--no-wrap" => o.no_wrap = true,
                 "--bench-out" => {
                     o.bench_out = Some(PathBuf::from(
                         it.next().ok_or("--bench-out attend un chemin")?,
@@ -303,6 +306,11 @@ struct App {
     mouse: PhysicalPosition<f64>,
     dragging: bool,
     wheel_lines: f32,
+    /// Retour à la ligne automatique voulu (commun à tous les onglets ; désactivé de fait pour
+    /// un fichier trop gros, voir `Config::can_wrap`).
+    word_wrap: bool,
+    /// La souris survole la gouttière : les flèches de repli sont affichées.
+    fold_hover: bool,
     // clignotement
     next_blink: Instant,
     // titre, enregistrement, fermeture
@@ -395,6 +403,7 @@ impl App {
         syntax_tx: Sender<syntax::Request>,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
+        let word_wrap = !opts.no_wrap;
         Self {
             opts,
             config: Config::default(),
@@ -414,6 +423,8 @@ impl App {
             mouse: PhysicalPosition::new(0.0, 0.0),
             dragging: false,
             wheel_lines: 0.0,
+            word_wrap,
+            fold_hover: false,
             next_blink: Instant::now() + BLINK,
             title: String::new(),
             after_save: None,
@@ -522,10 +533,28 @@ impl App {
         if let Some(rows) = self.rows_now() {
             ed!(self).set_viewport_rows(rows);
         }
+        self.sync_text_layout();
         self.full_present = true;
         self.tabs_dirty = true;
         self.ime_area = None;
         self.request_redraw();
+    }
+
+    /// Largeur du texte et retour à la ligne de l'onglet actif : la largeur dépend de la fenêtre,
+    /// de la gouttière, de la barre latérale et de la minimap ; le retour à la ligne, du réglage
+    /// et de la taille du fichier.
+    fn sync_text_layout(&mut self) {
+        let Some(r) = self.renderer.as_ref() else {
+            return;
+        };
+        let cols = r.text_cols();
+        let len = ed!(self).document().buffer().len_bytes();
+        let wrap = self.word_wrap && self.config.can_wrap(len);
+        let marks = self.fold_hover;
+        let e = &mut self.tabs[self.active].editor;
+        e.set_wrap(wrap);
+        e.set_fold_marks(marks);
+        e.set_viewport_cols(cols);
     }
 
     /// Envoie la liste des onglets au moteur de rendu si elle a changé.
@@ -1934,6 +1963,7 @@ impl App {
         if rows != self.tabs[self.active].editor.rows() {
             self.tabs[self.active].editor.set_viewport_rows(rows);
         }
+        self.sync_text_layout();
     }
 
     fn redraw(&mut self, el: &ActiveEventLoop) {
@@ -2096,6 +2126,19 @@ impl App {
                 "PaulWrite {} \u{2014} éditeur de texte rapide",
                 env!("CARGO_PKG_VERSION")
             )),
+            Effect::ToggleWordWrap => {
+                self.word_wrap = !self.word_wrap;
+                let large = !self
+                    .config
+                    .can_wrap(ed!(self).document().buffer().len_bytes());
+                let state = match (self.word_wrap, large) {
+                    (true, true) => "on (not applied: file too large)",
+                    (true, false) => "on",
+                    (false, _) => "off",
+                };
+                self.toast(format!("Word wrap: {state}"));
+                self.request_redraw();
+            }
             Effect::Lsp(action) => self.lsp_request(action),
             Effect::ReloadPlugins => {
                 if let Some(tx) = &self.plugins_tx {
@@ -2131,6 +2174,19 @@ impl App {
                 Ok("files") => self.open_palette(PaletteMode::Files),
                 Ok("commands") => self.open_palette(PaletteMode::Commands),
                 _ => {}
+            }
+            // `PAULWRITE_SCREENSHOT_COMMANDS=fold.fold_all,cursor.down` : commandes de l'éditeur
+            // exécutées avant la capture ; `PAULWRITE_SCREENSHOT_HOVER=1` : souris sur la gouttière.
+            if let Ok(list) = std::env::var("PAULWRITE_SCREENSHOT_COMMANDS") {
+                for cmd in list.split(',').filter_map(|n| Command::from_name(n.trim())) {
+                    ed!(self).execute(cmd, 0);
+                }
+            }
+            if std::env::var_os("PAULWRITE_SCREENSHOT_HOVER").is_some() {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_fold_hover(true);
+                }
+                self.fold_hover = true;
             }
             later(800, 1);
             return;
@@ -2178,6 +2234,27 @@ impl App {
         }
     }
 
+    /// Les flèches de repli (▼) n'apparaissent que lorsque la souris survole la gouttière.
+    fn update_fold_hover(&mut self, inside: bool) {
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
+        let m = r.metrics();
+        let bottom = (r.size().1 as i32 - m.status_bar) as f32;
+        let on = inside
+            && self.palette.is_none()
+            && x >= m.sidebar as f32
+            && x < (m.sidebar + m.gutter) as f32
+            && y >= m.top as f32
+            && y < bottom;
+        if on != self.fold_hover {
+            self.fold_hover = on;
+            r.set_fold_hover(on);
+            self.request_redraw();
+        }
+    }
+
     /// Fait défiler le document d'après un clic dans la minimap ou la barre de défilement.
     fn strip_apply(&mut self, hit: StripHit) {
         match hit {
@@ -2214,7 +2291,12 @@ impl App {
         let m = r.metrics();
         let row = ((self.mouse.y as i32 - m.top).max(0) / m.line_height.max(1)) as usize;
         let row = row.min(ed!(self).rows().saturating_sub(1));
-        ed!(self).select_row(row);
+        if r.gutter_fold_hit(self.mouse.x as f32) {
+            // la flèche replie ou déplie ; hors flèche, un clic sélectionne la ligne
+            ed!(self).toggle_fold_row(row);
+        } else {
+            ed!(self).select_row(row);
+        }
     }
 
     /// Place le curseur sous la souris (clic ou glissement).
@@ -2227,8 +2309,18 @@ impl App {
         let y = (self.mouse.y as i32 - m.top).max(0);
         let row = (y / m.line_height.max(1)) as usize;
         let row = row.min(ed!(self).rows().saturating_sub(1));
+        // le repère « … » d'une ligne repliée : un clic dessus la déplie
+        if !extend && ed!(self).row_is_folded(row) {
+            let width = crate::wrap::visual_width(ed!(self).row_plain_text(row).chars());
+            let x0 = m.pad_x + width as f32 * m.advance;
+            let x = self.mouse.x as f32;
+            if x >= x0 - 0.3 * m.advance && x < x0 + 2.0 * m.advance {
+                ed!(self).toggle_fold_row(row);
+                return;
+            }
+        }
         let utf16 = r
-            .column_at(ed!(self).row_text(row), self.mouse.x as f32)
+            .column_at(ed!(self).row_plain_text(row), self.mouse.x as f32)
             .unwrap_or(0);
         let col = ed!(self).char_col_of_utf16(row, utf16);
         ed!(self).click(row, col, extend);
@@ -2776,7 +2868,9 @@ impl ApplicationHandler<UserEvent> for App {
                 Done::Config(c) => {
                     // Les modes de mesure ont leur propre configuration (voir `resumed`).
                     if !self.is_bench() {
+                        self.word_wrap = c.word_wrap && !self.opts.no_wrap;
                         self.config = c;
+                        self.request_redraw();
                     }
                 }
                 Done::FolderPicked(Some(path)) => self.set_project_root(path),
@@ -3054,6 +3148,23 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // défilement horizontal : molette latérale, ou Maj + molette (sans retour à la ligne)
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    MouseScrollDelta::PixelDelta(p) => (p.x as f32 / 20.0, p.y as f32 / 20.0),
+                };
+                let (dx, dy) = if self.mods.shift_key() {
+                    (dy, 0.0)
+                } else {
+                    (dx, dy)
+                };
+                if dx != 0.0 {
+                    ed!(self).scroll_horizontally(-(dx * 6.0).round() as isize);
+                    self.touch(Instant::now());
+                    if dy == 0.0 {
+                        return;
+                    }
+                }
                 let lh = self
                     .renderer
                     .as_ref()
@@ -3072,6 +3183,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = position;
                 self.update_cursor();
+                self.update_fold_hover(true);
                 if let Some(scrollbar) = self.strip_drag {
                     self.strip_scroll(scrollbar);
                 } else if self.dragging {
@@ -3178,6 +3290,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.dragging = false;
                 self.strip_drag = None;
             }
+            WindowEvent::CursorLeft { .. } => self.update_fold_hover(false),
             WindowEvent::DroppedFile(path) => self.open_path(path),
             _ => {}
         }

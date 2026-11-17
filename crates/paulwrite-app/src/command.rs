@@ -69,6 +69,16 @@ pub enum Command {
     OpenSettings,
     /// À propos de PaulWrite.
     About,
+    /// Replie la région du curseur.
+    Fold,
+    /// Déplie la région du curseur.
+    Unfold,
+    /// Replie toutes les régions de premier niveau.
+    FoldAll,
+    /// Déplie toutes les régions.
+    UnfoldAll,
+    /// Active ou désactive le retour à la ligne automatique.
+    ToggleWordWrap,
     Quit,
 }
 
@@ -143,6 +153,11 @@ impl Command {
             Command::ToggleSidebar => "view.toggle_sidebar",
             Command::OpenSettings => "preferences.open_settings",
             Command::About => "help.about",
+            Command::Fold => "fold.fold",
+            Command::Unfold => "fold.unfold",
+            Command::FoldAll => "fold.fold_all",
+            Command::UnfoldAll => "fold.unfold_all",
+            Command::ToggleWordWrap => "view.toggle_word_wrap",
             Command::Quit => "app.quit",
         }
     }
@@ -199,6 +214,11 @@ impl Command {
             Command::ToggleSidebar,
             Command::OpenSettings,
             Command::About,
+            Command::Fold,
+            Command::Unfold,
+            Command::FoldAll,
+            Command::UnfoldAll,
+            Command::ToggleWordWrap,
             Command::Quit,
         ]);
         v
@@ -250,6 +270,11 @@ impl Command {
             Command::ToggleSidebar => "Affichage : barre latérale",
             Command::OpenSettings => "Préférences : ouvrir la configuration",
             Command::About => "Aide : à propos de PaulWrite",
+            Command::Fold => "Repli : replier la région",
+            Command::Unfold => "Repli : déplier la région",
+            Command::FoldAll => "Repli : tout replier",
+            Command::UnfoldAll => "Repli : tout déplier",
+            Command::ToggleWordWrap => "Affichage : retour à la ligne automatique",
             Command::Quit => "Application : quitter",
         }
     }
@@ -344,6 +369,8 @@ pub enum Effect {
     ToggleSidebar,
     OpenSettings,
     About,
+    /// Bascule le retour à la ligne automatique (réglage commun à tous les onglets).
+    ToggleWordWrap,
     Quit,
 }
 

@@ -93,3 +93,88 @@ fn cout_d_une_image_de_frappe() {
         stats(&mut t[3])
     );
 }
+
+/// Coût du retour à la ligne et du repli sur un gros document (≈ 10 Mo, 150 000 lignes) :
+/// construction des rangées, défilements, sauts, Fold All. Sans fenêtre.
+#[test]
+#[ignore = "mesure"]
+fn cout_du_retour_a_la_ligne_et_du_repli() {
+    use paulwrite_app::command::Command;
+    use paulwrite_core::Motion;
+
+    let doc = text(150_000);
+    println!(
+        "document : {} lignes, {:.1} Mo",
+        doc.lines().count(),
+        doc.len() as f64 / 1e6
+    );
+    for wrap in [false, true] {
+        let mut e = Editor::from_document(Document::from_text(&doc), None);
+        e.set_viewport_rows(40);
+        e.set_wrap(wrap);
+        e.set_viewport_cols(90);
+        // construction d'une image à des endroits répartis dans le document
+        let mut v = Vec::new();
+        for i in 0..1000 {
+            e.set_first_line(i * 140);
+            let t = Instant::now();
+            e.build_view();
+            v.push(ms(t));
+        }
+        println!("retour à la ligne {wrap:>5} : build_view {}", stats(&mut v));
+        // défilement de 3 rangées + construction (molette)
+        let mut v = Vec::new();
+        for _ in 0..1000 {
+            let t = Instant::now();
+            e.scroll_by(3);
+            e.build_view();
+            v.push(ms(t));
+        }
+        println!("                    molette + build_view {}", stats(&mut v));
+        // sauts : fin, début, page
+        let t = Instant::now();
+        e.execute(Command::Move(Motion::DocEnd), 0);
+        e.build_view();
+        let end = ms(t);
+        let t = Instant::now();
+        e.execute(Command::Move(Motion::DocStart), 0);
+        e.build_view();
+        let start = ms(t);
+        let t = Instant::now();
+        for _ in 0..100 {
+            e.execute(Command::PageDown(false), 0);
+        }
+        let pages = ms(t) / 100.0;
+        println!(
+            "                    Ctrl+Fin {end:.2} ms | Ctrl+Début {start:.2} ms | PageSuiv {pages:.2} ms"
+        );
+        // frappe à la fin de la 40e ligne visible
+        let mut v = Vec::new();
+        for i in 0..500 {
+            let t = Instant::now();
+            e.insert_text("x", i);
+            e.build_view();
+            v.push(ms(t));
+        }
+        println!("                    frappe + build_view {}", stats(&mut v));
+    }
+    // Fold All sur 100 000 lignes
+    let mut e = Editor::from_document(Document::from_text(&doc), None);
+    e.set_viewport_rows(40);
+    e.set_wrap(true);
+    e.set_viewport_cols(90);
+    let t = Instant::now();
+    e.execute(Command::FoldAll, 0);
+    e.build_view();
+    println!(
+        "Fold All : {:.1} ms ({} régions) | Unfold All : {:.1} ms",
+        ms(t),
+        e.fold_count(),
+        {
+            let t = Instant::now();
+            e.execute(Command::UnfoldAll, 0);
+            e.build_view();
+            ms(t)
+        }
+    );
+}

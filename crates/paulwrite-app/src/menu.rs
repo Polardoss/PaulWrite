@@ -46,6 +46,11 @@ fn menus() -> Vec<(&'static str, Vec<Line>)> {
                 Item(Command::Paste, "Paste"),
                 Sep,
                 Item(Command::DeleteForward, "Delete"),
+                Sep,
+                Item(Command::Fold, "Fold"),
+                Item(Command::Unfold, "Unfold"),
+                Item(Command::FoldAll, "Fold All"),
+                Item(Command::UnfoldAll, "Unfold All"),
             ],
         ),
         (
@@ -75,6 +80,7 @@ fn menus() -> Vec<(&'static str, Vec<Line>)> {
             "&View",
             vec![
                 Item(Command::ToggleSidebar, "Side Bar"),
+                Item(Command::ToggleWordWrap, "Word Wrap"),
                 Sep,
                 Item(Command::NextTab, "Next File"),
                 Item(Command::PrevTab, "Previous File"),

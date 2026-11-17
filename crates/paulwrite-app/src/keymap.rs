@@ -70,8 +70,14 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("f", true) => Some(Command::SearchProject),
             ("w", _) => Some(Command::CloseTab),
             ("q", _) => Some(Command::Quit),
+            // Replier / déplier (Ctrl+Maj+[ et Ctrl+Maj+], le Maj donne { et } selon la disposition)
+            ("[" | "{", true) => Some(Command::Fold),
+            ("]" | "}", true) => Some(Command::Unfold),
             _ => None,
         },
+        Key::Character(s) if alt && !ctrl && !shift && s.to_lowercase() == "z" => {
+            Some(Command::ToggleWordWrap)
+        }
         _ => None,
     }
 }
@@ -109,9 +115,15 @@ pub fn shortcut_label(cmd: Command) -> Option<String> {
             c.to_ascii_uppercase().to_string(),
         )
     }));
+    keys.extend(
+        ["[", "]"]
+            .iter()
+            .map(|c| (Key::Character((*c).into()), (*c).to_owned())),
+    );
     // Du plus simple au plus composé : on préfère `Ctrl+S` à `Ctrl+Maj+S`.
-    let combos: [(ModifiersState, &str); 5] = [
+    let combos: [(ModifiersState, &str); 6] = [
         (ModifiersState::empty(), ""),
+        (ModifiersState::ALT, "Alt+"),
         (ModifiersState::CONTROL, "Ctrl+"),
         (ModifiersState::SHIFT, "Maj+"),
         (ModifiersState::CONTROL | ModifiersState::SHIFT, "Ctrl+Maj+"),

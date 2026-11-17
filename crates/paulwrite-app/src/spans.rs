@@ -39,6 +39,12 @@ impl SpanCache {
         self.spans.clear();
     }
 
+    /// Aucune plage colorée (coloration inactive ou rien reçu du worker).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
     /// Plage d'octets couverte.
     #[must_use]
     pub fn range(&self) -> Range<usize> {
