@@ -15,6 +15,7 @@ use crate::i18n::Lang;
 use ropey::Rope;
 
 use crate::config::Config;
+use crate::session::Session;
 use crate::sidebar::{is_hidden_dir, sort_entries, Entry};
 
 /// Identifiant d'onglet (stable pendant la vie de l'onglet).
@@ -61,6 +62,12 @@ pub enum Job {
     },
     /// Lance une nouvelle fenêtre : un nouveau processus `paulwrite`, sans document.
     NewWindow,
+    /// Enregistre la session (onglets, dossier) ; `ack` est signalé une fois le fichier écrit
+    /// (à la fermeture, l'application l'attend un court instant avant de quitter).
+    SaveSession {
+        session: Session,
+        ack: Option<Sender<()>>,
+    },
     /// Enregistre un réglage dans `config.toml` (clé et valeur texte) ; le fichier est créé au
     /// besoin, le reste de son contenu est conservé.
     SaveSetting { key: &'static str, value: String },
@@ -86,6 +93,7 @@ impl std::fmt::Debug for Job {
             Job::PickSave { tab, .. } => write!(f, "PickSave({tab})"),
             Job::SaveSetting { key, .. } => write!(f, "SaveSetting({key})"),
             Job::NewWindow => write!(f, "NewWindow"),
+            Job::SaveSession { .. } => write!(f, "SaveSession"),
             Job::Save { tab, path, .. } => write!(f, "Save({tab}, {path:?})"),
         }
     }
@@ -95,6 +103,9 @@ impl std::fmt::Debug for Job {
 pub enum Done {
     /// Configuration lue au démarrage du worker (toujours le premier message).
     Config(Config),
+    /// Session de la dernière fermeture (déjà débarrassée des fichiers disparus) ; envoyée juste
+    /// après la configuration, `None` s'il n'y a rien à rétablir.
+    Session(Option<Session>),
     /// Réponse de l'utilisateur à [`Job::ConfirmSave`].
     SaveConfirmed {
         for_: ConfirmFor,
@@ -138,6 +149,11 @@ impl std::fmt::Debug for Done {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Done::Config(c) => write!(f, "Config({c:?})"),
+            Done::Session(s) => write!(
+                f,
+                "Session({} onglets)",
+                s.as_ref().map_or(0, |s| s.tabs.len())
+            ),
             Done::SaveConfirmed { for_, choice } => {
                 write!(f, "SaveConfirmed({for_:?}, {choice:?})")
             }
@@ -192,6 +208,7 @@ const CONFIG_TEMPLATE: &str =
 # lsp = false                     # true : serveurs de langage (programmes externes)\n\
 # lsp_rust = \"rust-analyzer\"\n\
 # language = \"auto\"              # \"en\", \"fr\" ou \"auto\" (langue de Windows)\n\
+# restore_session = true          # false : toujours d\u{e9}marrer vide (pas de reprise)\n\
 # word_wrap = true                # false : pas de retour \u{e0} la ligne automatique\n";
 
 /// Écrit `key = "value"` dans `config.toml` (appelé sur le worker).
@@ -233,7 +250,10 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
     thread::Builder::new()
         .name("paulwrite-worker".into())
         .spawn(move || {
-            notify(Done::Config(Config::load()));
+            let config = Config::load();
+            let restore = config.restore_session;
+            notify(Done::Config(config));
+            notify(Done::Session(if restore { Session::load() } else { None }));
             for job in rx {
                 match job {
                     Job::ConfirmSave {
@@ -293,10 +313,21 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                     }),
                     Job::NewWindow => {
                         // un processus de plus : l'état (onglets, curseurs) n'est pas partagé
-                        if let Err(e) = std::env::current_exe()
-                            .and_then(|exe| std::process::Command::new(exe).spawn().map(|_| ()))
-                        {
+                        if let Err(e) = std::env::current_exe().and_then(|exe| {
+                            std::process::Command::new(exe)
+                                .arg("--new-window")
+                                .spawn()
+                                .map(|_| ())
+                        }) {
                             eprintln!("nouvelle fen\u{ea}tre impossible : {e}");
+                        }
+                    }
+                    Job::SaveSession { session, ack } => {
+                        if let Err(e) = session.save() {
+                            eprintln!("session non enregistree : {e}");
+                        }
+                        if let Some(ack) = ack {
+                            let _ = ack.send(());
                         }
                     }
                     Job::SaveSetting { key, value } => {

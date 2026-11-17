@@ -116,6 +116,7 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+K puis Ctrl+B, icône en bas à gauche | afficher / masquer la barre latérale |
 | Glisser le bord de la barre latérale, son curseur de défilement | largeur, défilement |
 | Alt+Z (View ▸ Word Wrap) | retour à la ligne automatique (actif par défaut) |
+| (au lancement, sans fichier en argument) | **reprise de session** : onglets, dossier, barre latérale, curseur et défilement de chaque fichier ; le texte non enregistré n'est pas conservé |
 | Preferences ▸ Language | anglais ou français (enregistré dans `config.toml`) |
 | Ctrl+Maj+[ / Ctrl+Maj+], flèches de la gouttière, clic sur « … » | replier / déplier une région (par indentation) ; Edit ▸ Fold All / Unfold All |
 | Maj+molette, molette latérale | défilement horizontal (sans retour à la ligne) |
@@ -141,6 +142,7 @@ Réglages (facultatifs) dans `%APPDATA%\PaulWrite\config.toml` :
 highlight = true                # false : pas de coloration syntaxique
 highlight_max_bytes = 1048576   # au-delà de cette taille (octets), pas de coloration
 language = "auto"               # "en", "fr" ou "auto" (langue de Windows)
+restore_session = true         # false : toujours démarrer vide (pas de reprise de session)
 word_wrap = true                # false : pas de retour à la ligne automatique
 word_wrap_max_bytes = 16777216  # au-delà de cette taille (octets), pas de retour à la ligne
 lsp = false                     # true : serveurs de langage (programmes externes à installer)

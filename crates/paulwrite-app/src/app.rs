@@ -44,6 +44,7 @@ use crate::keymap;
 use crate::menu;
 use crate::metrics::Samples;
 use crate::palette::{parse_goto, Item, Outcome, Palette, PaletteKey, PaletteMode, Target};
+use crate::session::{Session, TabState};
 use crate::sidebar::{Click, SidebarTree};
 use crate::tab::{Tab, SYNTAX_MARGIN_LINES};
 use crate::worker::{self, ConfirmFor, Done, Job, TabId};
@@ -148,6 +149,8 @@ pub struct Options {
     pub screenshot: Option<PathBuf>,
     /// Désactive le retour à la ligne (comparaisons de mesures).
     pub no_wrap: bool,
+    /// Fenêtre ouverte par « Nouvelle fenêtre » : vide, sans reprise ni enregistrement de session.
+    pub new_window: bool,
 }
 
 impl Options {
@@ -189,6 +192,7 @@ impl Options {
                     ));
                 }
                 "--no-wrap" => o.no_wrap = true,
+                "--new-window" => o.new_window = true,
                 "--bench-out" => {
                     o.bench_out = Some(PathBuf::from(
                         it.next().ok_or("--bench-out attend un chemin")?,
@@ -374,6 +378,9 @@ struct App {
     title: String,
     after_save: Option<AfterSave>,
     quit_queue: Vec<TabId>,
+    /// Cette fenêtre reprend la session précédente et l'enregistre en se fermant (pas pour une
+    /// nouvelle fenêtre, ni quand des fichiers sont donnés sur la ligne de commande).
+    session_enabled: bool,
     /// Une boîte « Enregistrer ? » est ouverte (sur le worker) : on n'en ouvre pas une deuxième.
     confirming: bool,
     /// Dossier du projet (dossier ouvert, glissé ou passé en argument).
@@ -471,7 +478,14 @@ impl App {
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
         let word_wrap = !opts.no_wrap;
+        // `PAULWRITE_SCREENSHOT_SESSION=1` : la capture reprend et réenregistre la session.
+        let session_enabled = opts.bench.is_none()
+            && (opts.screenshot.is_none()
+                || std::env::var_os("PAULWRITE_SCREENSHOT_SESSION").is_some())
+            && !opts.new_window
+            && opts.paths.is_empty();
         Self {
+            session_enabled,
             opts,
             config: Config::default(),
             jobs,
@@ -884,6 +898,95 @@ impl App {
         }
     }
 
+    // --- Session -------------------------------------------------------------------------------
+
+    /// État à enregistrer : les onglets qui ont un fichier, le dossier, la barre latérale.
+    fn current_session(&self) -> Session {
+        let mut tabs = Vec::new();
+        let mut active = 0;
+        for (i, t) in self.tabs.iter().enumerate() {
+            let Some(path) = t.editor.path() else {
+                continue;
+            };
+            if i == self.active {
+                active = tabs.len();
+            }
+            // Un fichier encore en lecture garde la position qu'on voulait lui rendre.
+            let (line, col, first) = match t.pending_restore {
+                Some(v) if t.loading.is_some() => v,
+                _ => {
+                    let (line, col) = t.editor.caret_line_col();
+                    (line, col, t.editor.first_line())
+                }
+            };
+            tabs.push(TabState {
+                path: path.to_path_buf(),
+                line,
+                col,
+                first,
+            });
+        }
+        Session {
+            root: self.project_root.clone(),
+            sidebar_open: self.sidebar_open,
+            sidebar_width: self.renderer.as_ref().map(|r| r.sidebar_width_logical()),
+            active,
+            tabs,
+        }
+    }
+
+    /// Rouvre la session précédente : dossier, barre latérale, onglets (celui qui était actif est
+    /// lu en premier), curseur et vue rétablis dès que chaque fichier est chargé.
+    fn restore_session(&mut self, session: Session) {
+        if let Some(root) = session.root.clone() {
+            self.set_project_root(root);
+            self.sidebar_open = session.sidebar_open;
+            if let (Some(w), Some(r)) = (session.sidebar_width, self.renderer.as_mut()) {
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map_or(1.0, |w| w.scale_factor() as f32);
+                r.set_sidebar_width_px(w * scale);
+            }
+        }
+        if session.tabs.is_empty() {
+            return;
+        }
+        // Les onglets dans l'ordre de la session (le premier réutilise l'onglet vierge).
+        let mut ids = Vec::with_capacity(session.tabs.len());
+        for (n, t) in session.tabs.iter().enumerate() {
+            let index = if n == 0 { 0 } else { self.push_tab() };
+            let tab = &mut self.tabs[index];
+            tab.editor.set_path(t.path.clone());
+            tab.loading = Some((0, 0));
+            tab.pending_restore = Some((t.line, t.col, t.first));
+            ids.push((tab.id, t.path.clone()));
+        }
+        // Lecture : l'onglet actif d'abord, il est le seul visible.
+        let active = session.active.min(ids.len() - 1);
+        let first = ids.remove(active);
+        for (tab, path) in std::iter::once(first).chain(ids) {
+            self.jobs.send(Job::Open { tab, path }).ok();
+        }
+        self.activate(active);
+    }
+
+    /// Enregistre la session (attend un court instant que le worker ait écrit le fichier : le
+    /// processus s'arrête juste après).
+    fn save_session(&mut self) {
+        if !self.session_enabled {
+            return;
+        }
+        let (ack, wait) = crossbeam_channel::bounded(1);
+        let job = Job::SaveSession {
+            session: self.current_session(),
+            ack: Some(ack),
+        };
+        if self.jobs.send(job).is_ok() {
+            let _ = wait.recv_timeout(Duration::from_millis(500));
+        }
+    }
+
     /// Ferme l'application en demandant, onglet par onglet, d'enregistrer les modifications.
     fn request_quit(&mut self, el: &ActiveEventLoop) {
         if self.is_bench() {
@@ -916,6 +1019,7 @@ impl App {
             self.confirm(ConfirmFor::Quit(id), index);
             return;
         }
+        self.save_session();
         el.exit();
     }
 
@@ -2516,6 +2620,7 @@ impl App {
                 eprintln!("capture : {e}");
             }
         }
+        self.save_session();
         el.exit();
     }
 
@@ -3244,6 +3349,13 @@ impl ApplicationHandler<UserEvent> for App {
                         self.apply_lang();
                     }
                 }
+                Done::Session(Some(session)) => {
+                    // seulement si l'utilisateur n'a encore rien ouvert
+                    if self.session_enabled && self.tabs.len() == 1 && self.tabs[0].is_pristine() {
+                        self.restore_session(session);
+                    }
+                }
+                Done::Session(None) => {}
                 Done::FolderPicked(Some(path)) => self.set_project_root(path),
                 Done::FolderPicked(None) => {}
                 Done::DirListed { path, entries } => {
@@ -3325,6 +3437,11 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             if let Some(l) = self.tabs[i].pending_goto.take() {
                                 self.tabs[i].editor.goto(l, 0);
+                            }
+                            if let Some((line, col, first)) = self.tabs[i].pending_restore.take() {
+                                let e = &mut self.tabs[i].editor;
+                                e.goto(line, col.saturating_sub(1));
+                                e.set_first_line(first);
                             }
                             self.attach_syntax(i, None);
                             self.plugin_event("open", Some(i));
@@ -3826,6 +3943,8 @@ mod tests {
             parse(&["--bench-syntax", "100"]).unwrap().bench,
             Some(BenchKind::Syntax(100))
         );
+        assert!(parse(&["--new-window"]).unwrap().new_window);
+        assert!(!parse(&["a.txt"]).unwrap().new_window);
         assert!(parse(&["--bench-typing"]).is_err());
         assert!(parse(&["--bench-typing", "x"]).is_err());
         assert!(parse(&["--inconnue"]).is_err());

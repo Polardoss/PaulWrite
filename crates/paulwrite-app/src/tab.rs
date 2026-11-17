@@ -27,6 +27,9 @@ pub struct Tab {
     pub shown_modified: bool,
     /// Ligne (à partir de 1) où placer le curseur dès que le fichier est chargé.
     pub pending_goto: Option<usize>,
+    /// Curseur et vue à rétablir dès que le fichier est chargé (reprise de session) : ligne et
+    /// colonne à partir de 1, première ligne visible.
+    pub pending_restore: Option<(usize, usize, usize)>,
     /// Chemin sous lequel le document est ouvert dans un serveur de langage (`None` : pas suivi).
     pub lsp_path: Option<std::path::PathBuf>,
     /// Version du document envoyée au serveur de langage (augmente à chaque modification).
@@ -47,6 +50,7 @@ impl Tab {
             loading: None,
             shown_modified: false,
             pending_goto: None,
+            pending_restore: None,
             lsp_path: None,
             lsp_version: 0,
             diagnostics: Vec::new(),

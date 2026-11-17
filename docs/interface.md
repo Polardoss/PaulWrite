@@ -118,6 +118,12 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
 - **Réglages** : `word_wrap = false` (défaut `true`) et `word_wrap_max_bytes` (défaut 16 Mo) dans
   `config.toml`. Au-delà de cette taille, ou pour une ligne de plus de 200 000 caractères, pas de
   retour à la ligne (voir `docs/benchmarks.md`).
+- **Reprise de session** : à la fermeture, les onglets qui ont un fichier (chemin, ligne et colonne du
+  curseur, première ligne visible), le dossier du projet et la barre latérale (affichée, largeur) sont
+  écrits dans `%APPDATA%\PaulWrite\session` par le worker ; au lancement suivant ils sont rétablis
+  (l'onglet actif est lu en premier, les fichiers disparus sont ignorés sans message). Pas de reprise
+  ni d'enregistrement quand des fichiers sont donnés en argument, pour une « nouvelle fenêtre »
+  (`--new-window`) ou avec `restore_session = false`. Le texte non enregistré n'est pas conservé.
 
 ## Limites connues
 

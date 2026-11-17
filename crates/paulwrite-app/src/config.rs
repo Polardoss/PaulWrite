@@ -23,6 +23,9 @@ pub const DEFAULT_WRAP_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub struct Config {
     /// Langue de l'interface : `language = "en"` ou `"fr"` ; absente ou `"auto"` : celle de Windows.
     pub language: Option<Lang>,
+    /// Rouvrir les onglets, le dossier et la position du curseur au lancement
+    /// (`restore_session = false` pour toujours démarrer vide).
+    pub restore_session: bool,
     /// Retour à la ligne automatique au démarrage (`word_wrap = false` pour le désactiver).
     pub word_wrap: bool,
     /// Au-delà de cette taille, pas de retour à la ligne (`word_wrap_max_bytes`).
@@ -54,6 +57,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             language: None,
+            restore_session: true,
             word_wrap: true,
             word_wrap_max_bytes: DEFAULT_WRAP_MAX_BYTES,
             highlight_max_bytes: DEFAULT_HIGHLIGHT_MAX_BYTES,
@@ -88,6 +92,11 @@ impl Config {
                     }
                 }
                 "language" => c.language = Lang::from_code(value),
+                "restore_session" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        c.restore_session = b;
+                    }
+                }
                 "word_wrap" => {
                     if let Ok(b) = value.parse::<bool>() {
                         c.word_wrap = b;

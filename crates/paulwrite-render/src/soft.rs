@@ -779,6 +779,12 @@ impl SoftRenderer {
         }
     }
 
+    /// Largeur de la barre latérale en pixels logiques (pour la session).
+    #[must_use]
+    pub fn sidebar_width_logical(&self) -> f32 {
+        self.sidebar_w
+    }
+
     /// Largeur voulue de la barre latérale, en pixels **physiques** (glisser son bord). Bornée
     /// entre 120 px logiques et 60 % de la fenêtre. Redessine tout (le texte se décale).
     pub fn set_sidebar_width_px(&mut self, px: f32) {
