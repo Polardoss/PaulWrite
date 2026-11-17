@@ -172,7 +172,7 @@ fn overlay_row_hash(r: &OverlayRow) -> u64 {
         h = h.wrapping_mul(0x0100_0000_01b3);
     };
     mix(r.kind as usize);
-    mix(r.caret.map_or(usize::MAX, |c| c));
+    mix(r.caret.unwrap_or(usize::MAX));
     for &(a, b) in &r.highlights {
         mix(a);
         mix(b);
