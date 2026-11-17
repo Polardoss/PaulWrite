@@ -69,6 +69,39 @@ pub enum SidebarKind {
     FolderOpen,
 }
 
+/// Famille d'un fichier, pour l'icône de la barre latérale (une teinte par famille).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FileIcon {
+    #[default]
+    Plain,
+    Rust,
+    Python,
+    /// JavaScript et TypeScript.
+    Script,
+    /// HTML et CSS.
+    Web,
+    /// JSON, TOML, YAML…
+    Data,
+    /// Markdown et texte.
+    Doc,
+}
+
+impl FileIcon {
+    /// Indice du pinceau de l'icône (0 : dossier).
+    fn brush(self) -> usize {
+        BR_ICON
+            + match self {
+                FileIcon::Plain => 1,
+                FileIcon::Rust => 2,
+                FileIcon::Python => 3,
+                FileIcon::Script => 4,
+                FileIcon::Web => 5,
+                FileIcon::Data => 6,
+                FileIcon::Doc => 7,
+            }
+    }
+}
+
 /// Une ligne de la barre latérale.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarRow {
@@ -77,12 +110,17 @@ pub struct SidebarRow {
     pub depth: usize,
     pub kind: SidebarKind,
     pub selected: bool,
+    /// Icône d'un fichier (les dossiers ont la leur).
+    pub icon: FileIcon,
 }
 
 /// Contenu visible de la barre latérale (les lignes déjà défilées sont retirées par l'appelant).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sidebar {
     pub rows: Vec<SidebarRow>,
+    /// Barre de défilement : `(première ligne affichée, lignes affichées, total)` ; `None` si tout
+    /// tient.
+    pub scroll: Option<(usize, usize, usize)>,
 }
 
 /// Ce que l'on touche dans la zone de droite.
@@ -1021,24 +1059,103 @@ impl SoftRenderer {
                 }
                 _ => {}
             }
+            // icône (dossier ou famille du fichier), puis le nom
+            let icon_x = x + (14.0 * s).round();
+            let icon_bg = if row.selected {
+                BR_SIDEBAR_SEL
+            } else {
+                BR_SIDEBAR_BG
+            };
+            self.paint_icon(row, icon_x, cy, icon_bg);
             let brush = if row.selected || hot {
                 BR_SIDEBAR_TEXT_SEL
             } else {
                 BR_SIDEBAR_TEXT
             };
-            let clip = d2d_rect(0.0, t, w - 4.0 * s, bt);
+            let clip = d2d_rect(0.0, t, w - 10.0 * s, bt);
             self.rt
                 .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
             self.ui_text(
                 &row.label,
                 UiFont::Tab,
-                x + (16.0 * s).round(),
+                icon_x + (18.0 * s).round(),
                 (t, bt),
                 brush,
             )?;
             self.rt.PopAxisAlignedClip();
         }
+        // barre de défilement : un curseur arrondi à droite, seulement si tout ne tient pas
+        if let Some((first, visible, total)) = sb.scroll {
+            let (y0, th) = self.sidebar_thumb(first, visible, total, b);
+            self.rt.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: d2d_rect(w - 8.0 * s, y0, w - 2.0 * s, y0 + th),
+                    radiusX: 3.0 * s,
+                    radiusY: 3.0 * s,
+                },
+                &self.brushes[BR_SCROLL_THUMB],
+            );
+        }
         Ok(())
+    }
+
+    /// Ordonnée et hauteur du curseur de la barre de défilement de la barre latérale.
+    fn sidebar_thumb(&self, first: usize, visible: usize, total: usize, height: f32) -> (f32, f32) {
+        let total = total.max(1);
+        let th = (height * visible as f32 / total as f32)
+            .max(28.0 * self.scale)
+            .min(height);
+        let range = total.saturating_sub(visible).max(1);
+        let y = (height - th) * first.min(range) as f32 / range as f32;
+        (y, th)
+    }
+
+    /// Le point est sur la barre de défilement de la barre latérale (bande de droite) : renvoie la
+    /// fraction (0..1) du document que la souris désigne, le curseur étant centré sur elle.
+    #[must_use]
+    pub fn sidebar_scroll_hit(&self, x: f32, y: f32) -> Option<f32> {
+        let (_, visible, total) = self.sidebar.as_ref()?.scroll?;
+        let edge = self.metrics.sidebar as f32;
+        let height = (self.size.1 as i32 - self.metrics.status_bar) as f32;
+        if x < edge - 12.0 * self.scale || x >= edge || y < 0.0 || y >= height {
+            return None;
+        }
+        let (_, th) = self.sidebar_thumb(0, visible, total, height);
+        Some(((y - th / 2.0) / (height - th).max(1.0)).clamp(0.0, 1.0))
+    }
+
+    /// Icône d'une ligne : dossier (languette et corps) ou page à coin replié, teintée selon la
+    /// famille du fichier. Formes simples remplies : pas d'image.
+    unsafe fn paint_icon(&self, row: &SidebarRow, x: f32, cy: f32, bg: usize) {
+        let s = self.scale;
+        let px = |v: f32| (v * s).round();
+        let y0 = (cy - px(6.0)).round();
+        let rect = |l: f32, t: f32, r: f32, b: f32, brush: usize| {
+            self.rt
+                .FillRectangle(&d2d_rect(l, t, r, b), &self.brushes[brush]);
+        };
+        match row.kind {
+            SidebarKind::FolderClosed | SidebarKind::FolderOpen => {
+                // languette puis corps du dossier
+                rect(x, y0 + px(1.0), x + px(5.0), y0 + px(3.0), BR_ICON);
+                rect(x, y0 + px(3.0), x + px(13.0), y0 + px(11.0), BR_ICON);
+            }
+            SidebarKind::File => {
+                let brush = row.icon.brush();
+                let (l, r) = (x + px(1.5), x + px(11.5));
+                rect(l, y0, r, y0 + px(12.0), brush);
+                // coin replié : un triangle de la couleur du fond, en haut à droite
+                let c = px(3.0).max(2.0);
+                for k in 0..(c as i32) {
+                    let k = k as f32;
+                    rect(r - c + k, y0 + k, r, y0 + k + 1.0, bg);
+                }
+                // deux traits de texte sur la page
+                rect(l + px(2.0), y0 + px(6.0), r - px(2.0), y0 + px(7.0), bg);
+                rect(l + px(2.0), y0 + px(8.5), r - px(4.0), y0 + px(9.5), bg);
+            }
+            SidebarKind::Header => {}
+        }
     }
 
     // --- Panneau flottant --------------------------------------------------------------------

@@ -16,13 +16,14 @@
 pub mod platform;
 mod png;
 mod soft;
+pub mod watch;
 
 pub use png::write_png;
 
 pub use soft::{
-    Band, Chrome, Colors, FoldMark, Metrics, MinimapSource, Overlay, OverlayRow, OverlayRowKind,
-    Row, RowSource, Scroll, Sidebar, SidebarKind, SidebarRow, SoftRenderer, StripHit, TabButton,
-    TabInfo, KIND_SLOTS,
+    Band, Chrome, Colors, FileIcon, FoldMark, Metrics, MinimapSource, Overlay, OverlayRow,
+    OverlayRowKind, Row, RowSource, Scroll, Sidebar, SidebarKind, SidebarRow, SoftRenderer,
+    StripHit, TabButton, TabInfo, KIND_SLOTS,
 };
 
 use std::time::Duration;

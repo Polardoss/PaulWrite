@@ -43,12 +43,15 @@ const SCROLLBAR_W: f32 = 12.0;
 const MAX_UNITS: usize = 8192;
 /// Nombre de mises en page conservées avant vidage du cache.
 const MAX_CACHED_LAYOUTS: usize = 1024;
+/// Largeur par défaut de la barre latérale, en pixels logiques, et ses bornes.
+const SIDEBAR_DEFAULT_W: f32 = 250.0;
+const SIDEBAR_MIN_W: f32 = 120.0;
 /// Taille de la police du texte, en pixels logiques.
 const FONT_PX: f32 = 15.0;
 
 mod chrome;
 pub use chrome::{
-    Chrome, MinimapSource, Scroll, Sidebar, SidebarKind, SidebarRow, StripHit, TabButton,
+    Chrome, FileIcon, MinimapSource, Scroll, Sidebar, SidebarKind, SidebarRow, StripHit, TabButton,
 };
 
 /// Pinceaux : 0 texte, 1 fond, 2 sélection, 3 curseur, puis `3 + catégorie` (1..`KIND_SLOTS`) ;
@@ -84,10 +87,12 @@ const BR_SIDEBAR_TEXT: usize = BR_CHROME + 24;
 const BR_SIDEBAR_TEXT_SEL: usize = BR_CHROME + 25;
 const BR_SIDEBAR_DIM: usize = BR_CHROME + 26;
 const BR_SQUIGGLE: usize = BR_CHROME + 27;
+/// Icônes de la barre latérale : dossier, puis une teinte par famille de fichiers.
+const BR_ICON: usize = BR_CHROME + 30;
 
 /// Couleurs de l'interface (thème « Mariana » de Sublime Text, mesurées sur une capture), dans
 /// l'ordre des `BR_*` ci-dessus.
-const CHROME_COLORS: [[f32; 3]; 30] = [
+const CHROME_COLORS: [[f32; 3]; 38] = [
     rgb8(0x72, 0x78, 0x7e), // barre d'onglets
     rgb8(0xc6, 0xc9, 0xcb), // onglet inactif : texte
     rgb8(0xff, 0xff, 0xff), // onglet actif : texte
@@ -118,6 +123,14 @@ const CHROME_COLORS: [[f32; 3]; 30] = [
     rgb8(0xec, 0x5f, 0x67), // erreur
     rgb8(0xfa, 0xc8, 0x63), // avertissement
     rgb8(0x66, 0x99, 0xcc), // information
+    rgb8(0x7f, 0x9b, 0xb8), // icône : dossier
+    rgb8(0x8c, 0x96, 0xa3), // icône : fichier ordinaire
+    rgb8(0xf9, 0x7b, 0x58), // icône : Rust
+    rgb8(0x66, 0x99, 0xcc), // icône : Python
+    rgb8(0xfa, 0xc8, 0x63), // icône : scripts (JavaScript)
+    rgb8(0xec, 0x5f, 0x67), // icône : pages web (HTML, CSS)
+    rgb8(0x99, 0xc7, 0x94), // icône : données et configuration (JSON, TOML…)
+    rgb8(0xc6, 0x95, 0xc6), // icône : documents (Markdown, texte)
 ];
 
 const fn rgb8(r: u8, g: u8, b: u8) -> [f32; 3] {
@@ -471,6 +484,8 @@ pub struct SoftRenderer {
     hover_tab: Option<(usize, bool)>,
     /// Ligne de la barre latérale sous le pointeur.
     hover_sidebar: Option<usize>,
+    /// Largeur de la barre latérale, en pixels logiques (réglable à la souris).
+    sidebar_w: f32,
     // Barre d'onglets
     tabs: Vec<TabEntry>,
     tabs_clean: bool,
@@ -552,7 +567,7 @@ impl SoftRenderer {
                         .cast::<ID2D1Brush>()?,
                 );
             }
-            debug_assert_eq!(brushes.len(), BR_SQUIGGLE + 3);
+            debug_assert_eq!(brushes.len(), BR_ICON + 8);
 
             let mem_dc = CreateCompatibleDC(None);
             let (dib, old, bits) = make_dib(mem_dc, size.0, size.1)?;
@@ -582,6 +597,7 @@ impl SoftRenderer {
                 fold_hot_row: None,
                 hover_tab: None,
                 hover_sidebar: None,
+                sidebar_w: SIDEBAR_DEFAULT_W,
                 tabs: Vec::new(),
                 tabs_clean: false,
                 status: chrome::Status::default(),
@@ -733,7 +749,9 @@ impl SoftRenderer {
             0
         };
         let sidebar = if self.sidebar.is_some() {
-            (250.0 * s).round() as i32
+            // au plus 60 % de la fenêtre : il reste toujours de la place pour le texte
+            let widest = (self.size.0 as f32 * 0.6).max(SIDEBAR_MIN_W * s);
+            (self.sidebar_w * s).min(widest).round() as i32
         } else {
             0
         };
@@ -749,6 +767,25 @@ impl SoftRenderer {
             m.pad_x = pad_x;
             self.valid = false;
         }
+    }
+
+    /// Largeur voulue de la barre latérale, en pixels **physiques** (glisser son bord). Bornée
+    /// entre 120 px logiques et 60 % de la fenêtre. Redessine tout (le texte se décale).
+    pub fn set_sidebar_width_px(&mut self, px: f32) {
+        let logical = (px / self.scale).clamp(SIDEBAR_MIN_W, 800.0);
+        if (logical - self.sidebar_w).abs() >= 0.5 {
+            self.sidebar_w = logical;
+            self.minimap = chrome::MinimapState::default();
+            self.refresh_metrics();
+        }
+    }
+
+    /// Le point `(x, y)` est sur le bord droit de la barre latérale (poignée de redimensionnement).
+    #[must_use]
+    pub fn sidebar_edge_hit(&self, x: f32, y: f32) -> bool {
+        let edge = self.metrics.sidebar as f32;
+        let bottom = (self.size.1 as i32 - self.metrics.status_bar) as f32;
+        edge > 0.0 && y >= 0.0 && y < bottom && (x - edge).abs() <= 3.0 * self.scale
     }
 
     /// Largeur de la minimap (sans la barre de défilement) : ~8 % de la fenêtre, 150 px au plus,
@@ -2016,6 +2053,7 @@ mod tests {
             depth: 0,
             kind: SidebarKind::Header,
             selected: false,
+            icon: FileIcon::Plain,
         }];
         for i in 0..n {
             rows.push(SidebarRow {
@@ -2027,9 +2065,10 @@ mod tests {
                     _ => SidebarKind::File,
                 },
                 selected: i == selected,
+                icon: FileIcon::Rust,
             });
         }
-        Sidebar { rows }
+        Sidebar { rows, scroll: None }
     }
 
     /// Plus grande somme de canaux d'un pixel du rectangle : « à quel point c'est clair ».
@@ -2165,6 +2204,116 @@ mod tests {
         assert_eq!(bands.len(), 1);
         assert_eq!(bands[0].bottom - bands[0].top, lh);
         assert!(brightest(&r, zone, line) > grey, "flèche plus claire");
+    }
+
+    #[test]
+    fn largeur_de_la_barre_laterale_reglable_et_bornee() {
+        let mut r = renderer();
+        r.set_sidebar(Some(&sidebar(0, 5)));
+        assert_eq!(r.metrics().sidebar, 250, "largeur par défaut");
+        let before = r.metrics().pad_x;
+        r.set_sidebar_width_px(330.0);
+        assert_eq!(r.metrics().sidebar, 330);
+        assert!(
+            (r.metrics().pad_x - before - 80.0).abs() < 1.0,
+            "le texte suit"
+        );
+        // bornes : 120 px au moins, 60 % de la fenêtre (640 px ici) au plus
+        r.set_sidebar_width_px(10.0);
+        assert_eq!(r.metrics().sidebar, 120);
+        r.set_sidebar_width_px(5000.0);
+        assert!(r.metrics().sidebar <= 384, "{}", r.metrics().sidebar);
+        // la poignée est sur le bord, de part et d'autre
+        r.set_sidebar_width_px(250.0);
+        let edge = r.metrics().sidebar as f32;
+        assert!(r.sidebar_edge_hit(edge, 100.0));
+        assert!(r.sidebar_edge_hit(edge - 2.0, 100.0));
+        assert!(r.sidebar_edge_hit(edge + 2.0, 100.0));
+        assert!(!r.sidebar_edge_hit(edge - 10.0, 100.0));
+        assert!(!r.sidebar_edge_hit(edge, 295.0), "pas sur la barre d'état");
+        // sans barre latérale : pas de poignée
+        r.set_sidebar(None);
+        assert!(!r.sidebar_edge_hit(0.0, 100.0));
+        // le redessin incrémental après un changement de largeur reste exact
+        r.set_sidebar(Some(&sidebar(0, 5)));
+        let n = r.metrics().rows_for(300);
+        let rows = Rows::new(lines(0, n), None, None);
+        r.draw(&rows, 0).unwrap();
+        r.set_sidebar_width_px(300.0);
+        r.draw(&rows, 0).unwrap();
+        let mut full = renderer();
+        full.set_sidebar(Some(&sidebar(0, 5)));
+        full.set_sidebar_width_px(300.0);
+        full.draw(&rows, 0).unwrap();
+        assert!(r.pixels() == full.pixels(), "incrémental = complet");
+    }
+
+    #[test]
+    fn la_barre_de_defilement_de_la_barre_laterale() {
+        let mut r = renderer();
+        let mut sb = sidebar(0, 30);
+        sb.scroll = Some((0, 10, 31));
+        r.set_sidebar(Some(&sb));
+        let n = r.metrics().rows_for(300);
+        let rows = Rows::new(lines(0, n), None, None);
+        r.draw(&rows, 0).unwrap();
+        let m = r.metrics();
+        let h = r.size().1 as i32 - m.status_bar;
+        // le curseur est dans la bande de droite de la barre latérale, en haut au début
+        let thumb = |r: &SoftRenderer, y: i32| {
+            let x = (m.sidebar - 5) as usize;
+            r.pixels()[y as usize * r.size().0 as usize + x]
+        };
+        let bg = r.pixels()[(h - 4) as usize * r.size().0 as usize + (m.sidebar - 5) as usize];
+        assert_ne!(thumb(&r, 20), bg, "curseur visible en haut");
+        // plus bas : il a suivi le défilement
+        let mut sb2 = sidebar(0, 30);
+        sb2.scroll = Some((21, 10, 31));
+        r.set_sidebar(Some(&sb2));
+        r.draw(&rows, 0).unwrap();
+        assert_ne!(thumb(&r, h - 20), bg, "curseur en bas");
+        assert_eq!(thumb(&r, 20), bg, "plus en haut");
+        // fraction désignée par la souris : haut, milieu, bas
+        let x = (m.sidebar - 4) as f32;
+        assert_eq!(r.sidebar_scroll_hit(x, 0.0), Some(0.0));
+        let mid = r.sidebar_scroll_hit(x, h as f32 / 2.0).unwrap();
+        assert!((mid - 0.5).abs() < 0.05, "{mid}");
+        assert_eq!(r.sidebar_scroll_hit(x, h as f32 - 1.0), Some(1.0));
+        assert_eq!(r.sidebar_scroll_hit(20.0, 100.0), None, "pas sur la bande");
+        // tout tient : pas de barre
+        r.set_sidebar(Some(&sidebar(0, 3)));
+        assert_eq!(r.sidebar_scroll_hit(x, 50.0), None);
+    }
+
+    #[test]
+    fn les_icones_de_la_barre_laterale() {
+        let mut r = renderer();
+        let mut sb = sidebar(9, 3);
+        sb.rows[1].icon = FileIcon::Rust; // dossier fermé (la 1re ligne de fichiers est un dossier)
+        sb.rows[3].icon = FileIcon::Rust; // fichier
+        sb.rows[3].kind = SidebarKind::File;
+        r.set_sidebar(Some(&sb));
+        let n = r.metrics().rows_for(300);
+        let rows = Rows::new(lines(0, n), None, None);
+        r.draw(&rows, 0).unwrap();
+        let w = r.size().0 as usize;
+        // pixels colorés (non gris) dans la zone des icônes d'une ligne
+        let tinted = |row: usize, depth: usize| {
+            let (y0, x0) = (row * 24, 12 + depth * 14 + 14);
+            let mut n = 0;
+            for y in y0..y0 + 24 {
+                for x in x0..x0 + 14 {
+                    let p = r.pixels()[y * w + x];
+                    let (red, green, blue) = ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+                    if red.abs_diff(green) > 20 || green.abs_diff(blue) > 20 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(tinted(1, 0) > 40, "dossier : {}", tinted(1, 0));
+        assert!(tinted(3, 2) > 40, "fichier Rust : {}", tinted(3, 2));
     }
 
     #[test]
