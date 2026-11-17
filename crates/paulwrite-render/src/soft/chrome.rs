@@ -376,7 +376,8 @@ impl SoftRenderer {
                     &self.brushes[BR_BG],
                 );
             }
-            let brush = if tab.active {
+            let hover = self.hover_tab.filter(|&(h, _)| h == i);
+            let brush = if tab.active || hover.is_some() {
                 BR_TAB_TEXT_ACTIVE
             } else {
                 BR_TAB_TEXT
@@ -407,6 +408,12 @@ impl SoftRenderer {
             } else {
                 let a = 3.5 * s;
                 let width = (1.2 * s).max(1.0);
+                // la croix devient blanche quand le pointeur est dessus
+                let cross = if hover == Some((i, true)) {
+                    BR_TAB_TEXT_ACTIVE
+                } else {
+                    BR_TAB_CLOSE
+                };
                 for (p0, p1) in [
                     ((mx - a, cy - a), (mx + a, cy + a)),
                     ((mx - a, cy + a), (mx + a, cy - a)),
@@ -414,7 +421,7 @@ impl SoftRenderer {
                     self.rt.DrawLine(
                         Vector2 { X: p0.0, Y: p0.1 },
                         Vector2 { X: p1.0, Y: p1.1 },
-                        &self.brushes[BR_TAB_CLOSE],
+                        &self.brushes[cross],
                         width,
                         None,
                     );
@@ -474,6 +481,28 @@ impl SoftRenderer {
         self.fold_hover = on;
     }
 
+    /// Rangée dont la flèche de repli est sous le pointeur (dessinée plus claire).
+    pub fn set_fold_hot(&mut self, row: Option<usize>) {
+        self.fold_hot_row = row;
+    }
+
+    /// Onglet sous le pointeur : `(indice, pointeur sur la croix)`. Son texte passe en blanc ;
+    /// seule la barre d'onglets est redessinée.
+    pub fn set_hover_tab(&mut self, hover: Option<(usize, bool)>) {
+        if self.hover_tab != hover {
+            self.hover_tab = hover;
+            self.tabs_clean = false;
+        }
+    }
+
+    /// Ligne de la barre latérale sous le pointeur : son texte passe en blanc.
+    pub fn set_hover_sidebar(&mut self, row: Option<usize>) {
+        if self.hover_sidebar != row {
+            self.hover_sidebar = row;
+            self.sidebar_clean = false;
+        }
+    }
+
     /// L'abscisse `x` est dans la zone des flèches de repli (à droite des numéros de ligne).
     #[must_use]
     pub fn gutter_fold_hit(&self, x: f32) -> bool {
@@ -498,7 +527,10 @@ impl SoftRenderer {
         let cx = (self.metrics.sidebar as f32 + g - zone / 2.0).round();
         let cy = (y + lh / 2.0).floor();
         let half = (4.0 * self.scale).round().max(3.0);
-        let brush = if row.current {
+        let index = ((y - self.metrics.top as f32) / lh).round() as usize;
+        let brush = if self.fold_hot_row == Some(index) {
+            0 // pinceau du texte : la flèche sous le pointeur est presque blanche
+        } else if row.current {
             BR_GUTTER_CUR_NUM
         } else {
             BR_GUTTER_NUM
@@ -939,9 +971,16 @@ impl SoftRenderer {
             }
             let x = (12.0 * s).round() + row.depth as f32 * indent;
             let cy = ((t + bt) / 2.0).round();
+            // sous le pointeur : texte et flèche en blanc au lieu de gris
+            let hot = self.hover_sidebar == Some(i);
+            let dim = if hot {
+                BR_SIDEBAR_TEXT_SEL
+            } else {
+                BR_SIDEBAR_DIM
+            };
             match row.kind {
                 SidebarKind::FolderClosed => {
-                    self.triangle(x + 4.0 * s, cy, (3.5 * s).round(), 1.0, BR_SIDEBAR_DIM);
+                    self.triangle(x + 4.0 * s, cy, (3.5 * s).round(), 1.0, dim);
                 }
                 SidebarKind::FolderOpen => {
                     let half = (3.5 * s).round();
@@ -954,13 +993,13 @@ impl SoftRenderer {
                                 x + 4.0 * s + len + 1.0,
                                 cy - half / 2.0 + r as f32 + 1.0,
                             ),
-                            &self.brushes[BR_SIDEBAR_DIM],
+                            &self.brushes[dim],
                         );
                     }
                 }
                 _ => {}
             }
-            let brush = if row.selected {
+            let brush = if row.selected || hot {
                 BR_SIDEBAR_TEXT_SEL
             } else {
                 BR_SIDEBAR_TEXT

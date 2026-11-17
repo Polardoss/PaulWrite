@@ -284,6 +284,19 @@ struct LspPending {
     prefix: usize,
 }
 
+/// Ce que survole la souris, tel que transmis au moteur de rendu.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Hover {
+    /// La gouttière.
+    gutter: bool,
+    /// Rangée dont la flèche de repli est sous le pointeur.
+    fold_arrow: Option<usize>,
+    /// Onglet (indice, croix de fermeture ?).
+    tab: Option<(usize, bool)>,
+    /// Ligne de la barre latérale.
+    sidebar_row: Option<usize>,
+}
+
 struct App {
     opts: Options,
     config: Config,
@@ -311,6 +324,8 @@ struct App {
     word_wrap: bool,
     /// La souris survole la gouttière : les flèches de repli sont affichées.
     fold_hover: bool,
+    /// Dernier survol transmis au moteur de rendu : gouttière, flèche, onglet, barre latérale.
+    hover: Hover,
     // clignotement
     next_blink: Instant,
     // titre, enregistrement, fermeture
@@ -425,6 +440,7 @@ impl App {
             wheel_lines: 0.0,
             word_wrap,
             fold_hover: false,
+            hover: Hover::default(),
             next_blink: Instant::now() + BLINK,
             title: String::new(),
             after_save: None,
@@ -2234,23 +2250,38 @@ impl App {
         }
     }
 
-    /// Les flèches de repli (▼) n'apparaissent que lorsque la souris survole la gouttière.
-    fn update_fold_hover(&mut self, inside: bool) {
+    /// Survol : les flèches de repli (▼) n'apparaissent que sur la gouttière, et ce qui est sous
+    /// le pointeur (flèche, onglet, ligne de la barre latérale) passe en blanc au lieu de gris.
+    fn update_hover(&mut self, inside: bool) {
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
         let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
         let m = r.metrics();
         let bottom = (r.size().1 as i32 - m.status_bar) as f32;
-        let on = inside
-            && self.palette.is_none()
+        let free = inside && self.palette.is_none() && self.strip_drag.is_none();
+        let gutter = free
             && x >= m.sidebar as f32
             && x < (m.sidebar + m.gutter) as f32
             && y >= m.top as f32
             && y < bottom;
-        if on != self.fold_hover {
-            self.fold_hover = on;
-            r.set_fold_hover(on);
+        let hot = (gutter && r.gutter_fold_hit(x))
+            .then(|| ((y as i32 - m.top) / m.line_height.max(1)) as usize);
+        let tab = if free { r.tab_at(x, y) } else { None };
+        let side = if free { r.sidebar_row_at(x, y) } else { None };
+        let now = Hover {
+            gutter,
+            fold_arrow: hot,
+            tab,
+            sidebar_row: side,
+        };
+        if now != self.hover {
+            self.hover = now;
+            self.fold_hover = gutter;
+            r.set_fold_hover(gutter);
+            r.set_fold_hot(hot);
+            r.set_hover_tab(tab);
+            r.set_hover_sidebar(side);
             self.request_redraw();
         }
     }
@@ -3183,7 +3214,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = position;
                 self.update_cursor();
-                self.update_fold_hover(true);
+                self.update_hover(true);
                 if let Some(scrollbar) = self.strip_drag {
                     self.strip_scroll(scrollbar);
                 } else if self.dragging {
@@ -3290,7 +3321,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.dragging = false;
                 self.strip_drag = None;
             }
-            WindowEvent::CursorLeft { .. } => self.update_fold_hover(false),
+            WindowEvent::CursorLeft { .. } => self.update_hover(false),
             WindowEvent::DroppedFile(path) => self.open_path(path),
             _ => {}
         }

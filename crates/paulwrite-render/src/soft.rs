@@ -359,7 +359,7 @@ struct Sig {
 }
 
 /// Empreinte des décorations d'une rangée.
-fn deco_hash(row: &Row<'_>, fold_hover: bool) -> u64 {
+fn deco_hash(row: &Row<'_>, fold_hover: bool, fold_hot: bool) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325_u64;
     let mut mix = |v: usize| {
         h ^= v as u64;
@@ -398,6 +398,8 @@ fn deco_hash(row: &Row<'_>, fold_hover: bool) -> u64 {
         FoldMark::Open => 1 + usize::from(fold_hover),
         FoldMark::Closed => 3,
     });
+    // la flèche sous le pointeur est dessinée plus claire
+    mix(usize::from(fold_hot && row.fold != FoldMark::None));
     h
 }
 
@@ -463,6 +465,12 @@ pub struct SoftRenderer {
     valid: bool,
     /// La souris survole la gouttière : les flèches ▼ des régions repliables sont affichées.
     fold_hover: bool,
+    /// Rangée dont la flèche de repli est sous le pointeur.
+    fold_hot_row: Option<usize>,
+    /// Onglet sous le pointeur (indice, pointeur sur sa croix).
+    hover_tab: Option<(usize, bool)>,
+    /// Ligne de la barre latérale sous le pointeur.
+    hover_sidebar: Option<usize>,
     // Barre d'onglets
     tabs: Vec<TabEntry>,
     tabs_clean: bool,
@@ -571,6 +579,9 @@ impl SoftRenderer {
                 shift_region: None,
                 valid: false,
                 fold_hover: false,
+                fold_hot_row: None,
+                hover_tab: None,
+                hover_sidebar: None,
                 tabs: Vec::new(),
                 tabs_clean: false,
                 status: chrome::Status::default(),
@@ -794,7 +805,7 @@ impl SoftRenderer {
             let row = src.row(r);
             self.cur.push(Some(Sig {
                 hash: hash_bytes(row.text.as_bytes()),
-                deco: deco_hash(&row, self.fold_hover),
+                deco: deco_hash(&row, self.fold_hover, self.fold_hot_row == Some(r)),
             }));
         }
         self.bands.clear();
@@ -2019,6 +2030,83 @@ mod tests {
             });
         }
         Sidebar { rows }
+    }
+
+    /// Plus grande somme de canaux d'un pixel du rectangle : « à quel point c'est clair ».
+    fn brightest(r: &SoftRenderer, x: (i32, i32), y: (i32, i32)) -> u32 {
+        let w = r.size().0 as usize;
+        let mut best = 0;
+        for yy in y.0..y.1 {
+            for xx in x.0..x.1 {
+                let p = r.pixels()[yy as usize * w + xx as usize];
+                best = best.max((p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff));
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn le_survol_eclaircit_onglet_fleche_et_ligne_de_la_barre_laterale() {
+        let mut r = renderer();
+        let tab = |label, active| TabInfo {
+            label,
+            modified: false,
+            active,
+        };
+        r.set_tabs(&[tab("a.rs", true), tab("b.rs", false)]);
+        r.set_sidebar(Some(&sidebar(0, 5)));
+        let n = r.metrics().rows_for(300);
+        let mut s = Rows::new(lines(0, n), None, None);
+        s.folds = vec![(4, FoldMark::Closed)];
+        r.draw(&s, 0).unwrap();
+        let m = r.metrics();
+
+        // onglet inactif : le texte passe de gris à blanc, seule la barre est redessinée
+        let (x0, x1) = r.tab_geometry()[1];
+        let label = (x0 + 8, x1 - 30);
+        let bar = (2, m.tab_bar - 2);
+        let grey = brightest(&r, label, bar);
+        r.set_hover_tab(Some((1, false)));
+        let bands = r.draw(&s, 0).unwrap().to_vec();
+        assert_eq!(bands.len(), 1, "{bands:?}");
+        assert_eq!((bands[0].top, bands[0].bottom), (0, m.top));
+        let white = brightest(&r, label, bar);
+        assert!(white > grey + 60, "texte plus clair : {grey} -> {white}");
+        // la croix aussi, quand le pointeur est dessus
+        let cross = (x1 - 20, x1 - 8);
+        let before = brightest(&r, cross, bar);
+        r.set_hover_tab(Some((1, true)));
+        r.draw(&s, 0).unwrap();
+        assert!(brightest(&r, cross, bar) > before);
+        r.set_hover_tab(None);
+        r.draw(&s, 0).unwrap();
+        assert_eq!(brightest(&r, label, bar), grey, "retour au gris");
+
+        // ligne de la barre latérale (la 3e : un dossier ouvert, non sélectionné)
+        let row_h = 24;
+        let text = (30, m.sidebar - 10);
+        let rows = (2 * row_h + 2, 3 * row_h - 2);
+        let grey = brightest(&r, text, rows);
+        r.set_hover_sidebar(Some(2));
+        let bands = r.draw(&s, 0).unwrap().to_vec();
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].right, m.sidebar, "seule la barre latérale");
+        assert!(brightest(&r, text, rows) > grey + 60);
+        r.set_hover_sidebar(None);
+        r.draw(&s, 0).unwrap();
+        assert_eq!(brightest(&r, text, rows), grey);
+
+        // flèche de repli sous le pointeur : une seule rangée redessinée
+        let lh = m.line_height;
+        let right = m.sidebar + m.gutter;
+        let zone = (right - 19, right);
+        let line = (m.top + 4 * lh, m.top + 5 * lh);
+        let grey = brightest(&r, zone, line);
+        r.set_fold_hot(Some(4));
+        let bands = r.draw(&s, 0).unwrap().to_vec();
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].bottom - bands[0].top, lh);
+        assert!(brightest(&r, zone, line) > grey, "flèche plus claire");
     }
 
     #[test]
