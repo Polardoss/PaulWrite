@@ -33,7 +33,7 @@ Segoe UI pour l'interface).
 | Minimap | tout le document en miniature (2 px par ligne), **colorée par la syntaxe** ; un clic ou un glissement fait défiler. Mise à jour au plus tous les 150 ms pendant la frappe. |
 | Barre de défilement | curseur proportionnel, glissable. |
 | Barre d'état | position (« Line 3, Column 7 »), taille de la sélection (« 12 characters selected », « 3 selection regions »), « Tab Size », langage ; les messages brefs s'y affichent aussi. L'icône à gauche affiche/masque la barre latérale. |
-| Barre latérale | arborescence du dossier ouvert (**File ▸ Open Folder…**, glisser un dossier, ou `paulwrite dossier`) ; un clic déplie un dossier ou ouvre un fichier ; Ctrl+K puis Ctrl+B l'affiche ou la masque. Les listings de dossiers se font sur le worker. |
+| Barre latérale | arborescence du dossier ouvert (**File ▸ Open Folder…**, glisser un dossier, ou `paulwrite dossier`) ; un clic déplie un dossier ou ouvre un fichier ; Ctrl+K puis Ctrl+B l'affiche ou la masque. Son **bord droit se glisse** pour changer sa largeur (120 px au moins, 60 % de la fenêtre au plus) ; une **barre de défilement** apparaît quand tout ne tient pas (la molette marche aussi) ; une **icône** distingue les dossiers et les familles de fichiers (Rust, Python, scripts, pages web, données, documents) ; un fichier créé ou supprimé hors de l'éditeur **apparaît ou disparaît tout seul**. Les listings de dossiers se font sur le worker. |
 | Panneau (Ctrl+P, Ctrl+Maj+P…) | liste claire en police proportionnelle, correspondances soulignées, raccourcis à droite, barre de défilement si la liste est longue. |
 
 Le titre de la fenêtre est le chemin complet du fichier, comme Sublime Text.
@@ -131,9 +131,10 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
 - Le thème est **fixe** (pas de fichier de thème ni de thème clair).
 - La barre de menus est celle de Windows (pas de dessin personnalisé) : son apparence suit le
   thème du système.
-- Barre latérale : pas de redimensionnement à la souris, pas de barre de défilement (molette
-  seulement), pas d'icônes de fichiers, pas de menu contextuel, pas de rafraîchissement automatique
-  quand le disque change.
+- Barre latérale : pas de menu contextuel (renommer, supprimer, nouveau fichier), pas de glisser-déposer ; la
+  largeur n'est pas conservée d'une session à l'autre ; les icônes sont des formes simples teintées
+  (pas les logos des langages) ; le rafraîchissement ne relit que les dossiers déjà affichés ;
+  couleurs et espacement toujours **estimés** (aucune capture de référence).
 - Non vérifié à la souris dans une vraie session : clics sur les boutons d'onglets, la barre
   latérale, la gouttière, la minimap (les zones de clic sont testées, pas le chemin complet
   clic → fenêtre).

@@ -107,6 +107,7 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Clic dans la gouttière | sélectionner la ligne |
 | Clic ou glisser dans la minimap, glisser la barre de défilement | faire défiler |
 | Ctrl+K puis Ctrl+B, icône en bas à gauche | afficher / masquer la barre latérale |
+| Glisser le bord de la barre latérale, son curseur de défilement | largeur, défilement |
 | Alt+Z (View ▸ Word Wrap) | retour à la ligne automatique (actif par défaut) |
 | Preferences ▸ Language | anglais ou français (enregistré dans `config.toml`) |
 | Ctrl+Maj+[ / Ctrl+Maj+], flèches de la gouttière, clic sur « … » | replier / déplier une région (par indentation) ; Edit ▸ Fold All / Unfold All |

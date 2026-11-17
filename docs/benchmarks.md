@@ -442,6 +442,79 @@ Côté coût, sans fenêtre (`cargo test --release -p paulwrite-app --test frame
   frappe. Un fichier de plus de `highlight_max_bytes` (1 Mo par défaut) garde une minimap grise.
 - **La langue ne coûte rien à l'exécution** : un choix de texte par message, aucun fichier lu.
 
+## Barre latérale, échelles d'affichage et vérifications finales (étape 6)
+
+### Barre latérale sur un très gros dossier
+
+Mesure sans fenêtre (`cargo test --release -p paulwrite-app --test frame_cost
+cout_d_un_gros_dossier -- --ignored --nocapture`) : un dossier de **50 000 fichiers et 500
+sous-dossiers** sur le disque local.
+
+| Opération | Avant | **Après** |
+|---|---|---|
+| Lecture du dossier (worker) | 5 367 / 5 421 / 4 970 ms | **47 / 42 / 42 ms** |
+| `set_listing` + arbre à plat + fenêtre (interface) | 18,5 ms | **2,8 ms** |
+| Dépli ou repli d'un dossier + fenêtre (interface) | moy 18,2 ms, p99 26,6 | **moy 0,30 ms, p99 0,35** |
+| Défilement + fenêtre | — | 0,01 ms |
+
+Deux causes, trouvées en mesurant : (1) la lecture appelait `stat` pour **chaque** entrée afin de
+savoir si c'était un dossier (50 500 appels, d'où 5 s sur le worker, sans bloquer l'interface) ; la
+liste de l'énumération donne déjà le type, seuls les liens symboliques sont suivis ; (2) l'arbre à
+plat copiait chaque nom et chaque chemin à chaque dépli (≈ 100 000 allocations, 18 ms sur le thread
+de l'interface, au-dessus d'une image à 60 Hz) ; il ne garde plus que des indices et retrouve noms
+et chemins pour les ~30 lignes affichées.
+
+### Échelles d'affichage de Windows (125 %, 150 %, 200 %)
+
+Fenêtre de 1100 × 720 pixels **logiques** (donc plus grande en pixels physiques), sans fenêtre
+réelle (`cargo test --release -p paulwrite-render --lib mesure_echelles -- --ignored --nocapture`) :
+
+| Échelle | Taille en pixels | Frappe p50 / p95 / max | Défilement p50 / p95 / max |
+|---|---|---|---|
+| 100 % | 1100 × 720 | 0,68 / 0,77 / 1,00 ms | 1,41 / 1,88 / 3,19 ms |
+| 125 % | 1375 × 900 | 0,70 / 0,96 / 1,86 ms | 2,31 / 5,60 / 8,03 ms |
+| 150 % | 1650 × 1080 | 0,77 / 0,91 / 1,09 ms | 2,87 / 4,08 / 6,54 ms |
+| 200 % | 2200 × 1440 | 0,87 / 1,06 / 1,52 ms | 5,39 / 7,60 / 9,04 ms |
+
+La frappe reste sous 2 ms ; le défilement, proportionnel au nombre de pixels, reste sous 10 ms
+(fluide à 60 images/s) jusqu'à 200 %. Deux tests nouveaux vérifient aux échelles 125, 150 et 200 %
+que le dessin par régions donne les mêmes pixels qu'un redessin complet (barre latérale, survol,
+largeur réglée comprises) et que les zones de clic suivent l'échelle. Le premier a trouvé un défaut
+mineur : régler la largeur de la barre latérale **masquée** vidait inutilement l'image de la minimap.
+**Non fait** : aucune mesure sur un écran réel à 125 ou 150 % (la machine de test est à 100 %) ; les
+chiffres ci-dessus viennent du moteur seul.
+
+### Objectifs du brief, mesurés en fin d'étape 6
+
+Tout vient de `.\scripts\bench-app.ps1` (binaire `release`, fenêtre hors écran 1100×720) refait en
+fin d'étape, plus les mesures citées. Machine : i5-10500, 7,8 Go, Windows 11, antivirus Kaspersky.
+
+| Objectif du brief | Cible | Mesuré | Verdict |
+|---|---|---|---|
+| Démarrage à froid jusqu'à la première fenêtre | < 100 ms | fenêtre visible : médiane **77 ms** (73–83, 12 lancements) ; première image 86 ms (84–103). Le commit précédent donne 75 / 84 ms : pas de régression | OK |
+| Latence de frappe | < 10 ms, p99 < 16 | moy 2,96 ms, **p99 7,63**, max 13,0 | OK |
+| Frappe dans un fichier Rust de 1 Mo (coloration) | < 10 ms | moy 2,07, **p99 5,4 à 6,4** (5 séries) | OK |
+| Frappe avec un serveur de langage actif | < 10 ms | moy 2,00, **p99 4,78** | OK |
+| Défilement | fluide | moy 1,44 ms, p99 4,78 | OK |
+| Fichier de 500 Mo | ouverture sans geler l'interface | fenêtre visible à 96 ms, **fichier affiché à 1 167 ms** | OK |
+| Mémoire au repos (hors fichiers) | quelques dizaines de Mo | **34 Mo** (document vide), **36 Mo** (dossier ouvert, minimap colorée) | OK |
+| Recherche dans un projet de 100 000 fichiers | premiers résultats < 200 ms | **27 à 63 ms** (3 séries, deux motifs) ; terminée en 0,8 s (motif courant) et 1,8 à 3,1 s (motif rare) | OK, avec la réserve ci-dessous |
+| Fuzzy finder (Goto Anything) | < 30 ms par frappe | classement terminé : p50 1,14 ms, **p99 31,35 ms** ; résultats affichés : p99 27,6 ms (une série) | **À la limite**, comme aux étapes 4 et 6 |
+
+Réserves, dites franchement :
+
+- **Recherche dans le projet, première série : 778 ms pour les premiers résultats et 64 s au total.**
+  Les trois séries suivantes donnent 60 ms et 1,8 à 3,1 s. La première lecture de 100 000 fichiers
+  après une longue inactivité est ralentie par l'analyse antivirus (même phénomène que celui déjà
+  noté à l'étape 6) ; je ne peux pas distinguer cela d'un défaut du programme avec une seule série
+  froide, mais la recherche n'a pas été modifiée depuis et les trois séries suivantes sont bonnes.
+- **Goto Anything** : le p99 du classement dépasse 30 ms dans cette série (31,35 ms), comme dans
+  deux séries de l'étape 6 (26 à 31 ms). L'objectif est tenu en médiane (1,1 ms) et au p95
+  (24 ms) mais **pas au p99 de façon fiable** ; la cause (classement de nucleo sur 100 000 chemins,
+  plus l'interface) est décrite à l'étape 4 et n'a pas été traitée.
+- **Frappe dans un fichier Rust de 1 Mo, première série après compilation** : p99 15 ms ; les cinq
+  séries suivantes : p99 5,4 à 6,4 ms. Même effet de binaire neuf que précédemment.
+
 ## Correction : défilement (bug de l'étape 2 trouvé à l'étape 4)
 
 **Bug** : après un défilement, le milieu de la fenêtre gardait l'ancien texte pendant que le haut et

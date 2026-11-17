@@ -278,3 +278,78 @@ fn cout_de_la_minimap_coloree() {
     }
     println!("set_minimap, grise : {}", stats(&mut v));
 }
+
+/// Barre latérale sur un très gros dossier : lecture du disque (worker) et travail de l'interface
+/// (arbre à plat, fenêtre affichée, défilement). `PAULWRITE_BIG_DIR=<n>` fixe le nombre de fichiers.
+#[test]
+#[ignore = "mesure"]
+fn cout_d_un_gros_dossier_dans_la_barre_laterale() {
+    use paulwrite_app::sidebar::SidebarTree;
+    use paulwrite_app::worker::list_dir;
+
+    let n: usize = std::env::var("PAULWRITE_BIG_DIR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50_000);
+    let dir = std::env::temp_dir().join(format!("paulwrite-bigdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let t = Instant::now();
+    for i in 0..n {
+        std::fs::write(dir.join(format!("fichier_{i:06}.rs")), "").unwrap();
+    }
+    for i in 0..(n / 100) {
+        std::fs::create_dir(dir.join(format!("dossier_{i:05}"))).unwrap();
+    }
+    println!(
+        "{n} fichiers et {} dossiers créés en {:.1} s",
+        n / 100,
+        t.elapsed().as_secs_f64()
+    );
+
+    let mut v = Vec::new();
+    let mut entries = Vec::new();
+    for _ in 0..3 {
+        let t = Instant::now();
+        entries = list_dir(&dir);
+        v.push(ms(t));
+    }
+    println!(
+        "lecture du dossier (worker, {} entrées) : {:.0} / {:.0} / {:.0} ms",
+        entries.len(),
+        v[0],
+        v[1],
+        v[2]
+    );
+
+    // côté interface : l'arbre à plat, la fenêtre affichée, le défilement
+    let mut tree = SidebarTree::new(dir.clone());
+    let _ = tree.take_listing_requests();
+    let t = Instant::now();
+    tree.set_listing(dir.clone(), entries.clone());
+    let rows = tree.render(30).rows.len();
+    println!(
+        "set_listing + construction de l'arbre à plat + fenêtre ({rows} lignes) : {:.1} ms",
+        ms(t)
+    );
+    let mut v = Vec::new();
+    for k in 0..200 {
+        let t = Instant::now();
+        tree.scroll_by(if k % 2 == 0 { 40 } else { -39 }, 30);
+        let _ = tree.render(30);
+        v.push(ms(t));
+    }
+    println!("défilement + fenêtre : {}", stats(&mut v));
+    let mut v = Vec::new();
+    for k in 0..50 {
+        let t = Instant::now();
+        let _ = tree.click(2 + (k % 3)); // déplier / replier un sous-dossier
+        let _ = tree.render(30);
+        v.push(ms(t));
+    }
+    println!(
+        "clic (dépli ou repli d'un dossier) + fenêtre : {}",
+        stats(&mut v)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

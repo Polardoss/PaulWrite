@@ -44,10 +44,17 @@ pub enum Click {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Node {
     Header,
+    /// Le dossier ouvert lui-même (premier niveau de l'arbre).
+    Root {
+        open: bool,
+    },
+    /// Entrée numéro `index` du listing du dossier `dir` (indice dans `SidebarTree::dirs`). Ni nom
+    /// ni chemin ici : un dossier de 100 000 fichiers ne coûte pas 200 000 allocations à chaque
+    /// dépli ; on les retrouve à la demande, pour les quelques lignes affichées.
     Item {
-        path: PathBuf,
-        name: String,
-        depth: usize,
+        dir: u32,
+        index: u32,
+        depth: u32,
         is_dir: bool,
         open: bool,
     },
@@ -84,6 +91,8 @@ pub struct SidebarTree {
     scroll: usize,
     /// Lignes à plat (titre, puis l'arbre déplié) : reconstruites quand l'arbre change.
     flat: Vec<Node>,
+    /// Dossiers dont les entrées figurent dans `flat` (cible de `Node::Item::dir`).
+    dirs: Vec<PathBuf>,
     flat_dirty: bool,
     /// Contenu transmis au moteur de rendu, reconstruit quand il change.
     cache: Option<(usize, usize, Sidebar)>,
@@ -105,6 +114,7 @@ impl SidebarTree {
             selected: None,
             scroll: 0,
             flat: Vec::new(),
+            dirs: Vec::new(),
             flat_dirty: true,
             cache: None,
             lang: Lang::En,
@@ -162,42 +172,52 @@ impl SidebarTree {
         }
         self.flat_dirty = false;
         self.flat.clear();
+        self.dirs.clear();
         self.flat.push(Node::Header);
-        let name = self
-            .root
-            .file_name()
-            .map_or_else(|| self.root.to_string_lossy(), |n| n.to_string_lossy())
-            .into_owned();
         let open = self.expanded.contains(&self.root);
-        self.flat.push(Node::Item {
-            path: self.root.clone(),
-            name,
-            depth: 0,
-            is_dir: true,
-            open,
-        });
+        self.flat.push(Node::Root { open });
         if open {
             let root = self.root.clone();
             self.push_children(&root, 1);
         }
     }
 
-    fn push_children(&mut self, dir: &Path, depth: usize) {
-        let Some(entries) = self.listed.get(dir).cloned() else {
+    fn push_children(&mut self, dir: &Path, depth: u32) {
+        // le listing est sorti de la table le temps du parcours (pas de copie) : la récursion
+        // lit les listings des sous-dossiers
+        let Some(entries) = self.listed.remove(dir) else {
             return;
         };
-        for e in entries {
-            let path = dir.join(&e.name);
-            let open = e.is_dir && self.expanded.contains(&path);
+        let at = self.dirs.len() as u32;
+        self.dirs.push(dir.to_path_buf());
+        self.flat.reserve(entries.len());
+        for (index, e) in entries.iter().enumerate() {
+            // seuls les dossiers ont besoin de leur chemin (savoir s'ils sont dépliés)
+            let path = e.is_dir.then(|| dir.join(&e.name));
+            let open = path.as_ref().is_some_and(|p| self.expanded.contains(p));
             self.flat.push(Node::Item {
-                path: path.clone(),
-                name: e.name,
+                dir: at,
+                index: index as u32,
                 depth,
                 is_dir: e.is_dir,
                 open,
             });
-            if open {
+            if let (true, Some(path)) = (open, path) {
                 self.push_children(&path, depth + 1);
+            }
+        }
+        self.listed.insert(dir.to_path_buf(), entries);
+    }
+
+    /// Chemin de la ligne `at` de l'arbre à plat (pas de l'en-tête).
+    fn path_of(&self, at: usize) -> Option<PathBuf> {
+        match self.flat.get(at)? {
+            Node::Header => None,
+            Node::Root { .. } => Some(self.root.clone()),
+            Node::Item { dir, index, .. } => {
+                let dir = self.dirs.get(*dir as usize)?;
+                let entry = self.listed.get(dir)?.get(*index as usize)?;
+                Some(dir.join(&entry.name))
             }
         }
     }
@@ -228,10 +248,13 @@ impl SidebarTree {
     /// Clic sur la ligne `row` de la partie affichée (à partir de `scroll`).
     pub fn click(&mut self, row: usize) -> Click {
         self.rebuild();
-        let Some(Node::Item {
-            path, is_dir, open, ..
-        }) = self.flat.get(self.scroll + row).cloned()
-        else {
+        let at = self.scroll + row;
+        let (is_dir, open) = match self.flat.get(at) {
+            Some(Node::Root { open }) => (true, *open),
+            Some(Node::Item { is_dir, open, .. }) => (*is_dir, *open),
+            _ => return Click::Nothing,
+        };
+        let Some(path) = self.path_of(at) else {
             return Click::Nothing;
         };
         self.selected = Some(path.clone());
@@ -266,47 +289,69 @@ impl SidebarTree {
         self.rebuild();
         let stale = !matches!(&self.cache, Some((cap, scroll, _)) if *cap == capacity && *scroll == self.scroll);
         if stale {
-            let rows = self
-                .flat
-                .iter()
-                .skip(self.scroll)
-                .take(capacity)
-                .map(|n| match n {
-                    Node::Header => SidebarRow {
-                        label: self.lang.pick("Folders", "Dossiers").to_owned(),
-                        depth: 0,
-                        kind: SidebarKind::Header,
-                        selected: false,
-                        icon: FileIcon::Plain,
-                    },
-                    Node::Item {
-                        path,
-                        name,
-                        depth,
-                        is_dir,
-                        open,
-                    } => SidebarRow {
-                        label: name.clone(),
-                        depth: *depth,
-                        kind: match (is_dir, open) {
-                            (false, _) => SidebarKind::File,
-                            (true, false) => SidebarKind::FolderClosed,
-                            (true, true) => SidebarKind::FolderOpen,
-                        },
-                        selected: self.selected.as_ref() == Some(path),
-                        icon: if *is_dir {
-                            FileIcon::Plain
-                        } else {
-                            icon_for(name)
-                        },
-                    },
-                })
-                .collect();
+            let end = (self.scroll + capacity).min(self.flat.len());
+            let rows = (self.scroll..end)
+                .map(|at| self.row_at(at))
+                .collect::<Vec<_>>();
             let total = self.flat.len();
             let scroll = (total > capacity).then_some((self.scroll, capacity, total));
             self.cache = Some((capacity, self.scroll, Sidebar { rows, scroll }));
         }
         &self.cache.as_ref().expect("cache rempli").2
+    }
+
+    /// La ligne affichée pour la ligne `at` de l'arbre à plat.
+    fn row_at(&self, at: usize) -> SidebarRow {
+        let selected = |path: &Path| self.selected.as_deref() == Some(path);
+        match &self.flat[at] {
+            Node::Header => SidebarRow {
+                label: self.lang.pick("Folders", "Dossiers").to_owned(),
+                depth: 0,
+                kind: SidebarKind::Header,
+                selected: false,
+                icon: FileIcon::Plain,
+            },
+            Node::Root { open } => SidebarRow {
+                label: self
+                    .root
+                    .file_name()
+                    .map_or_else(|| self.root.to_string_lossy(), |n| n.to_string_lossy())
+                    .into_owned(),
+                depth: 0,
+                kind: if *open {
+                    SidebarKind::FolderOpen
+                } else {
+                    SidebarKind::FolderClosed
+                },
+                selected: selected(&self.root),
+                icon: FileIcon::Plain,
+            },
+            Node::Item {
+                dir,
+                index,
+                depth,
+                is_dir,
+                open,
+            } => {
+                let dir_path = &self.dirs[*dir as usize];
+                let name = &self.listed[dir_path][*index as usize].name;
+                SidebarRow {
+                    label: name.clone(),
+                    depth: *depth as usize,
+                    kind: match (is_dir, open) {
+                        (false, _) => SidebarKind::File,
+                        (true, false) => SidebarKind::FolderClosed,
+                        (true, true) => SidebarKind::FolderOpen,
+                    },
+                    selected: self.selected.is_some() && selected(&dir_path.join(name)),
+                    icon: if *is_dir {
+                        FileIcon::Plain
+                    } else {
+                        icon_for(name)
+                    },
+                }
+            }
+        }
     }
 }
 

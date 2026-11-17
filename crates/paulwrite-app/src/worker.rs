@@ -157,7 +157,7 @@ impl std::fmt::Debug for Done {
 }
 
 /// Contenu d'un dossier, trié (appelé sur le worker). Vide si la lecture échoue.
-fn list_dir(path: &Path) -> Vec<Entry> {
+pub fn list_dir(path: &Path) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(path) else {
         return Vec::new();
     };
@@ -165,8 +165,14 @@ fn list_dir(path: &Path) -> Vec<Entry> {
         .filter_map(Result::ok)
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            // `metadata` suit les liens symboliques : un lien vers un dossier est un dossier.
-            let is_dir = e.path().is_dir();
+            // `file_type` vient de l'énumération du dossier (aucun appel au système par entrée) ;
+            // seul un lien symbolique est suivi, pour savoir s'il pointe vers un dossier.
+            let kind = e.file_type().ok()?;
+            let is_dir = if kind.is_symlink() {
+                e.path().is_dir()
+            } else {
+                kind.is_dir()
+            };
             (!(is_dir && is_hidden_dir(&name))).then_some(Entry { name, is_dir })
         })
         .collect();

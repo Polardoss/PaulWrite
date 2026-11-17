@@ -775,7 +775,10 @@ impl SoftRenderer {
         let logical = (px / self.scale).clamp(SIDEBAR_MIN_W, 800.0);
         if (logical - self.sidebar_w).abs() >= 0.5 {
             self.sidebar_w = logical;
-            self.minimap = chrome::MinimapState::default();
+            // la largeur ne compte (et la minimap n'est à refaire) que si la barre est affichée
+            if self.sidebar.is_some() {
+                self.minimap = chrome::MinimapState::default();
+            }
             self.refresh_metrics();
         }
     }
@@ -2142,6 +2145,144 @@ mod tests {
         assert!(gray.pixels() != color.pixels());
     }
 
+    /// Moteur complet (onglets, gouttière, minimap, barre latérale) à une échelle DPI donnée, dans
+    /// une fenêtre de 640 × 300 pixels logiques.
+    fn renderer_at(scale: f32) -> SoftRenderer {
+        let size = ((640.0 * scale) as u32, (300.0 * scale) as u32);
+        let mut r = SoftRenderer::new(scale, size, Colors::default()).expect("renderer");
+        r.set_tabs(&[
+            TabInfo {
+                label: "a.rs",
+                modified: true,
+                active: true,
+            },
+            TabInfo {
+                label: "b.rs",
+                modified: false,
+                active: false,
+            },
+        ]);
+        let visible = r.metrics().rows_for(size.1);
+        r.set_chrome(&chrome("Line 1, Column 1", 0, visible));
+        r.set_minimap(&ColoredDoc, 1).unwrap();
+        r
+    }
+
+    /// Aux échelles de Windows (125 %, 150 %, 200 %), le dessin par régions donne les mêmes pixels
+    /// qu'un redessin complet, y compris barre latérale, survol et largeur réglée.
+    #[test]
+    fn regions_identiques_au_redessin_complet_aux_echelles_dpi() {
+        for scale in [1.25_f32, 1.5, 2.0] {
+            let mut inc = renderer_at(scale);
+            let mut full = renderer_at(scale);
+            let n = inc.metrics().rows_for(inc.size().1);
+            assert!(n > 5, "échelle {scale} : {n} rangées");
+            let mut rng = 0x9e37_79b9_7f4a_7c15_u64;
+            let mut next = move || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng
+            };
+            let mut first = 50usize;
+            let mut ops: Vec<u64> = Vec::new();
+            let mut state = Rows::new(lines(first, n), Some((2, 3)), None);
+            state.folds = vec![(1, FoldMark::Closed)];
+            inc.draw(&state, 0).unwrap();
+            for step in 0..60 {
+                let mut scrolled = 0isize;
+                let op = next() % 7;
+                ops.push(op);
+                match op {
+                    0 => {
+                        let r = (next() % n as u64) as usize;
+                        state.texts[r].push_str("xyz");
+                    }
+                    1 => {
+                        first += 2;
+                        state.set_texts(lines(first, n));
+                        scrolled = 2;
+                    }
+                    2 => {
+                        state.set_caret(Some(((next() % n as u64) as usize, (next() % 8) as usize)))
+                    }
+                    3 => {
+                        let on = step % 2 == 0;
+                        inc.set_sidebar(on.then(|| sidebar(step % 3, 6)).as_ref());
+                        full.set_sidebar(on.then(|| sidebar(step % 3, 6)).as_ref());
+                    }
+                    4 => {
+                        let w = 180.0 + (next() % 200) as f32;
+                        inc.set_sidebar_width_px(w * scale);
+                        full.set_sidebar_width_px(w * scale);
+                    }
+                    5 => {
+                        let h = Some((next() % 3) as usize);
+                        inc.set_hover_sidebar(h);
+                        full.set_hover_sidebar(h);
+                        inc.set_hover_tab(Some((step % 2, false)));
+                        full.set_hover_tab(Some((step % 2, false)));
+                    }
+                    _ => inc.set_fold_hot(Some((next() % n as u64) as usize)),
+                }
+                full.set_fold_hot(inc.fold_hot_row);
+                if matches!(op, 3 | 4) {
+                    // comme l'application : la minimap est reconstruite quand la géométrie change
+                    inc.set_minimap(&ColoredDoc, 100 + step as u64).unwrap();
+                    full.set_minimap(&ColoredDoc, 100 + step as u64).unwrap();
+                }
+                inc.draw(&state, scrolled).unwrap();
+                full.invalidate();
+                full.draw(&state, 0).unwrap();
+                assert!(
+                    inc.pixels() == full.pixels(),
+                    "échelle {scale} : pixels différents à l'étape {step} (opérations {ops:?})"
+                );
+            }
+        }
+    }
+
+    /// Les zones de clic suivent l'échelle : onglets, barre latérale, gouttière, flèches de repli.
+    #[test]
+    fn zones_de_clic_aux_echelles_dpi() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let mut r = renderer_at(scale);
+            r.set_sidebar(Some(&sidebar(0, 5)));
+            let m = r.metrics();
+            // barre latérale : lignes de 24 px logiques
+            let row_h = (24.0 * scale).round();
+            assert_eq!(
+                r.sidebar_row_at(10.0, row_h * 2.5),
+                Some(2),
+                "échelle {scale}"
+            );
+            assert_eq!(r.sidebar_row_at(10.0, row_h * 6.5), None);
+            assert!((m.sidebar as f32 - (250.0 * scale).round()).abs() < 1.0);
+            // onglets : le premier commence après les boutons, croix dans les 26 px de droite
+            let (x0, x1) = r.tab_geometry()[0];
+            assert!(x0 as f32 >= m.sidebar as f32 + 40.0 * scale - 1.0);
+            let y = m.tab_bar as f32 / 2.0;
+            assert_eq!(r.tab_at(x0 as f32 + 5.0, y), Some((0, false)));
+            assert_eq!(r.tab_at(x1 as f32 - 5.0 * scale, y), Some((0, true)));
+            // gouttière : la zone des flèches est à droite des numéros
+            let right = (m.sidebar + m.gutter) as f32;
+            assert!(r.gutter_fold_hit(right - 3.0 * scale));
+            assert!(!r.gutter_fold_hit(right + 3.0 * scale));
+            // poignée de la barre latérale : 3 px logiques de chaque côté
+            let edge = m.sidebar as f32;
+            assert!(r.sidebar_edge_hit(edge + 2.0 * scale, 100.0));
+            assert!(!r.sidebar_edge_hit(edge + 5.0 * scale, 100.0));
+            // le texte tient dans la zone, sans toucher la minimap
+            let cols = r.text_cols();
+            let text_w = cols as f32 * m.advance;
+            assert!(
+                m.pad_x + text_w <= (r.size().0 as i32 - m.minimap) as f32,
+                "échelle {scale}"
+            );
+            assert!(cols > 20, "échelle {scale} : {cols} colonnes");
+        }
+    }
+
     #[test]
     fn le_survol_eclaircit_onglet_fleche_et_ligne_de_la_barre_laterale() {
         let mut r = renderer();
@@ -2652,6 +2793,55 @@ mod tests {
     /// Coût réel d'une image de défilement (dessin + copie de la zone déplacée) sur une cible
     /// qui n'est pas rognée par l'écran. Mesure, pas test : `cargo test -p paulwrite-render
     /// mesure_defilement -- --ignored --nocapture`.
+    /// Coût d'une image de frappe et d'une image de défilement aux échelles DPI de Windows (fenêtre
+    /// de 1100 × 720 pixels logiques, donc plus grande en pixels physiques).
+    #[test]
+    #[ignore = "mesure"]
+    fn mesure_echelles() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let size = ((1100.0 * scale) as u32, (720.0 * scale) as u32);
+            let mut r = SoftRenderer::new(scale, size, Colors::default()).unwrap();
+            r.set_tabs(&[tab("a.rs", false, true)]);
+            r.set_sidebar(Some(&sidebar(0, 12)));
+            let n = r.metrics().rows_for(size.1);
+            r.set_chrome(&chrome("Line 1, Column 1", 100, n));
+            r.set_minimap(&Doc, 0).unwrap();
+            let window = FakeWindow::new(size);
+            let mut state = Rows::new(lines(100, n), Some((3, 0)), None);
+            r.draw(&state, 0).unwrap();
+            window.present(&mut r);
+            let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+            let stats = |v: &mut Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                (v[v.len() / 2], v[v.len() * 95 / 100], v[v.len() - 1])
+            };
+            let mut typing = Vec::new();
+            for step in 1..=200u64 {
+                state.texts[3].push('x');
+                r.set_chrome(&chrome(&format!("Line 4, Column {step}"), 100, n));
+                let t = std::time::Instant::now();
+                r.draw(&state, 0).unwrap();
+                window.present(&mut r);
+                typing.push(ms(t));
+            }
+            let mut scroll = Vec::new();
+            let mut first = 100usize;
+            for _ in 0..200 {
+                first += 3;
+                state.set_texts(lines(first, n));
+                let t = std::time::Instant::now();
+                r.draw(&state, 3).unwrap();
+                window.present(&mut r);
+                scroll.push(ms(t));
+            }
+            let (t, s) = (stats(&mut typing), stats(&mut scroll));
+            println!(
+                "echelle {scale:.2} ({}x{} px, {n} rangees) : frappe {:.2}/{:.2}/{:.2} ms | defilement {:.2}/{:.2}/{:.2} ms (p50/p95/max)",
+                size.0, size.1, t.0, t.1, t.2, s.0, s.1, s.2,
+            );
+        }
+    }
+
     #[test]
     #[ignore = "mesure"]
     fn mesure_defilement() {
