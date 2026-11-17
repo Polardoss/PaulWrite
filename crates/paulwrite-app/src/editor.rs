@@ -11,6 +11,7 @@ use paulwrite_render::{Row, RowSource};
 use paulwrite_syntax::Span;
 
 use crate::command::{Command, Effect};
+use crate::palette::PaletteMode;
 use crate::spans::SpanCache;
 
 /// Texte de composition IME en cours (non encore validé).
@@ -229,6 +230,28 @@ impl Editor {
         self.first_line = self.first_line.min(self.max_first_line());
     }
 
+    /// Place le curseur à la ligne `line` (à partir de 1) et à la colonne `col` (en caractères,
+    /// à partir de 0) et centre la vue dessus. Les valeurs hors du document sont ramenées dedans.
+    pub fn goto(&mut self, line: usize, col: usize) {
+        let buf = self.doc.buffer();
+        let line0 = line
+            .saturating_sub(1)
+            .min(buf.len_lines().saturating_sub(1));
+        let pos = buf.line_start(line0) + col.min(buf.line_len(line0));
+        self.doc
+            .set_selections(SelectionSet::single(Selection::caret(pos)));
+        self.caret_on = true;
+        self.first_line = line0.saturating_sub(self.rows / 2);
+        self.clamp_first_line();
+        self.ensure_caret_visible();
+    }
+
+    /// Nombre de lignes du document.
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.doc.buffer().len_lines()
+    }
+
     /// Fait défiler la vue de `lines` lignes (positif : vers le bas du document).
     pub fn scroll_by(&mut self, lines: isize) {
         let target = self.first_line as isize + lines;
@@ -335,6 +358,10 @@ impl Editor {
             Command::CloseTab => return Some(Effect::CloseTab),
             Command::NextTab => return Some(Effect::NextTab),
             Command::PrevTab => return Some(Effect::PrevTab),
+            Command::GotoFile => return Some(Effect::OpenPalette(PaletteMode::Files)),
+            Command::CommandPalette => return Some(Effect::OpenPalette(PaletteMode::Commands)),
+            Command::GotoLine => return Some(Effect::OpenPalette(PaletteMode::GotoLine)),
+            Command::SearchProject => return Some(Effect::OpenPalette(PaletteMode::Search)),
             Command::Quit => return Some(Effect::Quit),
         }
         None
@@ -807,6 +834,51 @@ mod tests {
         e.build_view();
         assert_eq!(e.view().row(0).text, "ab");
         assert_eq!(e.view().row(0).underline, None);
+    }
+
+    #[test]
+    fn aller_a_une_ligne_centre_la_vue() {
+        let text: String = (0..200).map(|i| format!("ligne {i}\n")).collect();
+        let mut e = editor(&text);
+        e.set_viewport_rows(11);
+        e.goto(100, 3);
+        let head = e.document().selections().primary().head;
+        assert_eq!(e.document().buffer().char_to_line_col(head), (99, 3));
+        // centrée : la ligne est au milieu des 11 rangées
+        assert_eq!(e.first_line(), 99 - 5);
+        // hors du document : ramené à la dernière ligne (vide après le dernier saut de ligne)
+        e.goto(100_000, 0);
+        let head = e.document().selections().primary().head;
+        assert_eq!(e.document().buffer().char_to_line(head), e.line_count() - 1);
+        // colonne trop grande : fin de ligne ; ligne 0 : première ligne
+        e.goto(0, 999);
+        let head = e.document().selections().primary().head;
+        assert_eq!(
+            e.document().buffer().char_to_line_col(head),
+            (0, "ligne 0".len())
+        );
+        assert_eq!(e.first_line(), 0);
+    }
+
+    #[test]
+    fn les_commandes_du_panneau_ouvrent_le_bon_mode() {
+        let mut e = editor("a");
+        assert_eq!(
+            e.execute(Command::GotoFile, 0),
+            Some(Effect::OpenPalette(PaletteMode::Files))
+        );
+        assert_eq!(
+            e.execute(Command::CommandPalette, 0),
+            Some(Effect::OpenPalette(PaletteMode::Commands))
+        );
+        assert_eq!(
+            e.execute(Command::GotoLine, 0),
+            Some(Effect::OpenPalette(PaletteMode::GotoLine))
+        );
+        assert_eq!(
+            e.execute(Command::SearchProject, 0),
+            Some(Effect::OpenPalette(PaletteMode::Search))
+        );
     }
 
     #[test]

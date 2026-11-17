@@ -87,6 +87,11 @@ pub enum Done {
         path: PathBuf,
         result: Result<Document, String>,
     },
+    /// Le chemin demandé est un dossier : il devient la racine du projet.
+    Directory {
+        tab: TabId,
+        path: PathBuf,
+    },
     Progress {
         tab: TabId,
         done: u64,
@@ -115,6 +120,7 @@ impl std::fmt::Debug for Done {
             Done::Loaded { tab, path, result } => {
                 write!(f, "Loaded({tab}, {path:?}, ok={})", result.is_ok())
             }
+            Done::Directory { tab, path } => write!(f, "Directory({tab}, {path:?})"),
             Done::Progress { done, total, .. } => write!(f, "Progress({done}/{total})"),
             Done::Saved {
                 tab, path, result, ..
@@ -161,8 +167,12 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                     }),
                     Job::ShowError { owner, text } => platform::show_error(owner, &text),
                     Job::Open { tab, path } => {
-                        let result = load(tab, &path, &notify);
-                        notify(Done::Loaded { tab, path, result });
+                        if path.is_dir() {
+                            notify(Done::Directory { tab, path });
+                        } else {
+                            let result = load(tab, &path, &notify);
+                            notify(Done::Loaded { tab, path, result });
+                        }
                     }
                     Job::PickOpen { owner } => {
                         notify(Done::OpenPicked(platform::pick_open_file(owner)));

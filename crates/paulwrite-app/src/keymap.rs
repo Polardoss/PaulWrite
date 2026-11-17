@@ -60,12 +60,68 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("s", true) => Some(Command::SaveAs),
             ("o", _) => Some(Command::Open),
             ("n", _) => Some(Command::NewFile),
+            ("p", false) => Some(Command::GotoFile),
+            ("p", true) => Some(Command::CommandPalette),
+            ("g", _) => Some(Command::GotoLine),
+            ("f", true) => Some(Command::SearchProject),
             ("w", _) => Some(Command::CloseTab),
             ("q", _) => Some(Command::Quit),
             _ => None,
         },
         _ => None,
     }
+}
+
+/// Raccourci clavier d'une commande, d'après la table [`command_for`] elle-même (jamais
+/// désynchronisé) : `Ctrl+Maj+S`, `Ctrl+←`… `None` si la commande n'a pas de raccourci.
+#[must_use]
+pub fn shortcut_label(cmd: Command) -> Option<String> {
+    use NamedKey::*;
+    let named: [(NamedKey, &str); 13] = [
+        (ArrowLeft, "←"),
+        (ArrowRight, "→"),
+        (ArrowUp, "↑"),
+        (ArrowDown, "↓"),
+        (Home, "Début"),
+        (End, "Fin"),
+        (PageUp, "Page ↑"),
+        (PageDown, "Page ↓"),
+        (Enter, "Entrée"),
+        (Tab, "Tab"),
+        (Backspace, "Retour arrière"),
+        (Delete, "Suppr"),
+        (Escape, "Échap"),
+    ];
+    let mut keys: Vec<(Key, String)> = named
+        .iter()
+        .map(|(k, l)| (Key::Named(*k), (*l).to_owned()))
+        .collect();
+    keys.extend(('a'..='z').map(|c| {
+        (
+            Key::Character(c.to_string().into()),
+            c.to_ascii_uppercase().to_string(),
+        )
+    }));
+    // Du plus simple au plus composé : on préfère `Ctrl+S` à `Ctrl+Maj+S`.
+    let combos: [(ModifiersState, &str); 5] = [
+        (ModifiersState::empty(), ""),
+        (ModifiersState::CONTROL, "Ctrl+"),
+        (ModifiersState::SHIFT, "Maj+"),
+        (ModifiersState::CONTROL | ModifiersState::SHIFT, "Ctrl+Maj+"),
+        (ModifiersState::CONTROL | ModifiersState::ALT, "Ctrl+Alt+"),
+    ];
+    for (mods, prefix) in combos {
+        for (key, label) in &keys {
+            // une lettre seule sans modificateur est du texte, pas un raccourci
+            if mods.is_empty() && matches!(key, Key::Character(_)) {
+                continue;
+            }
+            if command_for(key, mods) == Some(cmd) {
+                return Some(format!("{prefix}{label}"));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -133,6 +189,55 @@ mod tests {
         assert_eq!(command_for(&ch("z"), NONE), None);
         // AltGr (Ctrl+Alt) ne doit pas déclencher de raccourci : il sert à saisir des caractères
         assert_eq!(command_for(&ch("s"), c | ModifiersState::ALT), None);
+    }
+
+    #[test]
+    fn intitules_de_raccourcis() {
+        assert_eq!(shortcut_label(Command::Undo).as_deref(), Some("Ctrl+Z"));
+        assert_eq!(
+            shortcut_label(Command::SaveAs).as_deref(),
+            Some("Ctrl+Maj+S")
+        );
+        assert_eq!(shortcut_label(Command::GotoFile).as_deref(), Some("Ctrl+P"));
+        assert_eq!(
+            shortcut_label(Command::CommandPalette).as_deref(),
+            Some("Ctrl+Maj+P")
+        );
+        assert_eq!(
+            shortcut_label(Command::Move(Motion::Left)).as_deref(),
+            Some("←")
+        );
+        assert_eq!(
+            shortcut_label(Command::Move(Motion::WordLeft)).as_deref(),
+            Some("Ctrl+←")
+        );
+        assert_eq!(
+            shortcut_label(Command::AddCursorBelow).as_deref(),
+            Some("Ctrl+Alt+↓")
+        );
+        assert_eq!(shortcut_label(Command::Quit).as_deref(), Some("Ctrl+Q"));
+        // pas de raccourci : paragraphe précédent sans sélection
+        assert_eq!(shortcut_label(Command::Move(Motion::ParagraphUp)), None);
+    }
+
+    #[test]
+    fn raccourcis_du_panneau() {
+        let c = ModifiersState::CONTROL;
+        assert_eq!(command_for(&ch("p"), c), Some(Command::GotoFile));
+        assert_eq!(
+            command_for(&ch("P"), c | ModifiersState::SHIFT),
+            Some(Command::CommandPalette)
+        );
+        assert_eq!(command_for(&ch("g"), c), Some(Command::GotoLine));
+        assert_eq!(
+            command_for(&ch("F"), c | ModifiersState::SHIFT),
+            Some(Command::SearchProject)
+        );
+        assert_eq!(
+            command_for(&ch("f"), c),
+            None,
+            "Ctrl+F : recherche dans le document, plus tard"
+        );
     }
 
     #[test]

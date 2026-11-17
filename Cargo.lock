@@ -1280,6 +1280,7 @@ dependencies = [
  "crossbeam-channel",
  "paulwrite-core",
  "paulwrite-render",
+ "paulwrite-search",
  "paulwrite-syntax",
  "ropey",
  "winit",

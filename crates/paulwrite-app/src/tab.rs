@@ -25,6 +25,8 @@ pub struct Tab {
     pub loading: Option<(u64, u64)>,
     /// État « modifié » affiché dans la barre d'onglets (pour détecter un changement).
     pub shown_modified: bool,
+    /// Ligne (à partir de 1) où placer le curseur dès que le fichier est chargé.
+    pub pending_goto: Option<usize>,
 }
 
 impl Tab {
@@ -38,6 +40,7 @@ impl Tab {
             requested: None,
             loading: None,
             shown_modified: false,
+            pending_goto: None,
         }
     }
 

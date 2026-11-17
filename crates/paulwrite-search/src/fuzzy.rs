@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use nucleo::pattern::{CaseMatching, Normalization};
-use nucleo::{Config, Injector, Nucleo, Status};
+use nucleo::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo::{Config, Injector, Matcher, Nucleo, Status, Utf32Str};
 
 /// Poignée pour ajouter des candidats depuis n'importe quel thread (voir [`FuzzyFinder::injector`]).
 pub type FuzzyInjector = Injector<String>;
@@ -16,6 +16,8 @@ pub type FuzzyInjector = Injector<String>;
 pub struct FuzzyFinder {
     nucleo: Nucleo<String>,
     query: String,
+    /// Sert à retrouver les caractères qui correspondent ([`FuzzyFinder::indices`]).
+    matcher: Matcher,
 }
 
 impl std::fmt::Debug for FuzzyFinder {
@@ -36,6 +38,7 @@ impl FuzzyFinder {
         Self {
             nucleo: Nucleo::new(Config::DEFAULT.match_paths(), Arc::new(notify), None, 1),
             query: String::new(),
+            matcher: Matcher::new(Config::DEFAULT.match_paths()),
         }
     }
 
@@ -84,6 +87,22 @@ impl FuzzyFinder {
     #[must_use]
     pub fn matched_count(&self) -> u32 {
         self.nucleo.snapshot().matched_item_count()
+    }
+
+    /// Indices (en caractères) des caractères de `candidate` qui correspondent à la requête
+    /// courante, triés : sert à les mettre en évidence dans la liste. Vide si rien ne correspond.
+    pub fn indices(&mut self, candidate: &str) -> Vec<u32> {
+        let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
+        let mut buf = Vec::new();
+        let mut out = Vec::new();
+        pattern.indices(
+            Utf32Str::new(candidate, &mut buf),
+            &mut self.matcher,
+            &mut out,
+        );
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Les `limit` meilleurs résultats, du meilleur au moins bon.
@@ -148,6 +167,24 @@ mod tests {
         f.set_query("");
         settle(&mut f);
         assert_eq!(f.matched_count(), 5);
+    }
+
+    #[test]
+    fn indices_des_caracteres_correspondants() {
+        let mut f = finder_with(&["src/main.rs"]);
+        settle(&mut f);
+        f.set_query("mrs");
+        settle(&mut f);
+        // m (4), r (9), s (10) dans « src/main.rs » : positions en caractères
+        let idx = f.indices("src/main.rs");
+        assert_eq!(idx.len(), 3);
+        assert!(idx.windows(2).all(|w| w[0] < w[1]));
+        let chars: Vec<char> = "src/main.rs".chars().collect();
+        let picked: String = idx.iter().map(|&i| chars[i as usize]).collect();
+        assert_eq!(picked, "mrs");
+        assert!(f.indices("zzz").is_empty());
+        f.set_query("");
+        assert!(f.indices("src/main.rs").is_empty());
     }
 
     #[test]

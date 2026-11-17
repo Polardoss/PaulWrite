@@ -3,6 +3,8 @@
 
 use paulwrite_core::Motion;
 
+use crate::palette::PaletteMode;
+
 /// Une fonctionnalité de l'éditeur, identifiée par un nom stable (`cursor.left`, `file.save`…).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -39,6 +41,14 @@ pub enum Command {
     CloseTab,
     NextTab,
     PrevTab,
+    /// Goto Anything : ouvrir un fichier du projet.
+    GotoFile,
+    /// Palette de commandes.
+    CommandPalette,
+    /// Aller à une ligne du document courant.
+    GotoLine,
+    /// Rechercher du texte dans le projet.
+    SearchProject,
     Quit,
 }
 
@@ -99,6 +109,10 @@ impl Command {
             Command::CloseTab => "tab.close",
             Command::NextTab => "tab.next",
             Command::PrevTab => "tab.prev",
+            Command::GotoFile => "palette.files",
+            Command::CommandPalette => "palette.commands",
+            Command::GotoLine => "goto.line",
+            Command::SearchProject => "search.project",
             Command::Quit => "app.quit",
         }
     }
@@ -141,15 +155,89 @@ impl Command {
             Command::CloseTab,
             Command::NextTab,
             Command::PrevTab,
+            Command::GotoFile,
+            Command::CommandPalette,
+            Command::GotoLine,
+            Command::SearchProject,
             Command::Quit,
         ]);
         v
+    }
+
+    /// Intitulé affiché dans la palette de commandes.
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Command::Move(m) => MOVE_TITLES[index_of(m)],
+            Command::Extend(m) => EXTEND_TITLES[index_of(m)],
+            Command::PageUp(false) => "Curseur : page précédente",
+            Command::PageUp(true) => "Sélection : page précédente",
+            Command::PageDown(false) => "Curseur : page suivante",
+            Command::PageDown(true) => "Sélection : page suivante",
+            Command::ScrollUp => "Affichage : défiler vers le haut",
+            Command::ScrollDown => "Affichage : défiler vers le bas",
+            Command::InsertNewline => "Édition : saut de ligne",
+            Command::InsertTab => "Édition : tabulation",
+            Command::DeleteBackward => "Édition : supprimer en arrière",
+            Command::DeleteForward => "Édition : supprimer en avant",
+            Command::Undo => "Édition : annuler",
+            Command::Redo => "Édition : rétablir",
+            Command::SelectAll => "Sélection : tout sélectionner",
+            Command::CollapseSelections => "Sélection : un seul curseur",
+            Command::AddCursorAbove => "Curseur : ajouter au-dessus",
+            Command::AddCursorBelow => "Curseur : ajouter en dessous",
+            Command::Copy => "Édition : copier",
+            Command::Cut => "Édition : couper",
+            Command::Paste => "Édition : coller",
+            Command::Save => "Fichier : enregistrer",
+            Command::SaveAs => "Fichier : enregistrer sous",
+            Command::Open => "Fichier : ouvrir",
+            Command::NewFile => "Fichier : nouveau",
+            Command::CloseTab => "Onglet : fermer",
+            Command::NextTab => "Onglet : suivant",
+            Command::PrevTab => "Onglet : précédent",
+            Command::GotoFile => "Aller à un fichier du projet",
+            Command::CommandPalette => "Palette de commandes",
+            Command::GotoLine => "Aller à la ligne",
+            Command::SearchProject => "Rechercher dans le projet",
+            Command::Quit => "Application : quitter",
+        }
     }
 }
 
 fn index_of(m: Motion) -> usize {
     MOTIONS.iter().position(|(x, _)| *x == m).unwrap_or(0)
 }
+
+const MOVE_TITLES: [&str; 12] = [
+    "Curseur : à gauche",
+    "Curseur : à droite",
+    "Curseur : vers le haut",
+    "Curseur : vers le bas",
+    "Curseur : mot précédent",
+    "Curseur : mot suivant",
+    "Curseur : début de ligne",
+    "Curseur : fin de ligne",
+    "Curseur : paragraphe précédent",
+    "Curseur : paragraphe suivant",
+    "Curseur : début du document",
+    "Curseur : fin du document",
+];
+
+const EXTEND_TITLES: [&str; 12] = [
+    "Sélection : étendre à gauche",
+    "Sélection : étendre à droite",
+    "Sélection : étendre vers le haut",
+    "Sélection : étendre vers le bas",
+    "Sélection : étendre au mot précédent",
+    "Sélection : étendre au mot suivant",
+    "Sélection : étendre au début de ligne",
+    "Sélection : étendre à la fin de ligne",
+    "Sélection : étendre au paragraphe précédent",
+    "Sélection : étendre au paragraphe suivant",
+    "Sélection : étendre au début du document",
+    "Sélection : étendre à la fin du document",
+];
 
 const MOVE_NAMES: [&str; 12] = [
     "cursor.left",
@@ -195,6 +283,8 @@ pub enum Effect {
     CloseTab,
     NextTab,
     PrevTab,
+    /// Ouvrir le panneau flottant dans ce mode.
+    OpenPalette(PaletteMode),
     Quit,
 }
 
@@ -214,6 +304,20 @@ mod tests {
             assert_eq!(Command::from_name(c.name()), Some(c));
         }
         assert_eq!(Command::from_name("n'existe.pas"), None);
+    }
+
+    #[test]
+    fn chaque_commande_a_un_intitule_unique() {
+        let mut titles: Vec<_> = Command::all().iter().map(|c| c.title()).collect();
+        assert!(titles.iter().all(|t| !t.is_empty()));
+        let n = titles.len();
+        titles.sort_unstable();
+        titles.dedup();
+        assert_eq!(titles.len(), n, "intitulés en double");
+    }
+
+    #[test]
+    fn suite_des_noms() {
         // cohérence de la table des déplacements
         assert_eq!(motion_name(Motion::WordLeft), "word_left");
         assert_eq!(Command::Move(Motion::WordLeft).name(), "cursor.word_left");

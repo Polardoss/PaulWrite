@@ -6,6 +6,7 @@ pub mod config;
 pub mod editor;
 pub mod keymap;
 pub mod metrics;
+pub mod palette;
 pub mod spans;
 pub mod tab;
 pub mod worker;

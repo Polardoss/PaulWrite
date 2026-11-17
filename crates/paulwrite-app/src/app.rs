@@ -6,18 +6,21 @@
 //! demande : une image n'est dessinée que si un événement l'a demandée (aucune boucle
 //! permanente ; seul le clignotement du curseur réveille la boucle deux fois par seconde).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use paulwrite_render::{platform, since_process_start, Colors, SoftRenderer, TabInfo};
+use paulwrite_search::{self as search, FuzzyFinder, IndexOptions, SearchOptions, TextQuery};
 use paulwrite_syntax::{self as syntax, Language};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Cursor, CursorIcon, Window, WindowId};
@@ -27,6 +30,7 @@ use crate::config::Config;
 use crate::editor::Preedit;
 use crate::keymap;
 use crate::metrics::Samples;
+use crate::palette::{parse_goto, Item, Outcome, Palette, PaletteKey, PaletteMode, Target};
 use crate::tab::{Tab, SYNTAX_MARGIN_LINES};
 use crate::worker::{self, ConfirmFor, Done, Job, TabId};
 
@@ -50,6 +54,17 @@ pub enum UserEvent {
     BenchKey(Instant),
     /// Fin de la série de frappes simulées.
     BenchDone,
+    /// Le fuzzy finder a de nouveaux résultats (envoyé depuis un thread de nucleo).
+    PaletteWake,
+    /// Le parcours du projet pour Goto Anything est terminé.
+    IndexDone,
+    /// Résultats de la recherche dans le projet (génération `generation`).
+    Search {
+        generation: u64,
+        event: search::Event,
+    },
+    /// Frappe simulée dans le panneau (`None` : efface la saisie).
+    BenchPalette { at: Instant, ch: Option<char> },
 }
 
 /// Mode de mesure.
@@ -65,6 +80,10 @@ pub enum BenchKind {
     Open,
     /// `n` frappes dans un fichier Rust de 1 Mo avec coloration : latence frappe → couleurs.
     Syntax(usize),
+    /// `n` frappes dans Goto Anything sur le dossier donné : latence frappe → résultats affichés.
+    Palette(usize),
+    /// Recherche dans le projet (dossier donné) du texte passé en argument.
+    PaletteSearch,
 }
 
 /// Options de la ligne de commande.
@@ -75,6 +94,8 @@ pub struct Options {
     pub bench: Option<BenchKind>,
     /// Fichier où ajouter le rapport de mesure (en plus de la sortie standard).
     pub bench_out: Option<PathBuf>,
+    /// Argument d'un mode de mesure (texte recherché par `--bench-palette-search`).
+    pub bench_arg: Option<String>,
 }
 
 impl Options {
@@ -97,6 +118,11 @@ impl Options {
                 "--bench-typing" => o.bench = Some(BenchKind::Typing(count("--bench-typing")?)),
                 "--bench-syntax" => o.bench = Some(BenchKind::Syntax(count("--bench-syntax")?)),
                 "--bench-scroll" => o.bench = Some(BenchKind::Scroll(count("--bench-scroll")?)),
+                "--bench-palette" => o.bench = Some(BenchKind::Palette(count("--bench-palette")?)),
+                "--bench-palette-search" => {
+                    o.bench = Some(BenchKind::PaletteSearch);
+                    o.bench_arg = Some(it.next().ok_or("--bench-palette-search attend un texte")?);
+                }
                 "--bench-out" => {
                     o.bench_out = Some(PathBuf::from(
                         it.next().ok_or("--bench-out attend un chemin")?,
@@ -160,6 +186,52 @@ enum AfterSave {
     ContinueQuit,
 }
 
+/// Panneau flottant ouvert : sa saisie et ses résultats, plus ce qui les alimente.
+struct PaletteState {
+    palette: Palette,
+    /// Dossier du projet dans lequel on cherche.
+    root: PathBuf,
+    /// Goto Anything et palette de commandes : classement des candidats par nucleo.
+    finder: Option<FuzzyFinder>,
+    /// Palette de commandes : (commande, intitulé, raccourci) dans l'ordre d'injection.
+    commands: Vec<(Command, String, String)>,
+    /// Palette de commandes : texte classé -> indice dans `commands`.
+    candidate_index: HashMap<String, usize>,
+    /// Annule le parcours ou la recherche en cours quand le panneau se ferme ou que la saisie change.
+    cancel: Arc<AtomicBool>,
+    /// La saisie vient de changer : le prochain jeu de résultats remet la sélection en tête.
+    reset: bool,
+    /// Parcours du projet en cours (Goto Anything).
+    indexing: bool,
+    /// Génération de la recherche en cours : les messages d'une recherche abandonnée sont ignorés.
+    generation: u64,
+    search_matches: usize,
+}
+
+/// Ligne de la liste pour une correspondance de la recherche dans le projet.
+fn match_item(m: search::Match) -> Item {
+    let path = m.path.replace('\\', "/");
+    let prefix = format!("{path}:{}  ", m.line);
+    let trimmed_start = m.text.len() - m.text.trim_start().len();
+    let text = m.text.trim();
+    let base = prefix.chars().count() as u32;
+    let mut highlights = Vec::new();
+    for &(a, b) in &m.ranges {
+        if a < trimmed_start || b > trimmed_start + text.len() {
+            continue;
+        }
+        let before = m.text[trimmed_start..a].chars().count() as u32;
+        let len = m.text[a..b].chars().count() as u32;
+        highlights.extend(base + before..base + before + len);
+    }
+    Item {
+        label: format!("{prefix}{text}"),
+        detail: String::new(),
+        highlights,
+        target: Target::Match { path, line: m.line },
+    }
+}
+
 struct App {
     opts: Options,
     config: Config,
@@ -190,6 +262,21 @@ struct App {
     quit_queue: Vec<TabId>,
     /// Une boîte « Enregistrer ? » est ouverte (sur le worker) : on n'en ouvre pas une deuxième.
     confirming: bool,
+    /// Dossier du projet (dossier ouvert, glissé ou passé en argument).
+    project_root: Option<PathBuf>,
+    palette: Option<PaletteState>,
+    /// Le contenu du panneau a changé : à renvoyer au moteur de rendu.
+    overlay_dirty: bool,
+    // mesures du panneau
+    palette_query_at: Option<Instant>,
+    palette_settled: bool,
+    palette_latency: Samples,
+    index_started: Option<Instant>,
+    index_time: Option<Duration>,
+    search_started: Option<Instant>,
+    search_first: Option<Duration>,
+    search_done: Option<Duration>,
+    search_count: usize,
     // IME
     ime_area: Option<(i32, i32)>,
     // mesures
@@ -237,6 +324,18 @@ impl App {
             after_save: None,
             quit_queue: Vec::new(),
             confirming: false,
+            project_root: None,
+            palette: None,
+            overlay_dirty: false,
+            palette_query_at: None,
+            palette_settled: false,
+            palette_latency: Samples::default(),
+            index_started: None,
+            index_time: None,
+            search_started: None,
+            search_first: None,
+            search_done: None,
+            search_count: 0,
             ime_area: None,
             input_at: None,
             latency: Samples::default(),
@@ -338,6 +437,12 @@ impl App {
     /// Ouvre un fichier : active son onglet s'il est déjà ouvert, sinon l'ouvre dans l'onglet
     /// courant s'il est vierge, sinon dans un nouvel onglet. La lecture se fait sur le worker.
     fn open_path(&mut self, path: PathBuf) {
+        self.open_path_at(path, None);
+    }
+
+    /// Comme [`open_path`](Self::open_path), puis place le curseur à la ligne `line` (à partir de
+    /// 1) : tout de suite si le fichier est déjà ouvert, sinon quand il sera chargé.
+    fn open_path_at(&mut self, path: PathBuf, line: Option<usize>) {
         // `absolute` ne touche pas au disque : seulement le dossier courant.
         let path = std::path::absolute(&path).unwrap_or(path);
         if let Some(i) = self
@@ -346,6 +451,10 @@ impl App {
             .position(|t| t.editor.path() == Some(path.as_path()))
         {
             self.activate(i);
+            if let Some(l) = line {
+                ed!(self).goto(l, 0);
+                self.request_redraw();
+            }
             return;
         }
         let index = if self.tabs[self.active].is_pristine() {
@@ -356,6 +465,7 @@ impl App {
         let tab = &mut self.tabs[index];
         tab.editor.set_path(path.clone());
         tab.loading = Some((0, 0));
+        tab.pending_goto = line;
         let id = tab.id;
         self.jobs.send(Job::Open { tab: id, path }).ok();
         self.activate(index);
@@ -562,6 +672,452 @@ impl App {
         el.exit();
     }
 
+    // --- Panneau flottant --------------------------------------------------------------------
+
+    /// Dossier du projet : celui qu'on a ouvert, sinon le dossier du fichier courant, sinon le
+    /// dossier de travail.
+    fn palette_root(&self) -> PathBuf {
+        self.project_root
+            .clone()
+            .or_else(|| {
+                self.tabs[self.active]
+                    .editor
+                    .path()
+                    .and_then(|p| p.parent().map(PathBuf::from))
+            })
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn wake_callback(&self) -> impl Fn() + Send + Sync + 'static {
+        let proxy = self.proxy.clone();
+        move || {
+            let _ = proxy.send_event(UserEvent::PaletteWake);
+        }
+    }
+
+    /// Ouvre le panneau dans ce mode (remplace celui qui était ouvert).
+    fn open_palette(&mut self, mode: PaletteMode) {
+        self.close_palette();
+        let root = self.palette_root();
+        let mut st = PaletteState {
+            palette: Palette::new(mode),
+            root: root.clone(),
+            finder: None,
+            commands: Vec::new(),
+            candidate_index: HashMap::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            reset: true,
+            indexing: false,
+            generation: 0,
+            search_matches: 0,
+        };
+        match mode {
+            PaletteMode::Files => {
+                let finder = FuzzyFinder::new(self.wake_callback());
+                let injector = finder.injector();
+                let cancel = st.cancel.clone();
+                let proxy = self.proxy.clone();
+                self.index_started = Some(Instant::now());
+                st.indexing = true;
+                // Le parcours du projet et l'alimentation du classement se font hors du thread UI.
+                std::thread::spawn(move || {
+                    let (tx, rx) = crossbeam_channel::unbounded();
+                    std::thread::scope(|s| {
+                        s.spawn(|| {
+                            search::list_files(&root, &IndexOptions::default(), &cancel, tx);
+                        });
+                        for batch in rx.iter() {
+                            for path in batch {
+                                FuzzyFinder::add(&injector, path);
+                            }
+                        }
+                    });
+                    let _ = proxy.send_event(UserEvent::IndexDone);
+                });
+                st.finder = Some(finder);
+            }
+            PaletteMode::Commands => {
+                let finder = FuzzyFinder::new(self.wake_callback());
+                let injector = finder.injector();
+                for cmd in Command::all() {
+                    let title = cmd.title();
+                    let candidate = format!("{title} {}", cmd.name());
+                    let shortcut = keymap::shortcut_label(cmd).unwrap_or_default();
+                    st.candidate_index
+                        .insert(candidate.clone(), st.commands.len());
+                    st.commands.push((cmd, title.to_owned(), shortcut));
+                    FuzzyFinder::add(&injector, candidate);
+                }
+                st.finder = Some(finder);
+            }
+            PaletteMode::GotoLine => {}
+            PaletteMode::Search => {
+                st.palette.set_note(format!(
+                    "Dans {}",
+                    root.file_name().map_or_else(
+                        || root.display().to_string(),
+                        |n| n.to_string_lossy().into_owned()
+                    )
+                ));
+            }
+        }
+        self.palette = Some(st);
+        let settled = self.refresh_palette_items(true);
+        self.note_settled(settled);
+        self.overlay_dirty = true;
+        self.request_redraw();
+    }
+
+    /// Ferme le panneau et arrête ce qui tournait pour lui.
+    fn close_palette(&mut self) {
+        if let Some(st) = self.palette.take() {
+            st.cancel.store(true, Ordering::Relaxed);
+            self.overlay_dirty = true;
+            self.request_redraw();
+        }
+    }
+
+    /// Un jeu de résultats à jour vient d'être calculé pour la dernière saisie.
+    fn note_settled(&mut self, settled: bool) {
+        if settled && self.palette_query_at.is_some() {
+            self.palette_settled = true;
+        }
+    }
+
+    /// Recalcule la liste affichée. `force_reset` : la sélection repart du premier résultat.
+    /// Renvoie `true` quand les résultats correspondent à la saisie courante (classement terminé).
+    fn refresh_palette_items(&mut self, force_reset: bool) -> bool {
+        let total_lines = self.tabs[self.active].editor.line_count();
+        let Some(st) = self.palette.as_mut() else {
+            return true;
+        };
+        let mode = st.palette.mode();
+        let settled = match mode {
+            PaletteMode::Files | PaletteMode::Commands => {
+                let Some(finder) = st.finder.as_mut() else {
+                    return true;
+                };
+                let status = finder.tick(0);
+                let reset = force_reset || st.reset;
+                if status.changed || reset {
+                    let top = finder.top(200);
+                    let items: Vec<Item> = top
+                        .into_iter()
+                        .filter_map(|cand| {
+                            let highlights = finder.indices(&cand);
+                            if mode == PaletteMode::Files {
+                                Some(Item {
+                                    target: Target::File(cand.clone()),
+                                    label: cand,
+                                    detail: String::new(),
+                                    highlights,
+                                })
+                            } else {
+                                let &i = st.candidate_index.get(&cand)?;
+                                let (cmd, title, shortcut) = &st.commands[i];
+                                let n = title.chars().count() as u32;
+                                Some(Item {
+                                    label: title.clone(),
+                                    detail: if shortcut.is_empty() {
+                                        cmd.name().to_owned()
+                                    } else {
+                                        shortcut.clone()
+                                    },
+                                    highlights: highlights.into_iter().filter(|&h| h < n).collect(),
+                                    target: Target::Command(*cmd),
+                                })
+                            }
+                        })
+                        .collect();
+                    st.palette.set_items(items, reset);
+                    st.reset = false;
+                }
+                if mode == PaletteMode::Files {
+                    let (total, matched) = (finder.item_count(), finder.matched_count());
+                    st.palette.set_note(if st.indexing {
+                        format!("{total} fichiers indexés…")
+                    } else {
+                        format!("{matched} sur {total} fichiers")
+                    });
+                }
+                !status.running
+            }
+            PaletteMode::GotoLine => {
+                let items = match parse_goto(st.palette.query()) {
+                    Some(n) => {
+                        let n = n.min(total_lines);
+                        vec![Item {
+                            label: format!("Aller à la ligne {n}"),
+                            detail: format!("sur {total_lines}"),
+                            highlights: Vec::new(),
+                            target: Target::Line(n),
+                        }]
+                    }
+                    None => Vec::new(),
+                };
+                st.palette.set_note(if items.is_empty() {
+                    format!("Numéro de ligne, de 1 à {total_lines}")
+                } else {
+                    String::new()
+                });
+                st.palette.set_items(items, true);
+                true
+            }
+            PaletteMode::Search => true,
+        };
+        self.overlay_dirty = true;
+        settled
+    }
+
+    /// La saisie du panneau a changé : relancer le classement ou la recherche.
+    fn palette_query_changed(&mut self) {
+        let Some(st) = self.palette.as_mut() else {
+            return;
+        };
+        let query = st.palette.query().to_owned();
+        st.reset = true;
+        match st.palette.mode() {
+            PaletteMode::Files | PaletteMode::Commands => {
+                if let Some(finder) = st.finder.as_mut() {
+                    finder.set_query(&query);
+                    // Laisse 1 ms au classement pour publier un résultat tout de suite (cas
+                    // courant) ; sinon il arrivera par `PaletteWake`.
+                    finder.tick(1);
+                }
+                let settled = self.refresh_palette_items(true);
+                self.note_settled(settled);
+            }
+            PaletteMode::GotoLine => {
+                let settled = self.refresh_palette_items(true);
+                self.note_settled(settled);
+            }
+            PaletteMode::Search => self.start_search(query),
+        }
+        self.overlay_dirty = true;
+    }
+
+    /// Lance (en annulant la précédente) la recherche de `query` dans le projet, sur des threads.
+    fn start_search(&mut self, query: String) {
+        let proxy = self.proxy.clone();
+        let Some(st) = self.palette.as_mut() else {
+            return;
+        };
+        st.cancel.store(true, Ordering::Relaxed);
+        st.cancel = Arc::new(AtomicBool::new(false));
+        st.generation += 1;
+        st.search_matches = 0;
+        st.palette.set_items(Vec::new(), true);
+        if query.chars().count() < 2 {
+            st.palette
+                .set_note("Saisir au moins 2 caractères".to_owned());
+            return;
+        }
+        st.palette.set_note("Recherche…".to_owned());
+        let (generation, root, cancel) = (st.generation, st.root.clone(), st.cancel.clone());
+        // Minuscules seulement : insensible à la casse ; une majuscule la rend sensible.
+        let case_sensitive = query.chars().any(char::is_uppercase);
+        std::thread::spawn(move || {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    for event in rx.iter() {
+                        let _ = proxy.send_event(UserEvent::Search { generation, event });
+                    }
+                });
+                let _ = search::search_text(
+                    &root,
+                    &TextQuery {
+                        pattern: query,
+                        regex: false,
+                        case_sensitive,
+                    },
+                    &SearchOptions {
+                        max_results: 2000,
+                        ..SearchOptions::default()
+                    },
+                    &cancel,
+                    tx,
+                );
+            });
+        });
+    }
+
+    /// Résultats de la recherche dans le projet.
+    fn on_search_event(&mut self, generation: u64, event: search::Event) {
+        let Some(st) = self.palette.as_mut() else {
+            return;
+        };
+        if st.generation != generation || st.palette.mode() != PaletteMode::Search {
+            return; // recherche abandonnée
+        }
+        match event {
+            search::Event::Matches(ms) => {
+                let items: Vec<Item> = ms.into_iter().map(match_item).collect();
+                st.search_matches += items.len();
+                st.palette.append_items(items);
+                st.palette
+                    .set_note(format!("{} résultats…", st.search_matches));
+            }
+            search::Event::Done(sum) => {
+                st.palette.set_note(format!(
+                    "{} résultats dans {} fichiers ({:.0} ms){}",
+                    sum.matches,
+                    sum.files,
+                    sum.elapsed.as_secs_f64() * 1000.0,
+                    if sum.truncated {
+                        " — liste tronquée"
+                    } else {
+                        ""
+                    }
+                ));
+                self.search_count = sum.matches;
+                if let Some(t) = self.search_started {
+                    self.search_done = Some(t.elapsed());
+                }
+            }
+        }
+        self.overlay_dirty = true;
+    }
+
+    /// Valide le résultat sélectionné : ferme le panneau puis agit.
+    fn accept_palette(&mut self, el: &ActiveEventLoop) {
+        let Some(st) = self.palette.as_ref() else {
+            return;
+        };
+        let Some(item) = st.palette.selected().cloned() else {
+            return;
+        };
+        let root = st.root.clone();
+        self.close_palette();
+        match item.target {
+            Target::File(p) => self.open_path_at(root.join(p), None),
+            Target::Command(c) => self.execute(c, el),
+            Target::Line(n) => {
+                ed!(self).goto(n, 0);
+                self.request_redraw();
+            }
+            Target::Match { path, line } => {
+                self.open_path_at(root.join(path), Some(line as usize));
+            }
+        }
+    }
+
+    /// Transmet une touche au panneau et en tire les conséquences.
+    fn palette_apply(&mut self, key: &PaletteKey, el: &ActiveEventLoop) {
+        let Some(st) = self.palette.as_mut() else {
+            return;
+        };
+        match st.palette.handle(key) {
+            Outcome::QueryChanged => self.palette_query_changed(),
+            Outcome::Accept => self.accept_palette(el),
+            Outcome::Close => self.close_palette(),
+            Outcome::Redraw => self.overlay_dirty = true,
+            Outcome::None => {}
+        }
+        self.request_redraw();
+    }
+
+    /// Clavier pendant que le panneau est ouvert : tout lui est réservé.
+    fn palette_keyboard(&mut self, event: &KeyEvent, el: &ActiveEventLoop) {
+        let at = Instant::now();
+        let plain = event.key_without_modifiers();
+        // Un raccourci de panneau bascule vers ce mode, ou ferme le panneau s'il est déjà ouvert.
+        if let Some(cmd) = keymap::command_for(&plain, self.mods) {
+            let mode = match cmd {
+                Command::GotoFile => Some(PaletteMode::Files),
+                Command::CommandPalette => Some(PaletteMode::Commands),
+                Command::GotoLine => Some(PaletteMode::GotoLine),
+                Command::SearchProject => Some(PaletteMode::Search),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                if self
+                    .palette
+                    .as_ref()
+                    .is_some_and(|s| s.palette.mode() == mode)
+                {
+                    self.close_palette();
+                } else {
+                    self.open_palette(mode);
+                }
+                self.touch(at);
+                return;
+            }
+        }
+        let key = match &event.logical_key {
+            Key::Named(NamedKey::Backspace) => Some(PaletteKey::Backspace),
+            Key::Named(NamedKey::Delete) => Some(PaletteKey::Delete),
+            Key::Named(NamedKey::ArrowLeft) => Some(PaletteKey::Left),
+            Key::Named(NamedKey::ArrowRight) => Some(PaletteKey::Right),
+            Key::Named(NamedKey::ArrowUp) => Some(PaletteKey::Up),
+            Key::Named(NamedKey::ArrowDown) => Some(PaletteKey::Down),
+            Key::Named(NamedKey::Home) => Some(PaletteKey::Home),
+            Key::Named(NamedKey::End) => Some(PaletteKey::End),
+            Key::Named(NamedKey::PageUp) => Some(PaletteKey::PageUp),
+            Key::Named(NamedKey::PageDown) => Some(PaletteKey::PageDown),
+            Key::Named(NamedKey::Enter) => Some(PaletteKey::Enter),
+            Key::Named(NamedKey::Escape) => Some(PaletteKey::Escape),
+            _ => None,
+        };
+        let key = key.or_else(|| {
+            if self.mods.control_key() && !self.mods.alt_key() {
+                // Ctrl+V : colle la première ligne du presse-papiers.
+                let is_v = matches!(&plain, Key::Character(s) if s.eq_ignore_ascii_case("v"));
+                return is_v
+                    .then(|| platform::clipboard_get(self.hwnd))
+                    .flatten()
+                    .map(|t| PaletteKey::Text(t.lines().next().unwrap_or("").to_owned()));
+            }
+            event
+                .text
+                .as_ref()
+                .filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
+                .map(|t| PaletteKey::Text(t.to_string()))
+        });
+        if let Some(k) = key {
+            self.palette_apply(&k, el);
+        }
+        self.touch(at);
+    }
+
+    /// Renvoie le contenu du panneau au moteur de rendu s'il a changé.
+    fn refresh_overlay(&mut self) {
+        if !self.overlay_dirty {
+            return;
+        }
+        self.overlay_dirty = false;
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        match &self.palette {
+            Some(st) => {
+                let overlay = st.palette.to_overlay(r.overlay_columns());
+                r.set_overlay(Some(&overlay));
+            }
+            None => r.set_overlay(None),
+        }
+    }
+
+    /// Mesures du panneau, une fois l'image présentée.
+    fn palette_after_present(&mut self, presented: Instant) {
+        if self.palette_settled {
+            if let Some(t) = self.palette_query_at.take() {
+                self.palette_latency.push(presented - t);
+            }
+            self.palette_settled = false;
+        }
+        if let (Some(start), None) = (self.search_started, self.search_first) {
+            if self
+                .palette
+                .as_ref()
+                .is_some_and(|s| !s.palette.items().is_empty())
+            {
+                self.search_first = Some(start.elapsed());
+            }
+        }
+    }
+
     // --- Dessin ------------------------------------------------------------------------------
 
     /// Dessine dans la DIB (sans copier vers la fenêtre).
@@ -581,6 +1137,7 @@ impl App {
         let started = Instant::now();
         self.sync_syntax();
         self.refresh_tabs();
+        self.refresh_overlay();
         self.draw();
         if let Some(r) = self.renderer.as_mut() {
             let result = if self.full_present {
@@ -594,6 +1151,7 @@ impl App {
             }
         }
         let presented = Instant::now();
+        self.palette_after_present(presented);
         if let Some(t) = self.input_at.take() {
             self.latency.push(presented - t);
         }
@@ -700,6 +1258,7 @@ impl App {
             Effect::PrevTab => {
                 self.activate((self.active + self.tabs.len() - 1) % self.tabs.len());
             }
+            Effect::OpenPalette(mode) => self.open_palette(mode),
             Effect::Quit => self.request_quit(el),
         }
     }
@@ -751,6 +1310,46 @@ impl App {
         });
     }
 
+    /// Frappes simulées dans le panneau : `n` caractères, 25 ms d'écart, la saisie est effacée
+    /// entre deux requêtes.
+    fn start_bench_palette(&mut self, n: usize) {
+        self.bench_started = true;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            const QUERIES: [&str; 3] = [
+                "mod_017/sub_05/file_0023.py",
+                "sub_12 file_00 py",
+                "mod_099 sub_19 file_0049 md",
+            ];
+            let mut typed = 0;
+            'all: loop {
+                for q in QUERIES {
+                    for c in q.chars() {
+                        if typed >= n {
+                            break 'all;
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                        let at = Instant::now();
+                        if proxy
+                            .send_event(UserEvent::BenchPalette { at, ch: Some(c) })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        typed += 1;
+                    }
+                    std::thread::sleep(Duration::from_millis(120));
+                    let _ = proxy.send_event(UserEvent::BenchPalette {
+                        at: Instant::now(),
+                        ch: None,
+                    });
+                }
+            }
+            std::thread::sleep(Duration::from_millis(150));
+            let _ = proxy.send_event(UserEvent::BenchDone);
+        });
+    }
+
     fn bench_after_present(&mut self, el: &ActiveEventLoop, frame: Duration) {
         let Some(kind) = self.opts.bench else {
             return;
@@ -771,6 +1370,27 @@ impl App {
             }
             // La frappe démarre à la première réponse de coloration (voir `user_event`).
             BenchKind::Syntax(_) => {}
+            // Le panneau s'ouvre à la première image ; les frappes commencent quand le projet est
+            // indexé (voir `UserEvent::IndexDone`).
+            BenchKind::Palette(_) | BenchKind::PaletteSearch => {
+                if !self.bench_started || kind == BenchKind::PaletteSearch {
+                    if self.palette.is_none() && self.search_started.is_none() {
+                        if kind == BenchKind::PaletteSearch {
+                            self.bench_started = true;
+                            self.open_palette(PaletteMode::Search);
+                            self.search_started = Some(Instant::now());
+                            let q = self.opts.bench_arg.clone().unwrap_or_default();
+                            self.palette_apply(&PaletteKey::Text(q), el);
+                        } else {
+                            self.open_palette(PaletteMode::Files);
+                            self.bench_started = true;
+                        }
+                        self.request_redraw();
+                    } else if self.search_done.is_some() && self.search_first.is_some() {
+                        self.finish_bench(el);
+                    }
+                }
+            }
             BenchKind::Scroll(n) => {
                 if !self.bench_started {
                     self.bench_started = true;
@@ -827,6 +1447,25 @@ impl App {
         if let Some(s) = self.scroll_frames.summary() {
             report.push_str(&format!("  défilement, dessin + copie par image : {s}\n"));
         }
+        if let Some(t) = self.index_time {
+            report.push_str(&format!(
+                "  Goto Anything, parcours + indexation du projet : {:.0} ms\n",
+                ms(t)
+            ));
+        }
+        if let Some(s) = self.palette_latency.summary() {
+            report.push_str(&format!(
+                "  Goto Anything, frappe -> résultats à jour affichés : {s}\n"
+            ));
+        }
+        if let (Some(first), Some(done)) = (self.search_first, self.search_done) {
+            report.push_str(&format!(
+                "  recherche dans le projet : premiers résultats affichés {:.0} ms, terminée {:.0} ms ({} résultats)\n",
+                ms(first),
+                ms(done),
+                self.search_count
+            ));
+        }
         print!("{report}");
         if let Some(path) = &self.opts.bench_out {
             use std::io::Write;
@@ -854,6 +1493,8 @@ impl ApplicationHandler<UserEvent> for App {
                     | BenchKind::Scroll(_)
                     | BenchKind::Open
                     | BenchKind::Syntax(_)
+                    | BenchKind::Palette(_)
+                    | BenchKind::PaletteSearch
             )
         );
         // `PAULWRITE_OFFSCREEN=1` : fenêtre hors de l'écran et sans focus, pour les tests
@@ -912,6 +1553,12 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 self.attach_syntax(self.active, Some(Language::Rust));
             }
+            Some(BenchKind::Palette(_) | BenchKind::PaletteSearch) => {
+                // Le premier argument est le dossier du projet à parcourir, pas un fichier.
+                if !self.opts.paths.is_empty() {
+                    self.project_root = Some(self.opts.paths.remove(0));
+                }
+            }
             _ => {}
         }
 
@@ -942,6 +1589,53 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             UserEvent::BenchDone => self.finish_bench(el),
+            UserEvent::PaletteWake => {
+                let settled = self.refresh_palette_items(false);
+                self.note_settled(settled);
+                self.request_redraw();
+            }
+            UserEvent::IndexDone => {
+                if let Some(st) = self.palette.as_mut() {
+                    st.indexing = false;
+                }
+                if let Some(t) = self.index_started.take() {
+                    self.index_time = Some(t.elapsed());
+                }
+                let settled = self.refresh_palette_items(false);
+                self.note_settled(settled);
+                if let Some(BenchKind::Palette(n)) = self.opts.bench {
+                    // Le projet est indexé : on peut commencer à taper (une seule fois).
+                    if self.palette.is_some() && self.palette_latency.is_empty() {
+                        self.start_bench_palette(n);
+                    }
+                }
+                self.request_redraw();
+            }
+            UserEvent::Search { generation, event } => {
+                self.on_search_event(generation, event);
+                self.request_redraw();
+            }
+            UserEvent::BenchPalette { at, ch } => {
+                match ch {
+                    Some(c) => {
+                        self.palette_query_at = Some(at);
+                        self.palette_settled = false;
+                        self.palette_apply(&PaletteKey::Text(c.to_string()), el);
+                    }
+                    None => {
+                        let len = self
+                            .palette
+                            .as_ref()
+                            .map_or(0, |s| s.palette.query().chars().count());
+                        for _ in 0..len {
+                            self.palette_apply(&PaletteKey::Backspace, el);
+                        }
+                        self.palette_query_at = None;
+                        self.palette_settled = false;
+                    }
+                }
+                self.request_redraw();
+            }
             UserEvent::Syntax(resp) => {
                 let Some(i) = self.tab_index(resp.tab) else {
                     return;
@@ -968,6 +1662,22 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Done(done) => match done {
                 Done::Config(c) => self.config = c,
+                Done::Directory { tab, path } => {
+                    // Un dossier devient la racine du projet ; son onglet n'a pas de raison d'être.
+                    self.project_root = Some(path);
+                    if let Some(i) = self.tab_index(tab) {
+                        self.tabs[i].loading = None;
+                        if self.tabs.len() > 1 {
+                            self.close_now(i);
+                        } else {
+                            self.tabs[i]
+                                .editor
+                                .load(paulwrite_core::Document::new(), None);
+                        }
+                    }
+                    self.tabs_dirty = true;
+                    self.request_redraw();
+                }
                 Done::SaveConfirmed { for_, choice } => {
                     self.confirming = false;
                     match (for_, choice) {
@@ -1022,6 +1732,9 @@ impl ApplicationHandler<UserEvent> for App {
                                     r.invalidate();
                                 }
                                 self.full_present = true;
+                            }
+                            if let Some(l) = self.tabs[i].pending_goto.take() {
+                                self.tabs[i].editor.goto(l, 0);
                             }
                             self.attach_syntax(i, None);
                         }
@@ -1127,6 +1840,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                if self.palette.is_some() {
+                    self.palette_keyboard(&event, el);
+                    return;
+                }
                 let at = Instant::now();
                 let plain = event.key_without_modifiers();
                 if let Some(cmd) = keymap::command_for(&plain, self.mods) {
@@ -1143,6 +1860,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(ime) => {
                 let at = Instant::now();
+                if self.palette.is_some() {
+                    if let Ime::Commit(text) = ime {
+                        self.palette_apply(&PaletteKey::Text(text), el);
+                        self.touch(at);
+                    }
+                    return;
+                }
                 match ime {
                     Ime::Commit(text) => {
                         ed!(self).set_preedit(None);
@@ -1160,6 +1884,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.touch(at);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(st) = self.palette.as_mut() {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y * 3.0,
+                        MouseScrollDelta::PixelDelta(p) => -(p.y as f32) / 20.0,
+                    };
+                    st.palette.scroll(lines.round() as isize);
+                    self.overlay_dirty = true;
+                    self.request_redraw();
+                    return;
+                }
                 let lh = self
                     .renderer
                     .as_ref()
@@ -1188,6 +1922,28 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => {
                 let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
+                if self.palette.is_some() {
+                    // Un clic sur un résultat le valide ; hors du panneau, il se ferme.
+                    if button == MouseButton::Left {
+                        match self.renderer.as_ref().and_then(|r| r.overlay_row_at(x, y)) {
+                            Some(0) => {}
+                            Some(i) => {
+                                let picked = self
+                                    .palette
+                                    .as_mut()
+                                    .is_some_and(|st| st.palette.select_visible(i - 1));
+                                if picked {
+                                    self.accept_palette(el);
+                                } else {
+                                    self.overlay_dirty = true;
+                                }
+                            }
+                            None => self.close_palette(),
+                        }
+                        self.request_redraw();
+                    }
+                    return;
+                }
                 let hit = self.renderer.as_ref().and_then(|r| r.tab_at(x, y));
                 let in_bar = self
                     .renderer
