@@ -9,6 +9,9 @@ use paulwrite_render::{
 /// Couleurs de la deuxième rangée de la démo : « let » mot-clé, la chaîne, le point-virgule.
 const SPANS: [(usize, usize, u8); 3] = [(4, 7, 4), (18, 36, 2), (36, 37, 10)];
 
+/// Soulignements de diagnostics de la démo : une erreur, un avertissement, une information.
+const SQUIGGLES: [(usize, usize, u8); 3] = [(1, 12, 0), (0, 4, 1), (7, 12, 2)];
+
 /// Texte, sélections, curseurs, soulignement.
 type DemoRow = (
     &'static str,
@@ -33,6 +36,11 @@ impl RowSource for Demo {
             carets,
             underline: *underline,
             spans: if i == 1 { &SPANS } else { &[] },
+            squiggles: match i {
+                2 => &SQUIGGLES[..1],
+                5 => &SQUIGGLES[1..],
+                _ => &[],
+            },
         }
     }
 }

@@ -56,6 +56,20 @@ impl Language {
         }
     }
 
+    /// Identifiant de langage du protocole LSP (`languageId`).
+    #[must_use]
+    pub fn lsp_id(self) -> &'static str {
+        match self {
+            Language::Rust => "rust",
+            Language::Json => "json",
+            Language::Toml => "toml",
+            Language::Python => "python",
+            Language::JavaScript => "javascript",
+            Language::Html => "html",
+            Language::Css => "css",
+        }
+    }
+
     pub(crate) fn grammar(self) -> tree_sitter::Language {
         match self {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),

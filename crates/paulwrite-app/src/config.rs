@@ -19,13 +19,31 @@ pub struct Config {
     pub highlight_max_bytes: usize,
     /// Colorer ou non (`highlight = false` la désactive partout).
     pub highlight: bool,
+    /// Serveurs de langage (diagnostics, complétion, définition) : désactivés par défaut, car ils
+    /// lancent des programmes externes. `lsp = true` les active.
+    pub lsp: bool,
+    /// Commande du serveur de chaque langage, par identifiant LSP : `lsp_rust = "rust-analyzer"`.
+    pub lsp_servers: std::collections::HashMap<String, String>,
 }
+
+/// Serveurs de langage proposés par défaut (à installer soi-même ; utilisés si `lsp = true`).
+const DEFAULT_SERVERS: [(&str, &str); 7] = [
+    ("rust", "rust-analyzer"),
+    ("python", "pylsp"),
+    ("javascript", "typescript-language-server --stdio"),
+    ("json", "vscode-json-language-server --stdio"),
+    ("html", "vscode-html-language-server --stdio"),
+    ("css", "vscode-css-language-server --stdio"),
+    ("toml", "taplo lsp stdio"),
+];
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             highlight_max_bytes: DEFAULT_HIGHLIGHT_MAX_BYTES,
             highlight: true,
+            lsp: false,
+            lsp_servers: std::collections::HashMap::new(),
         }
     }
 }
@@ -52,6 +70,14 @@ impl Config {
                     if let Ok(b) = value.parse::<bool>() {
                         c.highlight = b;
                     }
+                }
+                "lsp" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        c.lsp = b;
+                    }
+                }
+                k if k.starts_with("lsp_") && !value.is_empty() => {
+                    c.lsp_servers.insert(k[4..].to_owned(), value.to_owned());
                 }
                 _ => {}
             }
@@ -88,6 +114,18 @@ impl Config {
         c
     }
 
+    /// Commande du serveur de langage de `language` (identifiant LSP : `rust`, `python`…) : celle
+    /// de la configuration, sinon le serveur par défaut.
+    #[must_use]
+    pub fn lsp_server(&self, language: &str) -> Option<String> {
+        self.lsp_servers.get(language).cloned().or_else(|| {
+            DEFAULT_SERVERS
+                .iter()
+                .find(|(l, _)| *l == language)
+                .map(|(_, c)| (*c).to_owned())
+        })
+    }
+
     /// La coloration est-elle active pour un document de `len_bytes` octets ?
     #[must_use]
     pub fn highlights(&self, len_bytes: usize) -> bool {
@@ -116,6 +154,33 @@ mod tests {
         assert_eq!(c.highlight_max_bytes, 1_000_000);
         assert!(!c.highlight);
         assert!(!c.highlights(10));
+    }
+
+    #[test]
+    fn serveurs_de_langage() {
+        let c = Config::default();
+        assert!(
+            !c.lsp,
+            "désactivés par défaut : ils lancent des programmes externes"
+        );
+        assert_eq!(c.lsp_server("rust").as_deref(), Some("rust-analyzer"));
+        assert_eq!(c.lsp_server("cobol"), None);
+        let c = Config::parse(
+            "lsp = true\nlsp_rust = \"C:\\outils\\ra.exe --foo\" # perso\nlsp_python = pyright-langserver --stdio\n",
+        );
+        assert!(c.lsp);
+        assert_eq!(
+            c.lsp_server("rust").as_deref(),
+            Some("C:\\outils\\ra.exe --foo")
+        );
+        assert_eq!(
+            c.lsp_server("python").as_deref(),
+            Some("pyright-langserver --stdio")
+        );
+        assert_eq!(
+            c.lsp_server("json").as_deref(),
+            Some("vscode-json-language-server --stdio")
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
+use paulwrite_lsp as lsp;
 use paulwrite_plugins as plugins;
 use paulwrite_render::{
     platform, since_process_start, Colors, Overlay, OverlayRow, OverlayRowKind, SoftRenderer,
@@ -29,9 +30,9 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Cursor, CursorIcon, Window, WindowId};
 
-use crate::command::{Command, Effect};
+use crate::command::{Command, Effect, LspAction};
 use crate::config::Config;
-use crate::editor::Preedit;
+use crate::editor::{Preedit, Squiggle};
 use crate::keymap;
 use crate::metrics::Samples;
 use crate::palette::{parse_goto, Item, Outcome, Palette, PaletteKey, PaletteMode, Target};
@@ -71,6 +72,8 @@ pub enum UserEvent {
     BenchPalette { at: Instant, ch: Option<char> },
     /// Réponse du thread de plugins Lua.
     Plugin(plugins::Response),
+    /// Événement d'un serveur de langage (diagnostics, résultat de complétion…).
+    Lsp(lsp::Event),
 }
 
 /// Mode de mesure.
@@ -92,6 +95,9 @@ pub enum BenchKind {
     PaletteSearch,
     /// `n` appels de la commande de plugin passée en argument (dossier : `PAULWRITE_PLUGINS_DIR`).
     Plugin(usize),
+    /// `n` frappes dans un fichier Rust avec un serveur de langage actif (commande donnée par
+    /// `PAULWRITE_LSP_SERVER`) : latence de frappe et aller-retour d'une requête.
+    Lsp(usize),
 }
 
 /// Options de la ligne de commande.
@@ -127,6 +133,7 @@ impl Options {
                 "--bench-syntax" => o.bench = Some(BenchKind::Syntax(count("--bench-syntax")?)),
                 "--bench-scroll" => o.bench = Some(BenchKind::Scroll(count("--bench-scroll")?)),
                 "--bench-palette" => o.bench = Some(BenchKind::Palette(count("--bench-palette")?)),
+                "--bench-lsp" => o.bench = Some(BenchKind::Lsp(count("--bench-lsp")?)),
                 "--bench-plugin" => {
                     o.bench = Some(BenchKind::Plugin(count("--bench-plugin")?));
                     o.bench_arg = Some(
@@ -247,6 +254,13 @@ fn match_item(m: search::Match) -> Item {
     }
 }
 
+/// Demande interactive faite à un serveur de langage et pas encore revenue.
+struct LspPending {
+    id: u64,
+    /// Complétion : nombre de caractères d'identifiant avant le curseur au moment de la demande.
+    prefix: usize,
+}
+
 struct App {
     opts: Options,
     config: Config,
@@ -294,6 +308,14 @@ struct App {
     plugin_latency: Samples,
     plugin_sent_at: Option<Instant>,
     plugin_bench_left: usize,
+    // serveurs de langage (thread dédié, démarré à la demande)
+    lsp_tx: Option<Sender<lsp::Request>>,
+    lsp_next_id: u64,
+    lsp_pending: Option<LspPending>,
+    lsp_errors_shown: std::collections::HashSet<String>,
+    lsp_latency: Samples,
+    lsp_req_at: Option<Instant>,
+    bench_keys: usize,
 
     palette: Option<PaletteState>,
     /// Le contenu du panneau a changé : à renvoyer au moteur de rendu.
@@ -369,6 +391,13 @@ impl App {
             plugin_latency: Samples::default(),
             plugin_sent_at: None,
             plugin_bench_left: 0,
+            lsp_tx: None,
+            lsp_next_id: 0,
+            lsp_pending: None,
+            lsp_errors_shown: std::collections::HashSet::new(),
+            lsp_latency: Samples::default(),
+            lsp_req_at: None,
+            bench_keys: 0,
             palette: None,
             overlay_dirty: false,
             palette_query_at: None,
@@ -599,6 +628,7 @@ impl App {
     /// Ferme l'onglet sans rien demander. Il en reste toujours au moins un.
     fn close_now(&mut self, index: usize) {
         self.plugin_event("close", Some(index));
+        self.lsp_close_tab(index);
         let tab = self.tabs.remove(index);
         if tab.syntax_on {
             self.syntax_tx
@@ -716,6 +746,372 @@ impl App {
             return;
         }
         el.exit();
+    }
+
+    // --- Serveurs de langage -----------------------------------------------------------------
+
+    /// Serveurs configurés, par identifiant de langage LSP.
+    fn lsp_servers(&self) -> HashMap<String, lsp::ServerConfig> {
+        Language::ALL
+            .iter()
+            .filter_map(|l| {
+                let cfg = lsp::ServerConfig::parse(&self.config.lsp_server(l.lsp_id())?)?;
+                Some((l.lsp_id().to_owned(), cfg))
+            })
+            .collect()
+    }
+
+    /// Démarre le client LSP (un thread ; les serveurs ne démarrent qu'à la première ouverture
+    /// d'un document de leur langage) si les serveurs de langage sont activés.
+    fn ensure_lsp(&mut self) -> bool {
+        if !self.config.lsp {
+            return false;
+        }
+        if self.lsp_tx.is_none() {
+            let proxy = self.proxy.clone();
+            self.lsp_tx = Some(lsp::spawn(self.lsp_servers(), move |e| {
+                let _ = proxy.send_event(UserEvent::Lsp(e));
+            }));
+        }
+        true
+    }
+
+    /// Ouvre le document de l'onglet `index` dans le serveur de son langage, s'il y en a un.
+    fn lsp_open_tab(&mut self, index: usize) {
+        if !self.config.lsp {
+            return;
+        }
+        let tab = &self.tabs[index];
+        let (Some(path), Some(language)) = (tab.editor.path().map(PathBuf::from), tab.language)
+        else {
+            return;
+        };
+        if self.config.lsp_server(language.lsp_id()).is_none() || !self.ensure_lsp() {
+            return;
+        }
+        let root = self.project_root.clone();
+        let tab = &mut self.tabs[index];
+        tab.editor.enable_lsp(true);
+        tab.lsp_path = Some(path.clone());
+        tab.lsp_version = 1;
+        let text = tab.editor.document().buffer().rope().clone();
+        if let Some(tx) = &self.lsp_tx {
+            tx.send(lsp::Request::Open {
+                path,
+                language: language.lsp_id().to_owned(),
+                root,
+                version: 1,
+                text,
+            })
+            .ok();
+        }
+    }
+
+    /// Referme le document de l'onglet `index` dans son serveur de langage.
+    fn lsp_close_tab(&mut self, index: usize) {
+        let tab = &mut self.tabs[index];
+        if let Some(path) = tab.lsp_path.take() {
+            tab.editor.enable_lsp(false);
+            tab.diagnostics.clear();
+            if let Some(tx) = &self.lsp_tx {
+                tx.send(lsp::Request::Close { path }).ok();
+            }
+        }
+    }
+
+    /// Prévient le serveur de langage que le document a été enregistré.
+    fn lsp_save(&self, index: usize) {
+        if let (Some(tx), Some(path)) = (&self.lsp_tx, &self.tabs[index].lsp_path) {
+            tx.send(lsp::Request::Save { path: path.clone() }).ok();
+        }
+    }
+
+    /// Transmet au serveur de langage les modifications de l'onglet actif (une fois par image :
+    /// les frappes d'une même image sont regroupées).
+    fn sync_lsp(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        let Some(path) = tab.lsp_path.clone() else {
+            return;
+        };
+        let changes = tab.editor.take_lsp_changes();
+        if changes.is_empty() {
+            return;
+        }
+        tab.lsp_version += 1;
+        let request = lsp::Request::Change {
+            path,
+            version: tab.lsp_version,
+            changes,
+            text: tab.editor.document().buffer().rope().clone(),
+        };
+        if let Some(tx) = &self.lsp_tx {
+            tx.send(request).ok();
+        }
+    }
+
+    /// Commande de langage : complétion, définition, survol ou liste des diagnostics.
+    fn lsp_request(&mut self, action: LspAction) {
+        if action == LspAction::Diagnostics {
+            self.open_diagnostics();
+            return;
+        }
+        if !self.config.lsp {
+            self.toast("Serveurs de langage désactivés : ajoutez « lsp = true » à config.toml");
+            return;
+        }
+        let tab = &self.tabs[self.active];
+        let Some(path) = tab.lsp_path.clone() else {
+            self.toast("Pas de serveur de langage pour ce document");
+            return;
+        };
+        let (line, col16) = tab.editor.caret_lsp_position();
+        let prefix = tab.editor.word_prefix_chars();
+        self.lsp_next_id += 1;
+        let id = self.lsp_next_id;
+        let request = match action {
+            LspAction::Completion => lsp::Request::Completion {
+                id,
+                path,
+                line,
+                col16,
+            },
+            LspAction::Definition => lsp::Request::Definition {
+                id,
+                path,
+                line,
+                col16,
+            },
+            LspAction::Hover | LspAction::Diagnostics => lsp::Request::Hover {
+                id,
+                path,
+                line,
+                col16,
+            },
+        };
+        self.lsp_pending = Some(LspPending { id, prefix });
+        if let Some(tx) = &self.lsp_tx {
+            tx.send(request).ok();
+        }
+    }
+
+    fn take_lsp_pending(&mut self, id: u64) -> Option<LspPending> {
+        if self.lsp_pending.as_ref().is_some_and(|p| p.id == id) {
+            self.lsp_pending.take()
+        } else {
+            None
+        }
+    }
+
+    /// Ouvre un panneau en lecture seule (diagnostics, définitions, survol).
+    fn open_list_palette(&mut self, mode: PaletteMode, items: Vec<Item>, note: String) {
+        self.close_palette();
+        let mut st = PaletteState {
+            palette: Palette::new(mode),
+            root: self.palette_root(),
+            finder: None,
+            commands: Vec::new(),
+            candidate_index: HashMap::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            reset: true,
+            indexing: false,
+            generation: 0,
+            search_matches: 0,
+        };
+        st.palette.set_items(items, true);
+        st.palette.set_note(note);
+        self.palette = Some(st);
+        self.overlay_dirty = true;
+        self.request_redraw();
+    }
+
+    /// Ouvre la liste de complétion (la saisie filtre les éléments).
+    fn open_completion(&mut self, items: &[lsp::CompletionItem], prefix: usize) {
+        self.close_palette();
+        let finder = FuzzyFinder::new(self.wake_callback());
+        let injector = finder.injector();
+        let mut st = PaletteState {
+            palette: Palette::new(PaletteMode::Completion),
+            root: self.palette_root(),
+            finder: None,
+            commands: Vec::new(),
+            candidate_index: HashMap::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            reset: true,
+            indexing: false,
+            generation: 0,
+            search_matches: 0,
+        };
+        for (i, c) in items.iter().take(5000).enumerate() {
+            // Un séparateur invisible + l'indice rend chaque candidat unique (deux éléments
+            // peuvent porter le même libellé).
+            let candidate = format!("{}\u{1}{i}", c.label);
+            st.candidate_index
+                .insert(candidate.clone(), st.commands.len());
+            st.commands.push((
+                Target::Completion(c.insert_text.clone(), prefix),
+                c.label.clone(),
+                c.detail.clone(),
+            ));
+            FuzzyFinder::add(&injector, candidate);
+        }
+        st.finder = Some(finder);
+        self.palette = Some(st);
+        let settled = self.refresh_palette_items(true);
+        self.note_settled(settled);
+        self.overlay_dirty = true;
+        self.request_redraw();
+    }
+
+    /// Liste des diagnostics du document courant.
+    fn open_diagnostics(&mut self) {
+        let mut diags = self.tabs[self.active].diagnostics.clone();
+        diags.sort_by_key(|d| (d.start, d.severity));
+        let items: Vec<Item> = diags
+            .iter()
+            .map(|d| Item {
+                label: format!(
+                    "{}:{}  {}",
+                    d.start.0 + 1,
+                    d.start.1 + 1,
+                    d.message.lines().next().unwrap_or("")
+                ),
+                detail: match d.severity {
+                    lsp::Severity::Error => "erreur",
+                    lsp::Severity::Warning => "avertissement",
+                    lsp::Severity::Information => "info",
+                    lsp::Severity::Hint => "suggestion",
+                }
+                .to_owned(),
+                highlights: Vec::new(),
+                target: Target::Line(d.start.0 + 1),
+            })
+            .collect();
+        let note = if items.is_empty() {
+            "Aucun diagnostic".to_owned()
+        } else {
+            format!("{} diagnostic(s)", items.len())
+        };
+        self.open_list_palette(PaletteMode::Diagnostics, items, note);
+    }
+
+    /// Événement d'un serveur de langage.
+    fn on_lsp_event(&mut self, event: lsp::Event) {
+        match event {
+            lsp::Event::Diagnostics { path, items } => {
+                let key = lsp::path_key(&path);
+                let Some(i) = self.tabs.iter().position(|t| {
+                    t.lsp_path.as_deref().map(lsp::path_key).as_deref() == Some(&key)
+                }) else {
+                    return;
+                };
+                let squiggles = items
+                    .iter()
+                    .map(|d| Squiggle {
+                        start: d.start,
+                        end: d.end,
+                        severity: match d.severity {
+                            lsp::Severity::Error => 0,
+                            lsp::Severity::Warning => 1,
+                            _ => 2,
+                        },
+                    })
+                    .collect();
+                self.tabs[i].editor.set_squiggles(squiggles);
+                self.tabs[i].diagnostics = items;
+                if i == self.active {
+                    self.request_redraw();
+                }
+            }
+            lsp::Event::Completion { id, items } => {
+                let Some(p) = self.take_lsp_pending(id) else {
+                    return;
+                };
+                if items.is_empty() {
+                    self.toast("Aucune complétion");
+                } else {
+                    self.open_completion(&items, p.prefix);
+                }
+            }
+            lsp::Event::Hover { id, text } => {
+                if matches!(self.opts.bench, Some(BenchKind::Lsp(_))) {
+                    if let Some(t) = self.lsp_req_at.take() {
+                        self.lsp_latency.push(t.elapsed());
+                    }
+                    return;
+                }
+                if self.take_lsp_pending(id).is_none() {
+                    return;
+                }
+                match text {
+                    None => self.toast("Rien à afficher sous le curseur"),
+                    Some(text) => {
+                        let items: Vec<Item> = text
+                            .lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .take(60)
+                            .map(|l| Item {
+                                label: l.trim_end().to_owned(),
+                                detail: String::new(),
+                                highlights: Vec::new(),
+                                target: Target::Nothing,
+                            })
+                            .collect();
+                        self.open_list_palette(PaletteMode::Hover, items, String::new());
+                    }
+                }
+            }
+            lsp::Event::Definition { id, locations } => {
+                if self.take_lsp_pending(id).is_none() {
+                    return;
+                }
+                match locations.as_slice() {
+                    [] => self.toast("Définition introuvable"),
+                    [one] => self.open_path_at(one.path.clone(), Some(one.line + 1)),
+                    many => {
+                        let root = self.palette_root();
+                        let items: Vec<Item> = many
+                            .iter()
+                            .map(|l| {
+                                let shown = l.path.strip_prefix(&root).unwrap_or(&l.path);
+                                Item {
+                                    label: format!("{}:{}", shown.display(), l.line + 1),
+                                    detail: String::new(),
+                                    highlights: Vec::new(),
+                                    target: Target::Match {
+                                        path: l.path.to_string_lossy().into_owned(),
+                                        line: l.line as u64 + 1,
+                                    },
+                                }
+                            })
+                            .collect();
+                        let note = format!("{} définitions", items.len());
+                        self.open_list_palette(PaletteMode::Locations, items, note);
+                    }
+                }
+            }
+            lsp::Event::Unavailable { id, reason } => {
+                if self.take_lsp_pending(id).is_some() {
+                    self.toast(reason);
+                }
+            }
+            lsp::Event::ServerStarted { language } => {
+                self.toast(format!("Serveur de langage « {language} » prêt"));
+                if let Some(BenchKind::Lsp(n)) = self.opts.bench {
+                    self.start_bench_typing(n);
+                }
+            }
+            lsp::Event::ServerError { language, message } => {
+                // une seule boîte de message par langage (sinon une par document ouvert)
+                if self.lsp_errors_shown.insert(language.clone()) {
+                    self.show_error(format!(
+                        "Serveur de langage « {language} » indisponible :\n{message}\n\nInstallez-le ou changez `lsp_{language}` dans la configuration."
+                    ));
+                }
+            }
+            lsp::Event::ServerExited { language } => {
+                self.toast(format!("Le serveur de langage « {language} » s'est arrêté"));
+            }
+        }
     }
 
     // --- Plugins Lua -------------------------------------------------------------------------
@@ -916,7 +1312,12 @@ impl App {
                 }
                 st.finder = Some(finder);
             }
-            PaletteMode::GotoLine => {}
+            // Ces panneaux sont ouverts par les réponses du serveur de langage, pas par un raccourci.
+            PaletteMode::GotoLine
+            | PaletteMode::Completion
+            | PaletteMode::Diagnostics
+            | PaletteMode::Locations
+            | PaletteMode::Hover => {}
             PaletteMode::Search => {
                 st.palette.set_note(format!(
                     "Dans {}",
@@ -960,7 +1361,7 @@ impl App {
         };
         let mode = st.palette.mode();
         let settled = match mode {
-            PaletteMode::Files | PaletteMode::Commands => {
+            PaletteMode::Files | PaletteMode::Commands | PaletteMode::Completion => {
                 let Some(finder) = st.finder.as_mut() else {
                     return true;
                 };
@@ -1026,7 +1427,10 @@ impl App {
                 st.palette.set_items(items, true);
                 true
             }
-            PaletteMode::Search => true,
+            PaletteMode::Search
+            | PaletteMode::Diagnostics
+            | PaletteMode::Locations
+            | PaletteMode::Hover => true,
         };
         self.overlay_dirty = true;
         settled
@@ -1040,7 +1444,7 @@ impl App {
         let query = st.palette.query().to_owned();
         st.reset = true;
         match st.palette.mode() {
-            PaletteMode::Files | PaletteMode::Commands => {
+            PaletteMode::Files | PaletteMode::Commands | PaletteMode::Completion => {
                 if let Some(finder) = st.finder.as_mut() {
                     finder.set_query(&query);
                     // Laisse 1 ms au classement pour publier un résultat tout de suite (cas
@@ -1055,6 +1459,7 @@ impl App {
                 self.note_settled(settled);
             }
             PaletteMode::Search => self.start_search(query),
+            PaletteMode::Diagnostics | PaletteMode::Locations | PaletteMode::Hover => {}
         }
         self.overlay_dirty = true;
     }
@@ -1163,6 +1568,12 @@ impl App {
                 self.open_path_at(root.join(path), Some(line as usize));
             }
             Target::Plugin(name) => self.invoke_plugin(name),
+            Target::Completion(text, prefix) => {
+                let now = self.now_ms();
+                ed!(self).complete(prefix, &text, now);
+                self.request_redraw();
+            }
+            Target::Nothing => {}
         }
     }
 
@@ -1171,6 +1582,15 @@ impl App {
         let Some(st) = self.palette.as_mut() else {
             return;
         };
+        // Diagnostics, définitions, survol : la liste est fixe, la saisie ne sert à rien.
+        if st.palette.mode().is_static()
+            && matches!(
+                key,
+                PaletteKey::Text(_) | PaletteKey::Backspace | PaletteKey::Delete
+            )
+        {
+            return;
+        }
         match st.palette.handle(key) {
             Outcome::QueryChanged => self.palette_query_changed(),
             Outcome::Accept => self.accept_palette(el),
@@ -1281,6 +1701,9 @@ impl App {
                             .collect()
                     });
                 }
+                PaletteMode::Completion => {
+                    palette.fill_visible_highlights(|item| finder.indices(&item.label));
+                }
                 _ => {}
             }
         }
@@ -1352,6 +1775,7 @@ impl App {
     fn redraw(&mut self, el: &ActiveEventLoop) {
         let started = Instant::now();
         self.sync_syntax();
+        self.sync_lsp();
         self.refresh_tabs();
         self.refresh_overlay();
         self.draw();
@@ -1478,6 +1902,7 @@ impl App {
                 self.activate((self.active + self.tabs.len() - 1) % self.tabs.len());
             }
             Effect::OpenPalette(mode) => self.open_palette(mode),
+            Effect::Lsp(action) => self.lsp_request(action),
             Effect::ReloadPlugins => {
                 if let Some(tx) = &self.plugins_tx {
                     self.plugin_reload_requested = true;
@@ -1600,6 +2025,8 @@ impl App {
             }
             // La frappe démarre à la première réponse de coloration (voir `user_event`).
             BenchKind::Syntax(_) => {}
+            // La frappe démarre quand le serveur de langage est prêt (voir `on_lsp_event`).
+            BenchKind::Lsp(_) => {}
             BenchKind::Plugin(n) => {
                 if !self.plugins_started {
                     self.plugin_bench_left = n;
@@ -1683,6 +2110,11 @@ impl App {
         if let Some(s) = self.scroll_frames.summary() {
             report.push_str(&format!("  défilement, dessin + copie par image : {s}\n"));
         }
+        if let Some(s) = self.lsp_latency.summary() {
+            report.push_str(&format!(
+                "  serveur de langage, aller-retour d'une requête de survol (serveur local) : {s}\n"
+            ));
+        }
         if let Some((loaded, commands, time)) = self.plugin_load {
             report.push_str(&format!(
                 "  plugins : {loaded} chargé(s), {commands} commande(s), chargement {:.1} ms (thread dédié)\n",
@@ -1752,6 +2184,7 @@ impl ApplicationHandler<UserEvent> for App {
                     | BenchKind::Palette(_)
                     | BenchKind::PaletteSearch
                     | BenchKind::Plugin(_)
+                    | BenchKind::Lsp(_)
             )
         );
         // `PAULWRITE_OFFSCREEN=1` : fenêtre hors de l'écran et sans focus, pour les tests
@@ -1807,8 +2240,29 @@ impl ApplicationHandler<UserEvent> for App {
                 self.config = Config {
                     highlight_max_bytes: usize::MAX,
                     highlight: true,
+                    ..Config::default()
                 };
                 self.attach_syntax(self.active, Some(Language::Rust));
+            }
+            Some(BenchKind::Lsp(_)) => {
+                ed!(self).load(
+                    paulwrite_core::Document::from_text(&synthetic_rust(5000)),
+                    None,
+                );
+                if let Some(rows) = self.rows_now() {
+                    ed!(self).set_viewport_rows(rows);
+                }
+                let server = std::env::var("PAULWRITE_LSP_SERVER").unwrap_or_default();
+                self.config = Config {
+                    highlight_max_bytes: usize::MAX,
+                    lsp: true,
+                    lsp_servers: HashMap::from([("rust".to_owned(), server)]),
+                    ..Config::default()
+                };
+                // Un chemin fictif suffit : le client n'ouvre pas le fichier, il reçoit son texte.
+                ed!(self).set_path(std::env::temp_dir().join("paulwrite-bench-lsp.rs"));
+                self.attach_syntax(self.active, Some(Language::Rust));
+                self.lsp_open_tab(self.active);
             }
             Some(BenchKind::Palette(_) | BenchKind::PaletteSearch) => {
                 // Le premier argument est le dossier du projet à parcourir, pas un fichier.
@@ -1841,11 +2295,30 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::BenchKey(at) => {
                 let now = self.now_ms();
                 ed!(self).insert_text("x", now);
+                self.bench_keys += 1;
+                if matches!(self.opts.bench, Some(BenchKind::Lsp(_))) && self.bench_keys % 10 == 0 {
+                    // Une requête de survol toutes les 10 frappes : aller-retour avec le serveur.
+                    if let Some(path) = self.tabs[self.active].lsp_path.clone() {
+                        self.lsp_next_id += 1;
+                        let (line, col16) = ed!(self).caret_lsp_position();
+                        self.lsp_req_at = Some(Instant::now());
+                        if let Some(tx) = &self.lsp_tx {
+                            tx.send(lsp::Request::Hover {
+                                id: self.lsp_next_id,
+                                path,
+                                line,
+                                col16,
+                            })
+                            .ok();
+                        }
+                    }
+                }
                 self.input_at.get_or_insert(at);
                 self.last_edit_at = Some(at);
                 self.request_redraw();
             }
             UserEvent::BenchDone => self.finish_bench(el),
+            UserEvent::Lsp(event) => self.on_lsp_event(event),
             UserEvent::Plugin(resp) => match resp {
                 plugins::Response::Loaded(report) => {
                     self.plugin_commands = report.commands.clone();
@@ -1960,7 +2433,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Done(done) => match done {
-                Done::Config(c) => self.config = c,
+                Done::Config(c) => {
+                    // Les modes de mesure ont leur propre configuration (voir `resumed`).
+                    if !self.is_bench() {
+                        self.config = c;
+                    }
+                }
                 Done::Directory { tab, path } => {
                     // Un dossier devient la racine du projet ; son onglet n'a pas de raison d'être.
                     self.project_root = Some(path);
@@ -2037,6 +2515,7 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             self.attach_syntax(i, None);
                             self.plugin_event("open", Some(i));
+                            self.lsp_open_tab(i);
                         }
                         Err(e) => {
                             self.show_error(format!(
@@ -2071,6 +2550,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 self.tabs_dirty = true;
                                 self.plugin_event("save", Some(i));
+                                self.lsp_save(i);
                             }
                             match self.after_save.take() {
                                 Some(AfterSave::CloseTab(id)) if id == tab => {
@@ -2100,9 +2580,11 @@ impl ApplicationHandler<UserEvent> for App {
                     path: Some(path),
                 } => {
                     if let Some(i) = self.tab_index(tab) {
+                        self.lsp_close_tab(i);
                         self.tabs[i].editor.set_path(path);
                         // Le nouveau nom peut changer le langage (« .txt » devenu « .rs »).
                         self.attach_syntax(i, None);
+                        self.lsp_open_tab(i);
                         self.start_save(i);
                         self.tabs_dirty = true;
                         self.request_redraw();

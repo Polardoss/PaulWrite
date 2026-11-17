@@ -40,6 +40,9 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             NamedKey::End => Some(motion(Motion::LineEnd, Some(Motion::DocEnd))),
             NamedKey::PageUp => Some(Command::PageUp(shift)),
             NamedKey::PageDown => Some(Command::PageDown(shift)),
+            NamedKey::Space if ctrl && !shift => Some(Command::LspCompletion),
+            NamedKey::F12 if !ctrl && !shift => Some(Command::LspDefinition),
+            NamedKey::F1 if !ctrl && !shift => Some(Command::LspHover),
             NamedKey::Enter => Some(Command::InsertNewline),
             NamedKey::Tab if ctrl && shift => Some(Command::PrevTab),
             NamedKey::Tab if ctrl => Some(Command::NextTab),
@@ -63,6 +66,7 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("p", false) => Some(Command::GotoFile),
             ("p", true) => Some(Command::CommandPalette),
             ("g", _) => Some(Command::GotoLine),
+            ("m", true) => Some(Command::LspDiagnostics),
             ("f", true) => Some(Command::SearchProject),
             ("w", _) => Some(Command::CloseTab),
             ("q", _) => Some(Command::Quit),
@@ -77,7 +81,10 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
 #[must_use]
 pub fn shortcut_label(cmd: Command) -> Option<String> {
     use NamedKey::*;
-    let named: [(NamedKey, &str); 13] = [
+    let named: [(NamedKey, &str); 16] = [
+        (Space, "Espace"),
+        (F1, "F1"),
+        (F12, "F12"),
         (ArrowLeft, "←"),
         (ArrowRight, "→"),
         (ArrowUp, "↑"),
@@ -218,6 +225,40 @@ mod tests {
         assert_eq!(shortcut_label(Command::Quit).as_deref(), Some("Ctrl+Q"));
         // pas de raccourci : paragraphe précédent sans sélection
         assert_eq!(shortcut_label(Command::Move(Motion::ParagraphUp)), None);
+    }
+
+    #[test]
+    fn raccourcis_du_langage() {
+        let c = ModifiersState::CONTROL;
+        assert_eq!(
+            command_for(&named(NamedKey::Space), c),
+            Some(Command::LspCompletion)
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::Space), NONE),
+            None,
+            "l'espace seul est du texte"
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::F12), NONE),
+            Some(Command::LspDefinition)
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::F1), NONE),
+            Some(Command::LspHover)
+        );
+        assert_eq!(
+            command_for(&ch("M"), c | ModifiersState::SHIFT),
+            Some(Command::LspDiagnostics)
+        );
+        assert_eq!(
+            shortcut_label(Command::LspCompletion).as_deref(),
+            Some("Ctrl+Espace")
+        );
+        assert_eq!(
+            shortcut_label(Command::LspDefinition).as_deref(),
+            Some("F12")
+        );
     }
 
     #[test]

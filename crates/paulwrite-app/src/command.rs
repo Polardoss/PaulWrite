@@ -51,6 +51,14 @@ pub enum Command {
     SearchProject,
     /// Recharger les plugins Lua depuis le disque.
     ReloadPlugins,
+    /// Complétion du serveur de langage à la position du curseur.
+    LspCompletion,
+    /// Aller à la définition du symbole sous le curseur.
+    LspDefinition,
+    /// Texte de survol (documentation, type) du symbole sous le curseur.
+    LspHover,
+    /// Liste des diagnostics (erreurs, avertissements) du document.
+    LspDiagnostics,
     Quit,
 }
 
@@ -116,6 +124,10 @@ impl Command {
             Command::GotoLine => "goto.line",
             Command::SearchProject => "search.project",
             Command::ReloadPlugins => "plugins.reload",
+            Command::LspCompletion => "lsp.completion",
+            Command::LspDefinition => "lsp.definition",
+            Command::LspHover => "lsp.hover",
+            Command::LspDiagnostics => "lsp.diagnostics",
             Command::Quit => "app.quit",
         }
     }
@@ -163,6 +175,10 @@ impl Command {
             Command::GotoLine,
             Command::SearchProject,
             Command::ReloadPlugins,
+            Command::LspCompletion,
+            Command::LspDefinition,
+            Command::LspHover,
+            Command::LspDiagnostics,
             Command::Quit,
         ]);
         v
@@ -205,6 +221,10 @@ impl Command {
             Command::GotoLine => "Aller à la ligne",
             Command::SearchProject => "Rechercher dans le projet",
             Command::ReloadPlugins => "Plugins : recharger",
+            Command::LspCompletion => "Langage : complétion",
+            Command::LspDefinition => "Langage : aller à la définition",
+            Command::LspHover => "Langage : survol (documentation)",
+            Command::LspDiagnostics => "Langage : afficher les diagnostics",
             Command::Quit => "Application : quitter",
         }
     }
@@ -292,7 +312,18 @@ pub enum Effect {
     OpenPalette(PaletteMode),
     /// Recharger les plugins Lua.
     ReloadPlugins,
+    /// Demande au serveur de langage (voir [`LspAction`]).
+    Lsp(LspAction),
     Quit,
+}
+
+/// Ce qu'on demande au serveur de langage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LspAction {
+    Completion,
+    Definition,
+    Hover,
+    Diagnostics,
 }
 
 #[cfg(test)]

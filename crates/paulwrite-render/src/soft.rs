@@ -44,6 +44,8 @@ const BR_TAB_DIM: usize = BR_TABBAR + 1;
 const BR_TAB_ACCENT: usize = BR_TABBAR + 2;
 /// Fond du panneau flottant (palette de commandes, Goto Anything).
 const BR_OVERLAY_BG: usize = BR_TABBAR + 3;
+/// Soulignements des diagnostics : erreur, avertissement, information (3 pinceaux consécutifs).
+const BR_SQUIGGLE: usize = BR_TABBAR + 4;
 /// Index de la première rangée de l'éditeur recouverte par le panneau flottant.
 const OVERLAY_FIRST_ROW: usize = 1;
 /// Catégorie de coloration des caractères qui correspondent à la saisie dans le panneau.
@@ -201,6 +203,9 @@ pub struct Row<'a> {
     pub underline: Option<(usize, usize)>,
     /// Plages colorées `(début, fin, catégorie)` en UTF-16, triées et sans chevauchement.
     pub spans: &'a [(usize, usize, u8)],
+    /// Soulignements ondulés `(début, fin, gravité)` en UTF-16 : diagnostics d'un serveur de
+    /// langage. Gravité : 0 erreur, 1 avertissement, 2 information.
+    pub squiggles: &'a [(usize, usize, u8)],
 }
 
 /// Source des rangées visibles (évite d'allouer un tableau par image).
@@ -250,6 +255,12 @@ fn deco_hash(row: &Row<'_>) -> u64 {
     }
     mix(usize::MAX - 2);
     for &(a, b, k) in row.spans {
+        mix(a);
+        mix(b);
+        mix(usize::from(k));
+    }
+    mix(usize::MAX - 3);
+    for &(a, b, k) in row.squiggles {
         mix(a);
         mix(b);
         mix(usize::from(k));
@@ -392,6 +403,9 @@ impl SoftRenderer {
                 dim(colors.text, 0.58),
                 colors.kinds[4],
                 lift(colors.background),
+                [0.93, 0.33, 0.33],
+                [0.90, 0.75, 0.30],
+                [0.35, 0.65, 0.95],
             ] {
                 brushes.push(
                     rt.CreateSolidColorBrush(&rgb(c), None)?
@@ -1160,6 +1174,33 @@ impl SoftRenderer {
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
         }
+        for &(a, b, severity) in row.squiggles {
+            let x0 = x_at(a);
+            let x1 = if b > a { x_at(b) } else { x0 + adv };
+            // Ligne ondulée : de petits segments alternativement en haut et en bas.
+            let brush = BR_SQUIGGLE + usize::from(severity.min(2));
+            let step = (2.0 * self.scale).round().max(2.0);
+            let thick = self.scale.round().max(1.0);
+            let base = y + lh - 2.0 * thick - 1.0;
+            let mut x = x0;
+            let mut up = false;
+            let mut n = 0;
+            while x < x1 && n < 600 {
+                let off = if up { 0.0 } else { thick };
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: x,
+                        top: base + off,
+                        right: (x + step).min(x1),
+                        bottom: base + off + thick,
+                    },
+                    &self.brushes[brush],
+                );
+                x += step;
+                up = !up;
+                n += 1;
+            }
+        }
         if let Some((a, b)) = row.underline {
             let (x0, x1) = (x_at(a), x_at(b));
             self.rt.FillRectangle(
@@ -1413,6 +1454,7 @@ mod tests {
                 carets: &self.carets[i],
                 underline: None,
                 spans: &[],
+                squiggles: &[],
             }
         }
     }
@@ -1581,6 +1623,60 @@ mod tests {
                 ..Row::default()
             }
         }
+    }
+
+    /// Source à une seule rangée avec des soulignements.
+    struct Squiggled<'a> {
+        squiggles: &'a [(usize, usize, u8)],
+    }
+
+    impl RowSource for Squiggled<'_> {
+        fn len(&self) -> usize {
+            1
+        }
+        fn row(&self, _: usize) -> Row<'_> {
+            Row {
+                text: "let mauvaise_ligne = 1;",
+                squiggles: self.squiggles,
+                ..Row::default()
+            }
+        }
+    }
+
+    #[test]
+    fn les_soulignements_s_appliquent_et_se_retirent() {
+        let mut r = renderer();
+        r.draw(&Squiggled { squiggles: &[] }, 0).unwrap();
+        let plain = r.pixels().to_vec();
+        r.draw(
+            &Squiggled {
+                squiggles: &[(4, 18, 0)],
+            },
+            0,
+        )
+        .unwrap();
+        let marked = r.pixels().to_vec();
+        assert_ne!(plain, marked, "le soulignement n'a pas été dessiné");
+        // chaque gravité a sa couleur
+        r.draw(
+            &Squiggled {
+                squiggles: &[(4, 18, 1)],
+            },
+            0,
+        )
+        .unwrap();
+        assert_ne!(r.pixels(), marked.as_slice());
+        // plage vide : un soulignement d'un caractère ; hors du texte : rien ne plante
+        r.draw(
+            &Squiggled {
+                squiggles: &[(5, 5, 2), (90, 99, 0)],
+            },
+            0,
+        )
+        .unwrap();
+        // retour à l'état sans soulignement : pixels identiques à l'image d'origine
+        r.draw(&Squiggled { squiggles: &[] }, 0).unwrap();
+        assert_eq!(r.pixels(), plain.as_slice());
     }
 
     #[test]

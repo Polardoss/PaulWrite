@@ -6,11 +6,11 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use paulwrite_core::motion;
-use paulwrite_core::{Document, Motion, Selection, SelectionSet, TextEdit};
+use paulwrite_core::{Document, Motion, Selection, SelectionSet, TextChange, TextEdit};
 use paulwrite_render::{Row, RowSource};
 use paulwrite_syntax::Span;
 
-use crate::command::{Command, Effect};
+use crate::command::{Command, Effect, LspAction};
 use crate::palette::PaletteMode;
 use crate::spans::SpanCache;
 
@@ -20,6 +20,15 @@ pub struct Preedit {
     pub text: String,
     /// Position du curseur dans `text`, en octets.
     pub cursor: Option<usize>,
+}
+
+/// Un soulignement de diagnostic : plage `(ligne, colonne UTF-16)` et gravité (0 erreur,
+/// 1 avertissement, 2 information).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Squiggle {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub severity: u8,
 }
 
 /// Remplace les sauts de ligne de `text` par ceux du document.
@@ -57,6 +66,9 @@ pub struct Editor {
     row_carets: Vec<Vec<usize>>,
     row_underline: Vec<Option<(usize, usize)>>,
     row_spans: Vec<Vec<(usize, usize, u8)>>,
+    row_squiggles: Vec<Vec<(usize, usize, u8)>>,
+    /// Diagnostics du serveur de langage (positions telles que le serveur les a envoyées).
+    squiggles: Vec<Squiggle>,
     ime_anchor: Option<(usize, usize)>,
     /// Plages colorées (coloration syntaxique) ; vide si la coloration est inactive.
     spans: SpanCache,
@@ -93,6 +105,8 @@ impl Editor {
             row_carets: Vec::new(),
             row_underline: Vec::new(),
             row_spans: Vec::new(),
+            row_squiggles: Vec::new(),
+            squiggles: Vec::new(),
             ime_anchor: None,
             spans: SpanCache::default(),
         }
@@ -165,6 +179,63 @@ impl Editor {
         if !on {
             self.spans.clear();
         }
+    }
+
+    /// Active ou désactive le journal des modifications au format LSP (serveur de langage).
+    pub fn enable_lsp(&mut self, on: bool) {
+        self.doc.track_changes(on);
+        if !on {
+            self.squiggles.clear();
+        }
+    }
+
+    /// Modifications au format LSP faites depuis le dernier appel, pour le serveur de langage.
+    pub fn take_lsp_changes(&mut self) -> Vec<TextChange> {
+        self.doc.take_changes()
+    }
+
+    /// Remplace les diagnostics affichés.
+    pub fn set_squiggles(&mut self, squiggles: Vec<Squiggle>) {
+        self.squiggles = squiggles;
+    }
+
+    #[must_use]
+    pub fn squiggles(&self) -> &[Squiggle] {
+        &self.squiggles
+    }
+
+    /// Position du curseur principal au format LSP : (ligne, colonne UTF-16).
+    #[must_use]
+    pub fn caret_lsp_position(&self) -> (usize, usize) {
+        self.doc
+            .buffer()
+            .lsp_position(self.doc.selections().primary().head)
+    }
+
+    /// Nombre de caractères d'identifiant (lettres, chiffres, `_`) juste avant le curseur
+    /// principal, sur sa ligne : ce que la complétion remplace.
+    #[must_use]
+    pub fn word_prefix_chars(&self) -> usize {
+        let buf = self.doc.buffer();
+        let head = self.doc.selections().primary().head;
+        let line_start = buf.line_start(buf.char_to_line(head));
+        (line_start..head)
+            .rev()
+            .take_while(|&i| {
+                let c = buf.char(i);
+                c.is_alphanumeric() || c == '_'
+            })
+            .count()
+    }
+
+    /// Insère `text` à la place des `prefix` caractères qui précèdent le curseur principal
+    /// (validation d'un élément de complétion).
+    pub fn complete(&mut self, prefix: usize, text: &str, now_ms: u64) {
+        let head = self.doc.selections().primary().head;
+        let from = head.saturating_sub(prefix);
+        self.doc
+            .set_selections(SelectionSet::single(Selection::new(from, head)));
+        self.insert_text(text, now_ms);
     }
 
     /// Révision du texte (voir `Buffer::revision`).
@@ -385,6 +456,10 @@ impl Editor {
             Command::GotoLine => return Some(Effect::OpenPalette(PaletteMode::GotoLine)),
             Command::SearchProject => return Some(Effect::OpenPalette(PaletteMode::Search)),
             Command::ReloadPlugins => return Some(Effect::ReloadPlugins),
+            Command::LspCompletion => return Some(Effect::Lsp(LspAction::Completion)),
+            Command::LspDefinition => return Some(Effect::Lsp(LspAction::Definition)),
+            Command::LspHover => return Some(Effect::Lsp(LspAction::Hover)),
+            Command::LspDiagnostics => return Some(Effect::Lsp(LspAction::Diagnostics)),
             Command::Quit => return Some(Effect::Quit),
         }
         None
@@ -473,6 +548,7 @@ impl Editor {
         self.row_carets.resize_with(rows, Vec::new);
         self.row_underline.resize(rows, None);
         self.row_spans.resize_with(rows, Vec::new);
+        self.row_squiggles.resize_with(rows, Vec::new);
 
         let buf = self.doc.buffer();
         let total = buf.len_lines();
@@ -485,6 +561,7 @@ impl Editor {
             self.row_carets[r].clear();
             self.row_underline[r] = None;
             self.row_spans[r].clear();
+            self.row_squiggles[r].clear();
             let line = first + r;
             if line < total {
                 for chunk in buf.line(line).chunks() {
@@ -492,6 +569,18 @@ impl Editor {
                 }
                 while s.ends_with(['\n', '\r']) {
                     s.pop();
+                }
+                // Diagnostics : positions LSP (ligne, UTF-16) = positions de la rangée.
+                if !self.squiggles.is_empty() {
+                    let units = utf16_len(s);
+                    for q in &self.squiggles {
+                        if q.start.0 > line || q.end.0 < line {
+                            continue;
+                        }
+                        let a = if q.start.0 == line { q.start.1 } else { 0 };
+                        let b = if q.end.0 == line { q.end.1 } else { units };
+                        self.row_squiggles[r].push((a.min(units), b.min(units), q.severity));
+                    }
                 }
                 // Coloration : plages d'octets du document -> positions UTF-16 dans la rangée.
                 let bs = buf.rope().line_to_byte(line);
@@ -569,6 +658,7 @@ impl Editor {
             self.row_sels[r].clear();
             self.row_carets[r].clear();
             self.row_spans[r].clear();
+            self.row_squiggles[r].clear();
             self.row_underline[r] = Some((u, end));
             if self.caret_on {
                 let cur = pre.cursor.map_or(end, |c| {
@@ -658,6 +748,7 @@ impl RowSource for ViewRows<'_> {
             carets: &e.row_carets[index],
             underline: e.row_underline[index],
             spans: &e.row_spans[index],
+            squiggles: &e.row_squiggles[index],
         }
     }
 }
@@ -875,6 +966,66 @@ mod tests {
             e.execute(Command::ReloadPlugins, 0),
             Some(Effect::ReloadPlugins)
         );
+    }
+
+    #[test]
+    fn diagnostics_en_soulignements_par_rangee() {
+        // « é😀 » compte pour 3 unités UTF-16 : la colonne du serveur est bien celle de la rangée
+        let mut e = editor("é😀 faute\nsuite\nfin");
+        e.set_squiggles(vec![
+            Squiggle {
+                start: (0, 4),
+                end: (0, 9),
+                severity: 0,
+            },
+            // plage sur plusieurs lignes : du milieu de la ligne 0 au milieu de la ligne 2
+            Squiggle {
+                start: (0, 6),
+                end: (2, 2),
+                severity: 1,
+            },
+        ]);
+        e.build_view();
+        let v = e.view();
+        assert_eq!(v.row(0).squiggles, [(4, 9, 0), (6, 9, 1)]);
+        assert_eq!(v.row(1).squiggles, [(0, 5, 1)], "ligne entière");
+        assert_eq!(v.row(2).squiggles, [(0, 2, 1)]);
+        // hors du texte : bornes ramenées dans la ligne, sans panique
+        e.set_squiggles(vec![Squiggle {
+            start: (1, 0),
+            end: (1, 99),
+            severity: 2,
+        }]);
+        e.build_view();
+        assert_eq!(e.view().row(1).squiggles, [(0, 5, 2)]);
+        e.enable_lsp(false);
+        assert!(e.squiggles().is_empty());
+    }
+
+    #[test]
+    fn contexte_de_completion() {
+        let mut e = editor("let valeur_ab = 1;");
+        for _ in 0..13 {
+            e.execute(Command::Move(Motion::Right), 0);
+        }
+        // curseur après « valeur_ab » : 9 caractères d'identifiant avant lui
+        assert_eq!(e.word_prefix_chars(), 9);
+        assert_eq!(e.caret_lsp_position(), (0, 13));
+        e.complete(9, "valeur_abc()", 0);
+        assert_eq!(
+            e.document().buffer().rope().to_string(),
+            "let valeur_abc() = 1;"
+        );
+        // en début de ligne : aucun préfixe
+        e.execute(Command::Move(Motion::LineStart), 0);
+        assert_eq!(e.word_prefix_chars(), 0);
+        // suivi des modifications au format LSP
+        e.enable_lsp(true);
+        e.insert_text("é", 1);
+        let changes = e.take_lsp_changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].text, "é");
+        assert!(e.take_lsp_changes().is_empty());
     }
 
     #[test]

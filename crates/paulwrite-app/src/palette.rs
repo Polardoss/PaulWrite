@@ -21,6 +21,25 @@ pub enum PaletteMode {
     GotoLine,
     /// Recherche de texte dans le projet.
     Search,
+    /// Complétion proposée par un serveur de langage (la saisie filtre la liste).
+    Completion,
+    /// Liste des diagnostics du document courant (lecture seule).
+    Diagnostics,
+    /// Emplacements d'une définition (lecture seule).
+    Locations,
+    /// Texte de survol d'un serveur de langage (lecture seule).
+    Hover,
+}
+
+impl PaletteMode {
+    /// La saisie n'a pas de sens : la liste est fixe (diagnostics, définitions, survol).
+    #[must_use]
+    pub fn is_static(self) -> bool {
+        matches!(
+            self,
+            PaletteMode::Diagnostics | PaletteMode::Locations | PaletteMode::Hover
+        )
+    }
 }
 
 impl PaletteMode {
@@ -31,6 +50,10 @@ impl PaletteMode {
             PaletteMode::Commands => "> ",
             PaletteMode::GotoLine => ": ",
             PaletteMode::Search => "? ",
+            PaletteMode::Completion => "",
+            PaletteMode::Diagnostics => "Diagnostics",
+            PaletteMode::Locations => "Définitions",
+            PaletteMode::Hover => "Survol",
         }
     }
 }
@@ -48,6 +71,11 @@ pub enum Target {
     Match { path: String, line: u64 },
     /// Exécuter cette commande de plugin (par son nom).
     Plugin(String),
+    /// Insérer ce texte à la place des `usize` caractères d'identifiant qui précèdent le curseur
+    /// (complétion).
+    Completion(String, usize),
+    /// Rien à faire (ligne d'information, par exemple le texte d'un survol).
+    Nothing,
 }
 
 /// Un résultat de la liste.
