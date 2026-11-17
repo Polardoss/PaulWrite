@@ -40,6 +40,10 @@ pub trait MinimapSource {
     fn len(&self) -> usize;
     /// Texte de la ligne `index`, sans fin de ligne, copié dans `out` (vidé par l'appelant).
     fn line(&self, index: usize, out: &mut String);
+    /// Plages colorées de la ligne `index` dont le texte est `text` (celui de [`line`](Self::line)) :
+    /// `(début, fin, catégorie)`, positions en **caractères**, triées et sans chevauchement,
+    /// ajoutées à `out` (vidé par l'appelant). Par défaut, aucune couleur : texte gris.
+    fn colors(&self, _index: usize, _text: &str, _out: &mut Vec<(usize, usize, u8)>) {}
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -739,18 +743,36 @@ impl SoftRenderer {
             *t = *t * 0.38 + b * 0.62;
         }
         let fg = argb(text);
+        // couleur de chaque catégorie de coloration : la couleur du thème, un peu éteinte pour
+        // rester discrète (comme le texte gris, mais plus présente)
+        let mut palette = [fg; KIND_SLOTS];
+        for (k, c) in palette.iter_mut().enumerate().skip(1) {
+            *c = blend(bg, argb(self.colors.kinds[k]), 0.62);
+        }
         let (w, h) = (mm_w as usize, area_h as usize);
         let mut pixels = std::mem::take(&mut self.minimap.pixels);
         pixels.clear();
         pixels.resize(w * h, bg);
         let s = self.scale.round().max(1.0) as usize;
         let mut line = String::new();
+        let mut spans: Vec<(usize, usize, u8)> = Vec::new();
         for li in first..total.min(first + fit + 1) {
             line.clear();
             src.line(li, &mut line);
+            spans.clear();
+            src.colors(li, &line, &mut spans);
+            let mut next_span = 0usize;
             let y0 = (li - first) * pitch;
             let mut col = 0usize;
-            'chars: for c in line.chars().take(600) {
+            'chars: for (ci, c) in line.chars().take(600).enumerate() {
+                // catégorie du caractère : les plages sont triées, on avance dans la liste
+                while next_span < spans.len() && spans[next_span].1 <= ci {
+                    next_span += 1;
+                }
+                let color = match spans.get(next_span) {
+                    Some(&(a, _, k)) if a <= ci => palette[usize::from(k).min(KIND_SLOTS - 1)],
+                    _ => fg,
+                };
                 match c {
                     '\t' => col = (col / 4 + 1) * 4,
                     c if c.is_whitespace() => col += 1,
@@ -766,7 +788,7 @@ impl SoftRenderer {
                             }
                             for dx in 0..s {
                                 if x0 + dx < w {
-                                    pixels[y * w + x0 + dx] = fg;
+                                    pixels[y * w + x0 + dx] = color;
                                 }
                             }
                         }

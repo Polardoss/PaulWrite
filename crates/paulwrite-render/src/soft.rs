@@ -2045,6 +2045,64 @@ mod tests {
         best
     }
 
+    /// Comme `Doc`, avec des mots-clés colorés au début de chaque ligne.
+    struct ColoredDoc;
+
+    impl MinimapSource for ColoredDoc {
+        fn len(&self) -> usize {
+            Doc.len()
+        }
+        fn line(&self, index: usize, out: &mut String) {
+            Doc.line(index, out);
+        }
+        fn colors(&self, _index: usize, text: &str, out: &mut Vec<(usize, usize, u8)>) {
+            let indent = text.len() - text.trim_start().len();
+            // « let » (mot-clé) puis « // essai » (commentaire)
+            out.push((indent, indent + 3, 4));
+            let comment = text.find("//").unwrap_or(text.len());
+            out.push((comment, text.len(), 1));
+        }
+    }
+
+    /// Pixels de la minimap nettement plus rouges que bleus-gris : de la couleur, pas du gris.
+    fn colored_pixels(r: &SoftRenderer) -> usize {
+        let (w, h) = (r.size().0 as usize, r.size().1 as usize);
+        let m = r.metrics();
+        let x0 = w - m.minimap as usize;
+        let mut n = 0;
+        for y in m.top as usize..h - m.status_bar as usize {
+            for x in x0..w - 14 {
+                let p = r.pixels()[y * w + x];
+                let (red, green) = ((p >> 16) & 0xff, (p >> 8) & 0xff);
+                if red > green + 12 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn la_minimap_peut_etre_coloree() {
+        let mut gray = renderer();
+        let n = gray.metrics().rows_for(300);
+        let s = Rows::new(lines(0, n), None, None);
+        gray.draw(&s, 0).unwrap();
+        assert_eq!(colored_pixels(&gray), 0, "sans couleurs : texte gris");
+
+        let mut color = renderer();
+        color.set_minimap(&ColoredDoc, 2).unwrap();
+        color.draw(&s, 0).unwrap();
+        let n_colored = colored_pixels(&color);
+        assert!(
+            n_colored > 100,
+            "mots-clés et commentaires colorés : {n_colored}"
+        );
+        // le tracé en gris reste identique là où il n'y a pas de couleur : même nombre de lignes
+        // affichées, seule la teinte change
+        assert!(gray.pixels() != color.pixels());
+    }
+
     #[test]
     fn le_survol_eclaircit_onglet_fleche_et_ligne_de_la_barre_laterale() {
         let mut r = renderer();
