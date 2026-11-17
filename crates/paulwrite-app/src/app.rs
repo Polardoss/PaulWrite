@@ -347,6 +347,8 @@ struct App {
     minimap_pending: bool,
     /// Glissement en cours dans la zone de droite : `true` barre de défilement, `false` minimap.
     strip_drag: Option<bool>,
+    /// Forme du pointeur actuellement affichée.
+    cursor_icon: CursorIcon,
     /// Arborescence du dossier ouvert ; la barre latérale est affichée si `sidebar_open`.
     sidebar: Option<SidebarTree>,
     sidebar_open: bool,
@@ -442,6 +444,7 @@ impl App {
             minimap_at: Instant::now(),
             minimap_pending: false,
             strip_drag: None,
+            cursor_icon: CursorIcon::Text,
             sidebar: None,
             sidebar_open: false,
             menu_commands: Vec::new(),
@@ -1974,6 +1977,7 @@ impl App {
             self.t_first_present = Some(since_process_start());
         }
         self.refresh_title();
+        self.update_cursor();
         self.update_ime_area();
         self.bench_after_present(el, presented - started);
     }
@@ -2139,6 +2143,39 @@ impl App {
             }
         }
         el.exit();
+    }
+
+    /// Pointeur sous la souris : le curseur de texte seulement sur le texte (et la saisie du
+    /// panneau), la flèche partout ailleurs (barre latérale, onglets, gouttière, minimap, barre
+    /// d'état, liste du panneau).
+    fn update_cursor(&mut self) {
+        let (Some(r), Some(w)) = (self.renderer.as_ref(), self.window.as_ref()) else {
+            return;
+        };
+        let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
+        let m = r.metrics();
+        let icon = if self.palette.is_some() {
+            if r.overlay_row_at(x, y) == Some(0) {
+                CursorIcon::Text
+            } else {
+                CursorIcon::Default
+            }
+        } else if self.strip_drag.is_some() {
+            CursorIcon::Default
+        } else {
+            let bottom = (r.size().1 as i32 - m.status_bar) as f32;
+            let left = (m.sidebar + m.gutter) as f32;
+            let right = (r.size().0 as i32 - m.minimap) as f32;
+            if x >= left && x < right && y >= m.top as f32 && y < bottom {
+                CursorIcon::Text
+            } else {
+                CursorIcon::Default
+            }
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            w.set_cursor(Cursor::Icon(icon));
+        }
     }
 
     /// Fait défiler le document d'après un clic dans la minimap ou la barre de défilement.
@@ -3034,6 +3071,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = position;
+                self.update_cursor();
                 if let Some(scrollbar) = self.strip_drag {
                     self.strip_scroll(scrollbar);
                 } else if self.dragging {
