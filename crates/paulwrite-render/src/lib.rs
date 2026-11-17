@@ -16,7 +16,10 @@
 pub mod platform;
 mod soft;
 
-pub use soft::{Band, Colors, Metrics, Row, RowSource, SoftRenderer, TabInfo, KIND_SLOTS};
+pub use soft::{
+    Band, Colors, Metrics, Overlay, OverlayRow, OverlayRowKind, Row, RowSource, SoftRenderer,
+    TabInfo, KIND_SLOTS,
+};
 
 use std::time::Duration;
 

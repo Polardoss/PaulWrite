@@ -8,9 +8,10 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Brush, ID2D1DCRenderTarget, ID2D1Factory, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+    D2D1CreateFactory, ID2D1Brush, ID2D1DCRenderTarget, ID2D1Factory, D2D1_ANTIALIAS_MODE_ALIASED,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+    D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
@@ -41,6 +42,12 @@ const FONT_PX: f32 = 15.0;
 const BR_TABBAR: usize = 3 + KIND_SLOTS;
 const BR_TAB_DIM: usize = BR_TABBAR + 1;
 const BR_TAB_ACCENT: usize = BR_TABBAR + 2;
+/// Fond du panneau flottant (palette de commandes, Goto Anything).
+const BR_OVERLAY_BG: usize = BR_TABBAR + 3;
+/// Index de la première rangée de l'éditeur recouverte par le panneau flottant.
+const OVERLAY_FIRST_ROW: usize = 1;
+/// Catégorie de coloration des caractères qui correspondent à la saisie dans le panneau.
+const OVERLAY_MATCH_KIND: u8 = 4;
 
 /// Couleurs (RGB, 0..1).
 #[derive(Clone, Copy, Debug)]
@@ -121,6 +128,56 @@ pub struct TabInfo<'a> {
     /// Contenu modifié : une pastille remplace la croix de fermeture.
     pub modified: bool,
     pub active: bool,
+}
+
+/// Nature d'une rangée du panneau flottant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverlayRowKind {
+    /// Résultat ordinaire.
+    #[default]
+    Item,
+    /// Résultat sélectionné (surligné).
+    Selected,
+    /// Ligne de saisie (avec curseur).
+    Input,
+    /// Message discret (aucun résultat, état de l'indexation…).
+    Note,
+}
+
+/// Une rangée du panneau flottant.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OverlayRow {
+    pub kind: OverlayRowKind,
+    /// Texte principal. L'appelant le tronque à [`SoftRenderer::overlay_columns`] caractères.
+    pub text: String,
+    /// Texte secondaire, aligné à droite (raccourci, dossier…).
+    pub hint: String,
+    /// Position du curseur dans `text` (UTF-16), pour la ligne de saisie.
+    pub caret: Option<usize>,
+    /// Plages de `text` (UTF-16) qui correspondent à la saisie, mises en évidence.
+    pub highlights: Vec<(usize, usize)>,
+}
+
+/// Panneau flottant dessiné au-dessus du texte : première rangée = saisie, puis résultats.
+/// Il occupe des rangées entières de l'éditeur (à partir de la deuxième) et est centré.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Overlay {
+    pub rows: Vec<OverlayRow>,
+}
+
+fn overlay_row_hash(r: &OverlayRow) -> u64 {
+    let mut h = hash_bytes(r.text.as_bytes()) ^ hash_bytes(r.hint.as_bytes()).rotate_left(17);
+    let mut mix = |v: usize| {
+        h ^= v as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    mix(r.kind as usize);
+    mix(r.caret.map_or(usize::MAX, |c| c));
+    for &(a, b) in &r.highlights {
+        mix(a);
+        mix(b);
+    }
+    h
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,6 +313,9 @@ pub struct SoftRenderer {
     // Barre d'onglets
     tabs: Vec<TabEntry>,
     tabs_clean: bool,
+    // Panneau flottant
+    overlay: Option<Overlay>,
+    overlay_hashes: Vec<u64>,
 }
 
 impl std::fmt::Debug for SoftRenderer {
@@ -322,10 +382,12 @@ impl SoftRenderer {
 
             // Barre d'onglets : fond, texte discret, accent.
             let dim = |c: [f32; 3], k: f32| [c[0] * k, c[1] * k, c[2] * k];
+            let lift = |c: [f32; 3]| [c[0] + 0.07, c[1] + 0.07, c[2] + 0.07];
             for c in [
                 dim(colors.background, 0.72),
                 dim(colors.text, 0.58),
                 colors.kinds[4],
+                lift(colors.background),
             ] {
                 brushes.push(
                     rt.CreateSolidColorBrush(&rgb(c), None)?
@@ -356,6 +418,8 @@ impl SoftRenderer {
                 valid: false,
                 tabs: Vec::new(),
                 tabs_clean: false,
+                overlay: None,
+                overlay_hashes: Vec::new(),
             })
         }
     }
@@ -494,9 +558,17 @@ impl SoftRenderer {
         self.cur.clear();
         for r in 0..rows {
             let row = src.row(r);
+            let mut deco = deco_hash(&row);
+            // Les rangées recouvertes par le panneau dépendent aussi de son contenu : elles sont
+            // redessinées (texte puis panneau par-dessus) quand l'un ou l'autre change.
+            if r >= OVERLAY_FIRST_ROW {
+                if let Some(h) = self.overlay_hashes.get(r - OVERLAY_FIRST_ROW) {
+                    deco ^= *h | 1;
+                }
+            }
             self.cur.push(Some(Sig {
                 hash: hash_bytes(row.text.as_bytes()),
-                deco: deco_hash(&row),
+                deco,
             }));
         }
         self.bands.clear();
@@ -651,11 +723,181 @@ impl SoftRenderer {
                         let row = src.row(row_idx);
                         let y = (first_row_y + row_idx as i32 * lh - bt) as f32;
                         self.paint_row(&row, pad, y, lh as f32)?;
+                        if row_idx >= OVERLAY_FIRST_ROW {
+                            let i = row_idx - OVERLAY_FIRST_ROW;
+                            if i < self.overlay_hashes.len() {
+                                self.paint_overlay_row(i, y, lh as f32)?;
+                            }
+                        }
                     }
                 }
                 self.rt.EndDraw(None, None)?;
             }
         }
+        Ok(())
+    }
+
+    // --- Panneau flottant --------------------------------------------------------------------
+
+    fn overlay_pad(&self) -> f32 {
+        (10.0 * self.scale).round()
+    }
+
+    /// Abscisses `(gauche, droite)` du panneau : centré, ~80 % de la largeur (20 à 90 colonnes).
+    fn overlay_box(&self) -> (i32, i32) {
+        let w = self.size.0 as f32;
+        let adv = self.metrics.advance.max(1.0);
+        let pad = self.overlay_pad();
+        let cols = (((w * 0.8 - 2.0 * pad) / adv).floor() as usize).clamp(20, 90);
+        let box_w = (cols as f32 * adv + 2.0 * pad).min(w);
+        let x0 = ((w - box_w) / 2.0).floor();
+        (x0 as i32, (x0 + box_w) as i32)
+    }
+
+    /// Nombre de caractères qui tiennent sur une rangée du panneau.
+    #[must_use]
+    pub fn overlay_columns(&self) -> usize {
+        let (x0, x1) = self.overlay_box();
+        let inner = (x1 - x0) as f32 - 2.0 * self.overlay_pad();
+        (inner / self.metrics.advance.max(1.0)).floor().max(1.0) as usize
+    }
+
+    /// Affiche, remplace ou retire (`None`) le panneau flottant. Seules les rangées dont le
+    /// contenu change sont redessinées.
+    pub fn set_overlay(&mut self, overlay: Option<&Overlay>) {
+        match overlay {
+            Some(o) if self.overlay.as_ref() == Some(o) => {}
+            Some(o) => {
+                self.overlay_hashes = o.rows.iter().map(overlay_row_hash).collect();
+                self.overlay = Some(o.clone());
+            }
+            None => {
+                self.overlay = None;
+                self.overlay_hashes.clear();
+            }
+        }
+    }
+
+    /// Rangée du panneau située sous le point `(x, y)` (pixels de la zone cliente), ou `None`
+    /// si le point est hors du panneau (ou s'il n'y en a pas).
+    #[must_use]
+    pub fn overlay_row_at(&self, x: f32, y: f32) -> Option<usize> {
+        let o = self.overlay.as_ref()?;
+        let (x0, x1) = self.overlay_box();
+        if x < x0 as f32 || x >= x1 as f32 || y < self.metrics.top as f32 {
+            return None;
+        }
+        let row = ((y as i32 - self.metrics.top) / self.metrics.line_height.max(1)) as usize;
+        let i = row.checked_sub(OVERLAY_FIRST_ROW)?;
+        (i < o.rows.len()).then_some(i)
+    }
+
+    /// Dessine la rangée `i` du panneau à l'ordonnée `y` de la bande en cours.
+    unsafe fn paint_overlay_row(&mut self, i: usize, y: f32, lh: f32) -> Result<()> {
+        let Some((row, last)) = self
+            .overlay
+            .as_ref()
+            .map(|o| (o.rows[i].clone(), o.rows.len() - 1))
+        else {
+            return Ok(());
+        };
+        let (x0, x1) = self.overlay_box();
+        let (x0, x1) = (x0 as f32, x1 as f32);
+        let pad = self.overlay_pad();
+        let adv = self.metrics.advance;
+        let fill = if row.kind == OverlayRowKind::Selected {
+            2
+        } else {
+            BR_OVERLAY_BG
+        };
+        let rect = |l: f32, t: f32, r: f32, b: f32| D2D_RECT_F {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        };
+        self.rt
+            .FillRectangle(&rect(x0, y, x1, y + lh), &self.brushes[fill]);
+        // Bordure : traits latéraux sur chaque rangée, haut et bas sur la première et la dernière.
+        let dim = &self.brushes[BR_TAB_DIM];
+        self.rt.FillRectangle(&rect(x0, y, x0 + 1.0, y + lh), dim);
+        self.rt.FillRectangle(&rect(x1 - 1.0, y, x1, y + lh), dim);
+        if i == 0 {
+            self.rt.FillRectangle(&rect(x0, y, x1, y + 1.0), dim);
+        }
+        if i == last {
+            self.rt
+                .FillRectangle(&rect(x0, y + lh - 1.0, x1, y + lh), dim);
+        }
+
+        self.rt.PushAxisAlignedClip(
+            &rect(x0 + 1.0, y, x1 - 1.0, y + lh),
+            D2D1_ANTIALIAS_MODE_ALIASED,
+        );
+        let spans: Vec<(usize, usize, u8)> = row
+            .highlights
+            .iter()
+            .map(|&(a, b)| (a, b, OVERLAY_MATCH_KIND))
+            .collect();
+        let hash = hash_bytes(row.text.as_bytes());
+        let entry = self.layout_for(&row.text, hash)?;
+        if let Some((layout, units)) = &entry {
+            self.apply_colors(hash, layout, *units, &spans)?;
+            let brush = if row.kind == OverlayRowKind::Note {
+                BR_TAB_DIM
+            } else {
+                0
+            };
+            self.rt.DrawTextLayout(
+                Vector2 { X: x0 + pad, Y: y },
+                layout,
+                &self.brushes[brush],
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+        }
+        if !row.hint.is_empty() {
+            let hhash = hash_bytes(row.hint.as_bytes());
+            let chars = row.hint.chars().count() as f32;
+            if let Some((layout, units)) = self.layout_for(&row.hint, hhash)? {
+                self.apply_colors(hhash, &layout, units, &[])?;
+                self.rt.DrawTextLayout(
+                    Vector2 {
+                        X: x1 - pad - chars * adv,
+                        Y: y,
+                    },
+                    &layout,
+                    &self.brushes[BR_TAB_DIM],
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+        }
+        if let Some(c) = row.caret {
+            let x = match &entry {
+                None => x0 + pad,
+                Some((layout, units)) => {
+                    let (mut cx, mut cy) = (0.0_f32, 0.0_f32);
+                    let mut m = DWRITE_HIT_TEST_METRICS::default();
+                    let _ = layout.HitTestTextPosition(
+                        c.min(*units) as u32,
+                        false,
+                        &mut cx,
+                        &mut cy,
+                        &mut m,
+                    );
+                    x0 + pad + cx
+                }
+            };
+            self.rt.FillRectangle(
+                &rect(
+                    x,
+                    y + 2.0,
+                    x + (2.0 * self.scale).round().max(1.0),
+                    y + lh - 2.0,
+                ),
+                &self.brushes[3],
+            );
+        }
+        self.rt.PopAxisAlignedClip();
         Ok(())
     }
 
@@ -1468,5 +1710,115 @@ mod tests {
         assert_eq!(r.tab_at(end0 - 3.0, 5.0), Some((0, true)));
         assert_eq!(r.tab_at(end0 + 3.0, 5.0), Some((1, false)));
         assert_eq!(r.tab_at(geo[1].1 as f32 + 50.0, 5.0), None);
+    }
+
+    fn overlay(selected: usize, query: &str, n_items: usize) -> Overlay {
+        let mut rows = vec![OverlayRow {
+            kind: OverlayRowKind::Input,
+            text: format!("> {query}"),
+            caret: Some(2 + query.chars().count()),
+            ..OverlayRow::default()
+        }];
+        for k in 0..n_items {
+            rows.push(OverlayRow {
+                kind: if k == selected {
+                    OverlayRowKind::Selected
+                } else {
+                    OverlayRowKind::Item
+                },
+                text: format!("mod_{k:03}/sub_05/file_00{k:02}.rs"),
+                hint: "Ctrl+P".into(),
+                caret: None,
+                highlights: vec![(0, 3)],
+            });
+        }
+        Overlay { rows }
+    }
+
+    #[test]
+    fn panneau_regions_identiques_au_redessin_complet() {
+        let mut inc = renderer();
+        let mut full = renderer();
+        let n = inc.metrics().rows_for(300);
+        let mut state = Rows::new(lines(0, n), Some((8, 2)), None);
+        inc.draw(&state, 0).unwrap();
+
+        for step in 0..40 {
+            let mut scrolled = 0isize;
+            let ov = match step % 6 {
+                0 => Some(overlay(0, "a", 4)),
+                1 => Some(overlay(2, "ab", 4)),
+                2 => Some(overlay(1, "ab", 2)),
+                3 => None,
+                4 => Some(overlay(0, "", 0)),
+                _ => Some(overlay(3, "abc", 4)),
+            };
+            match step % 4 {
+                0 => state.texts[3].push('x'),
+                1 => state.set_caret(Some((step % n, step % 5))),
+                2 => {
+                    state.set_texts(lines(10 + step, n));
+                    scrolled = 1;
+                }
+                _ => state.texts[6].push('y'),
+            }
+            inc.set_overlay(ov.as_ref());
+            full.set_overlay(ov.as_ref());
+            inc.draw(&state, scrolled).unwrap();
+            full.invalidate();
+            full.draw(&state, 0).unwrap();
+            assert!(
+                inc.pixels() == full.pixels(),
+                "pixels différents à l'étape {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn deplacer_la_selection_ne_redessine_que_deux_rangees() {
+        let mut r = renderer();
+        let n = r.metrics().rows_for(300);
+        let s = Rows::new(lines(0, n), None, None);
+        r.set_overlay(Some(&overlay(0, "a", 4)));
+        r.draw(&s, 0).unwrap();
+        // l'élément sélectionné passe de la rangée 0 à la rangée 1 : deux rangées d'éditeur
+        // (2 et 3) changent, contiguës donc une seule bande
+        r.set_overlay(Some(&overlay(1, "a", 4)));
+        let lh = r.metrics().line_height;
+        assert_eq!(
+            r.draw(&s, 0).unwrap().to_vec(),
+            vec![Band {
+                top: 2 * lh,
+                bottom: 4 * lh
+            }]
+        );
+        // fermer le panneau repeint toutes les rangées qu'il recouvrait (1 à 5)
+        r.set_overlay(None);
+        assert_eq!(
+            r.draw(&s, 0).unwrap().to_vec(),
+            vec![Band {
+                top: lh,
+                bottom: 6 * lh
+            }]
+        );
+        // aucun changement : rien à faire
+        assert!(r.draw(&s, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clic_dans_le_panneau() {
+        let mut r = renderer();
+        assert_eq!(r.overlay_row_at(300.0, 40.0), None, "pas de panneau");
+        r.set_overlay(Some(&overlay(0, "", 3)));
+        let lh = r.metrics().line_height as f32;
+        // rangée 1 de l'éditeur = rangée 0 du panneau (saisie), rangée 2 = premier résultat
+        assert_eq!(r.overlay_row_at(320.0, lh * 1.5), Some(0));
+        assert_eq!(r.overlay_row_at(320.0, lh * 2.5), Some(1));
+        assert_eq!(r.overlay_row_at(320.0, lh * 4.5), Some(3));
+        // au-dessus, en dessous et à gauche du panneau
+        assert_eq!(r.overlay_row_at(320.0, lh * 0.5), None);
+        assert_eq!(r.overlay_row_at(320.0, lh * 5.5), None);
+        assert_eq!(r.overlay_row_at(2.0, lh * 2.5), None);
+        assert!(r.overlay_columns() >= 20);
     }
 }

@@ -2,7 +2,9 @@
 //!
 //! Usage : `cargo run -p paulwrite-render --example snapshot -- sortie.png [échelle]`
 
-use paulwrite_render::{Colors, Row, RowSource, SoftRenderer, TabInfo};
+use paulwrite_render::{
+    Colors, Overlay, OverlayRow, OverlayRowKind, Row, RowSource, SoftRenderer, TabInfo,
+};
 
 /// Couleurs de la deuxième rangée de la démo : « let » mot-clé, la chaîne, le point-virgule.
 const SPANS: [(usize, usize, u8); 3] = [(4, 7, 4), (18, 36, 2), (36, 37, 10)];
@@ -146,6 +148,39 @@ fn main() {
     let demo = Demo {
         lines: demo.lines.into_iter().take(rows).collect(),
     };
+    if std::env::args().any(|a| a == "--panneau") {
+        let item = |kind, text: &str, hint: &str, hl: Vec<(usize, usize)>| OverlayRow {
+            kind,
+            text: text.into(),
+            hint: hint.into(),
+            caret: None,
+            highlights: hl,
+        };
+        r.set_overlay(Some(&Overlay {
+            rows: vec![
+                OverlayRow {
+                    kind: OverlayRowKind::Input,
+                    text: "> mrs".into(),
+                    caret: Some(5),
+                    ..OverlayRow::default()
+                },
+                item(
+                    OverlayRowKind::Selected,
+                    "src/main.rs",
+                    "",
+                    vec![(4, 5), (8, 9), (10, 11)],
+                ),
+                item(OverlayRowKind::Item, "src/mod_rs/lib.rs", "", vec![(4, 5)]),
+                item(OverlayRowKind::Item, "Annuler", "Ctrl+Z", vec![]),
+                item(
+                    OverlayRowKind::Note,
+                    "3 résultats sur 100 000 fichiers",
+                    "",
+                    vec![],
+                ),
+            ],
+        }));
+    }
     r.draw(&demo, 0).expect("dessin");
     let (pw, ph) = r.size();
     write_png(&out, pw, ph, r.pixels());
