@@ -407,6 +407,41 @@ Mesure sans fenêtre (`cargo test --release -p paulwrite-app --test frame_cost c
 - **Non mesuré** : défilement avec retour à la ligne dans un fichier de 16 Mo en fenêtre 4K ; rendu à
   125 % et 150 % ; fichiers dont toutes les lignes se coupent en dizaines de rangées.
 
+## Minimap colorée et langue (étape 6)
+
+Ajout : la minimap est colorée par la syntaxe (le worker colore le document entier quand il est au
+repos), et l'interface existe en anglais et en français. Même méthode que pour le retour à la ligne :
+le commit précédent (`ad0949a`, dans un worktree) contre la version courante, lancés en alternance
+avec `.\scriptsench-app.ps1` (fenêtre hors écran 1100×720).
+
+| Scénario | Objectif | Avant | **Après** | Verdict |
+|---|---|---|---|---|
+| Frappe, texte synthétique, 300 frappes (6 paires) | < 10 ms (p99 < 16) | moy 2,9–4,5 ms, p99 6,4–15,2 | **moy 3,2–4,0 ms, p99 6,6–7,7** | OK, identique |
+| Frappe dans un fichier Rust de 1 Mo, coloration (8 paires, après chauffe) | < 10 ms | moy 1,66–1,87, p99 3,7–5,0 | **moy 1,94–2,24, p99 3,9–7,6**, un max à 24,6 ms | OK (+0,25 ms en moyenne) |
+| Défilement, 600 images de 3 lignes (4 paires) | fluide | moy 1,19–1,43, p99 2,8–4,4 | **moy 1,19–1,47, p99 2,9–4,5** | OK, identique |
+
+Côté coût, sans fenêtre (`cargo test --release -p paulwrite-app --test frame_cost cout_de_la_minimap --
+--ignored --nocapture`), document Rust de 1,00 Mo, 40 992 lignes :
+
+| Opération | Mesuré |
+|---|---|
+| Coloration du document entier, côté worker (209 054 plages) | **213 ms** (par morceaux de 64 Ko : le worker traite une frappe entre deux morceaux) |
+| Décalage des plages de la minimap à chaque frappe (`take_edits`) | moy 0,20 ms, p99 0,71 ms |
+| Construction de l'image de la minimap, colorée / grise | moy 0,19 / 0,12 ms (p99 0,30 / 0,27) |
+
+### Ce que la mesure a montré
+
+- **Le coût en frappe est de l'ordre de 0,25 ms** sur un fichier de 1 Mo (dominé par le décalage des
+  209 000 plages à chaque frappe ; il croît avec le nombre de plages, non mesuré sur d'autres tailles). Il vient de
+  mon choix de garder les couleurs de la minimap pendant la frappe plutôt que de la griser.
+- **Deux séries mesurées juste après la compilation** (binaire neuf) ont montré un p99 de 14 à 17 ms ;
+  elles ont disparu après une exécution de chauffe (8 séries suivantes : p99 3,9–7,6). Je les attribue à
+  l'analyse antivirus du binaire neuf, comme pour le démarrage (voir plus haut), mais je les signale.
+- **La coloration entière ne gêne pas la frappe** : le worker ne colore que lorsque sa file est vide
+  et abandonne le calcul à la première modification ; elle est redemandée 400 ms après la dernière
+  frappe. Un fichier de plus de `highlight_max_bytes` (1 Mo par défaut) garde une minimap grise.
+- **La langue ne coûte rien à l'exécution** : un choix de texte par message, aucun fichier lu.
+
 ## Correction : défilement (bug de l'étape 2 trouvé à l'étape 4)
 
 **Bug** : après un défilement, le milieu de la fenêtre gardait l'ancien texte pendant que le haut et

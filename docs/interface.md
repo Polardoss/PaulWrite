@@ -30,7 +30,7 @@ Segoe UI pour l'interface).
 | Retour à la ligne | actif par défaut : une ligne longue occupe plusieurs rangées (le numéro n'est sur que la première). Alt+Z ou View ▸ Word Wrap pour le désactiver ; sans lui, la vue défile horizontalement (Maj+molette, molette latérale, ou en suivant le curseur). |
 | Repli de code | Edit ▸ Fold / Unfold / Fold All / Unfold All, Ctrl+Maj+[ et Ctrl+Maj+]. Une région repliée se termine par « … » (un clic dessus la déplie) ; entrer dedans au clavier la déplie. |
 | Guides d'indentation | traits pointillés tous les 4 colonnes avant le premier caractère. |
-| Minimap | tout le document en miniature (2 px par ligne) ; un clic ou un glissement fait défiler. Mise à jour au plus tous les 150 ms pendant la frappe. |
+| Minimap | tout le document en miniature (2 px par ligne), **colorée par la syntaxe** ; un clic ou un glissement fait défiler. Mise à jour au plus tous les 150 ms pendant la frappe. |
 | Barre de défilement | curseur proportionnel, glissable. |
 | Barre d'état | position (« Line 3, Column 7 »), taille de la sélection (« 12 characters selected », « 3 selection regions »), « Tab Size », langage ; les messages brefs s'y affichent aussi. L'icône à gauche affiche/masque la barre latérale. |
 | Barre latérale | arborescence du dossier ouvert (**File ▸ Open Folder…**, glisser un dossier, ou `paulwrite dossier`) ; un clic déplie un dossier ou ouvre un fichier ; Ctrl+K puis Ctrl+B l'affiche ou la masque. Les listings de dossiers se font sur le worker. |
@@ -70,6 +70,21 @@ Mesurées sur la capture de référence (`CHROME_COLORS` et `DEFAULT_KINDS` dans
 La barre latérale n'avait pas de capture de référence : ses couleurs (`#2a3139`, texte `#b7bfc9`,
 sélection `#3a444e`) et l'espacement des lignes (24 px) sont **estimés** à partir du thème.
 
+## Langue
+
+L'interface existe en **anglais** (comme Sublime Text) et en **français** : menus, barre d'état,
+palette de commandes, messages, boîtes de dialogue, titre « sans titre ».
+
+- **Choix** : `language = "fr"` ou `"en"` dans `config.toml` ; sans réglage (ou `"auto"`), la langue
+  d'affichage de Windows (français si c'est le français, anglais sinon).
+- **Changement à chaud** : Preferences ▸ Language: English / Français (ou la palette). Il s'applique
+  tout de suite (la barre de menus est reconstruite) et est **enregistré** dans `config.toml`, sans
+  toucher au reste du fichier.
+- **Réalisation** : chaque texte est écrit en deux versions à l'endroit où il sert
+  (`lang.pick(en, fr)`, module `i18n`) : pas de fichier de traduction à lire au démarrage. Des tests
+  vérifient que chaque commande et chaque entrée de menu est traduite et que les deux langues ont
+  les mêmes entrées.
+
 ## Retour à la ligne et repli (étape 6)
 
 Le moteur de rendu ne connaît ni l'un ni l'autre : il dessine des **rangées** indépendantes. C'est
@@ -106,10 +121,13 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   d'état).
 - Ctrl+Maj+[ / ] ne fonctionnent pas sur les claviers où `[` demande AltGr (AZERTY) : utiliser le menu
   Edit ou la palette.
-- La minimap n'est **pas colorée** par la syntaxe (texte gris) : la coloration ne couvre que les
-  lignes visibles.
-- Intitulés des menus, de la barre d'état et « untitled » en **anglais**, comme Sublime Text ;
-  la palette de commandes reste en français. Aucune option de langue pour l'instant.
+- **Minimap** : colorée seulement si la coloration syntaxique est active (fichier de langage connu,
+  moins de `highlight_max_bytes`, 1 Mo par défaut) ; grise sinon. Après une frappe, les couleurs
+  sont décalées avec le texte puis recalculées 400 ms après la dernière touche.
+- **Langue** : anglais ou français, pas d'autre. Les noms des commandes des plugins Lua, les messages
+  de rustc, des serveurs de langage et du système (boutons Oui/Non/Annuler, boîtes de fichiers) ne
+  sont pas traduits par PaulWrite. Les panneaux déjà ouverts gardent leurs listes dans l'ancienne
+  langue jusqu'à leur réouverture.
 - Le thème est **fixe** (pas de fichier de thème ni de thème clair).
 - La barre de menus est celle de Windows (pas de dessin personnalisé) : son apparence suit le
   thème du système.
