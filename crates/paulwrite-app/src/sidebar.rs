@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::i18n::Lang;
 
-use paulwrite_render::{Sidebar, SidebarKind, SidebarRow};
+use paulwrite_render::{FileIcon, Sidebar, SidebarKind, SidebarRow};
 
 /// Un élément d'un dossier.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +51,24 @@ enum Node {
         is_dir: bool,
         open: bool,
     },
+}
+
+/// Famille d'un fichier d'après son extension (icône de la barre latérale).
+#[must_use]
+pub fn icon_for(name: &str) -> FileIcon {
+    let ext = name
+        .rsplit_once('.')
+        .map_or("", |(_, e)| e)
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "rs" => FileIcon::Rust,
+        "py" | "pyw" | "pyi" => FileIcon::Python,
+        "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx" => FileIcon::Script,
+        "html" | "htm" | "css" | "scss" => FileIcon::Web,
+        "json" | "toml" | "yaml" | "yml" | "xml" | "ini" | "lock" => FileIcon::Data,
+        "md" | "markdown" | "txt" | "rst" => FileIcon::Doc,
+        _ => FileIcon::Plain,
+    }
 }
 
 /// Arborescence affichée dans la barre latérale.
@@ -117,6 +135,13 @@ impl SidebarTree {
         v.sort();
         self.pending.extend(v.iter().cloned());
         v
+    }
+
+    /// Le contenu de ce dossier est connu (affiché ou déjà affiché) : un changement sur le disque
+    /// demande de le relire.
+    #[must_use]
+    pub fn is_listed(&self, dir: &Path) -> bool {
+        self.listed.contains_key(dir)
     }
 
     /// Contenu d'un dossier, reçu du worker.
@@ -224,6 +249,18 @@ impl SidebarTree {
         }
     }
 
+    /// Fait défiler jusqu'à la fraction `fraction` (0..1) de l'arbre : glisser la barre de
+    /// défilement.
+    pub fn scroll_to_fraction(&mut self, fraction: f32, capacity: usize) {
+        self.rebuild();
+        let max = self.flat.len().saturating_sub(capacity.max(1));
+        let target = (fraction.clamp(0.0, 1.0) * max as f32).round() as usize;
+        if target != self.scroll {
+            self.scroll = target;
+            self.cache = None;
+        }
+    }
+
     /// Lignes à afficher pour une fenêtre de `capacity` lignes.
     pub fn render(&mut self, capacity: usize) -> &Sidebar {
         self.rebuild();
@@ -240,6 +277,7 @@ impl SidebarTree {
                         depth: 0,
                         kind: SidebarKind::Header,
                         selected: false,
+                        icon: FileIcon::Plain,
                     },
                     Node::Item {
                         path,
@@ -256,10 +294,17 @@ impl SidebarTree {
                             (true, true) => SidebarKind::FolderOpen,
                         },
                         selected: self.selected.as_ref() == Some(path),
+                        icon: if *is_dir {
+                            FileIcon::Plain
+                        } else {
+                            icon_for(name)
+                        },
                     },
                 })
                 .collect();
-            self.cache = Some((capacity, self.scroll, Sidebar { rows }));
+            let total = self.flat.len();
+            let scroll = (total > capacity).then_some((self.scroll, capacity, total));
+            self.cache = Some((capacity, self.scroll, Sidebar { rows, scroll }));
         }
         &self.cache.as_ref().expect("cache rempli").2
     }
@@ -372,5 +417,57 @@ mod tests {
         assert_eq!(labels(&mut t, 10)[0], "Dossiers");
         t.set_lang(Lang::En);
         assert_eq!(labels(&mut t, 10)[0], "Folders");
+    }
+
+    #[test]
+    fn icones_par_extension() {
+        assert_eq!(icon_for("main.rs"), FileIcon::Rust);
+        assert_eq!(icon_for("App.TSX"), FileIcon::Script);
+        assert_eq!(icon_for("setup.py"), FileIcon::Python);
+        assert_eq!(icon_for("index.html"), FileIcon::Web);
+        assert_eq!(icon_for("Cargo.toml"), FileIcon::Data);
+        assert_eq!(icon_for("README.md"), FileIcon::Doc);
+        assert_eq!(icon_for("LICENSE"), FileIcon::Plain);
+        assert_eq!(icon_for(".gitignore"), FileIcon::Plain);
+        assert_eq!(icon_for("archive.tar.gz"), FileIcon::Plain);
+    }
+
+    #[test]
+    fn barre_de_defilement_et_fraction() {
+        let mut t = SidebarTree::new(PathBuf::from("/proj"));
+        let _ = t.take_listing_requests();
+        let entries: Vec<Entry> = (0..30).map(|i| e(&format!("f{i:02}.rs"), false)).collect();
+        t.set_listing(PathBuf::from("/proj"), entries);
+        // 32 lignes (titre, racine, 30 fichiers) pour 10 affichées
+        let sb = t.render(10);
+        assert_eq!(sb.scroll, Some((0, 10, 32)));
+        assert_eq!(sb.rows[2].icon, FileIcon::Rust);
+        t.scroll_to_fraction(1.0, 10);
+        assert_eq!(t.render(10).scroll, Some((22, 10, 32)));
+        t.scroll_to_fraction(0.5, 10);
+        assert_eq!(t.render(10).scroll, Some((11, 10, 32)));
+        t.scroll_to_fraction(-3.0, 10);
+        assert_eq!(t.render(10).scroll, Some((0, 10, 32)));
+        // tout tient : pas de barre
+        assert_eq!(t.render(40).scroll, None);
+    }
+
+    #[test]
+    fn relire_un_dossier_fait_apparaitre_et_disparaitre_ses_fichiers() {
+        let root = PathBuf::from("/proj");
+        let mut t = SidebarTree::new(root.clone());
+        assert!(!t.is_listed(&root));
+        let _ = t.take_listing_requests();
+        t.set_listing(root.clone(), vec![e("a.rs", false)]);
+        assert!(t.is_listed(&root));
+        assert_eq!(labels(&mut t, 10), ["Folders", "proj", " a.rs"]);
+        // un fichier est créé sur le disque : le listing relu le montre, trié
+        t.set_listing(root.clone(), vec![e("a.rs", false), e("b.rs", false)]);
+        assert_eq!(labels(&mut t, 10), ["Folders", "proj", " a.rs", " b.rs"]);
+        // puis supprimé
+        t.set_listing(root.clone(), vec![e("b.rs", false)]);
+        assert_eq!(labels(&mut t, 10), ["Folders", "proj", " b.rs"]);
+        // un dossier jamais lu n'est pas relu
+        assert!(!t.is_listed(&root.join("src")));
     }
 }

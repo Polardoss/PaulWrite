@@ -6,7 +6,7 @@
 //! demande : une image n'est dessinée que si un événement l'a demandée (aucune boucle
 //! permanente ; seul le clignotement du curseur réveille la boucle deux fois par seconde).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use paulwrite_lsp as lsp;
 use paulwrite_plugins as plugins;
+use paulwrite_render::watch::{self, DirWatcher};
 use paulwrite_render::{
     platform, since_process_start, Chrome, Colors, SoftRenderer, StripHit, TabButton, TabInfo,
 };
@@ -46,6 +47,8 @@ const BLINK: Duration = Duration::from_millis(530);
 /// Délai minimal entre deux reconstructions de la minimap pendant la frappe : elle se met à jour
 /// au plus tous les 150 ms (et à la fin de la frappe), jamais à chaque touche.
 const MINIMAP_DELAY: Duration = Duration::from_millis(150);
+/// Silence après la dernière modification du disque avant de relire les dossiers affichés.
+const DIR_REFRESH_DELAY: Duration = Duration::from_millis(250);
 /// Silence après la dernière frappe avant de redemander la coloration du document entier (minimap).
 const OVERVIEW_DELAY: Duration = Duration::from_millis(400);
 
@@ -61,6 +64,9 @@ macro_rules! ed {
 pub enum UserEvent {
     /// Résultat du worker de fichiers.
     Done(Done),
+    /// Un élément a été créé, supprimé ou renommé dans ce dossier du projet (surveillance du
+    /// disque).
+    DirChanged(PathBuf),
     /// Plages colorées calculées par le thread de coloration.
     Syntax(syntax::Response),
     /// Frappe simulée (modes `--bench-typing` et `--bench-syntax`), horodatée à l'émission.
@@ -287,6 +293,15 @@ struct LspPending {
     prefix: usize,
 }
 
+/// Ce que la souris est en train de glisser dans la barre latérale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarDrag {
+    /// Le bord droit : la largeur de la colonne.
+    Resize,
+    /// Le curseur de sa barre de défilement.
+    Scroll,
+}
+
 /// Ce que survole la souris, tel que transmis au moteur de rendu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Hover {
@@ -329,6 +344,13 @@ struct App {
     lang: Lang,
     /// La souris survole la gouttière : les flèches de repli sont affichées.
     fold_hover: bool,
+    /// Glissement en cours dans la barre latérale (largeur ou défilement).
+    sidebar_drag: Option<SidebarDrag>,
+    /// Surveillance du dossier du projet (changements faits hors de l'éditeur).
+    watcher: Option<DirWatcher>,
+    /// Dossiers dont le contenu a changé sur le disque, à relire quand la rafale est finie.
+    dirty_dirs: HashSet<PathBuf>,
+    refresh_due: Option<Instant>,
     /// Dernier survol transmis au moteur de rendu : gouttière, flèche, onglet, barre latérale.
     hover: Hover,
     // clignotement
@@ -449,6 +471,10 @@ impl App {
             lang: Lang::system(),
             fold_hover: false,
             hover: Hover::default(),
+            sidebar_drag: None,
+            watcher: None,
+            dirty_dirs: HashSet::new(),
+            refresh_due: None,
             next_blink: Instant::now() + BLINK,
             title: String::new(),
             after_save: None,
@@ -1083,6 +1109,12 @@ impl App {
     /// Ouvre un dossier : il devient le projet et sa barre latérale s'affiche.
     fn set_project_root(&mut self, path: PathBuf) {
         self.sidebar = Some(SidebarTree::new(path.clone()));
+        // Surveille le disque : un fichier créé ou supprimé hors de l'éditeur apparaît tout seul.
+        let proxy = self.proxy.clone();
+        self.watcher = watch::watch_dir(&path, move |dir| {
+            let _ = proxy.send_event(UserEvent::DirChanged(dir));
+        });
+        self.dirty_dirs.clear();
         self.sidebar_open = true;
         self.project_root = Some(path);
         self.request_redraw();
@@ -1113,6 +1145,15 @@ impl App {
                 r.set_sidebar(Some(tree.render(capacity)));
             }
             _ => r.set_sidebar(None),
+        }
+    }
+
+    /// Fait défiler la barre latérale à la fraction `f` (0..1) de l'arborescence.
+    fn sidebar_scroll_to(&mut self, f: f32) {
+        let capacity = self.renderer.as_ref().map_or(20, |r| r.sidebar_capacity());
+        if let Some(tree) = self.sidebar.as_mut() {
+            tree.scroll_to_fraction(f, capacity);
+            self.request_redraw();
         }
     }
 
@@ -2256,6 +2297,8 @@ impl App {
                 self.jobs.send(Job::PickFolder { owner: self.hwnd }).ok();
             }
             Effect::CloseFolder => {
+                self.watcher = None;
+                self.dirty_dirs.clear();
                 self.project_root = None;
                 self.sidebar = None;
                 self.sidebar_open = false;
@@ -2378,12 +2421,15 @@ impl App {
         };
         let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
         let m = r.metrics();
+        let resizing = self.sidebar_drag == Some(SidebarDrag::Resize);
         let icon = if self.palette.is_some() {
             if r.overlay_row_at(x, y) == Some(0) {
                 CursorIcon::Text
             } else {
                 CursorIcon::Default
             }
+        } else if resizing || r.sidebar_edge_hit(x, y) {
+            CursorIcon::ColResize
         } else if self.strip_drag.is_some() {
             CursorIcon::Default
         } else {
@@ -2990,6 +3036,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.note_settled(settled);
                 self.request_redraw();
             }
+            UserEvent::DirChanged(dir) => {
+                // Seuls comptent les dossiers déjà lus ; les entrailles de `.git` changent sans cesse.
+                let git = dir.components().any(|c| c.as_os_str() == ".git");
+                let known = self.sidebar.as_ref().is_some_and(|t| t.is_listed(&dir));
+                if known && !git {
+                    self.dirty_dirs.insert(dir);
+                    self.refresh_due = Some(Instant::now() + DIR_REFRESH_DELAY);
+                }
+            }
             UserEvent::IndexDone => {
                 if let Some(st) = self.palette.as_mut() {
                     st.indexing = false;
@@ -3389,6 +3444,28 @@ impl ApplicationHandler<UserEvent> for App {
                 self.mouse = position;
                 self.update_cursor();
                 self.update_hover(true);
+                match self.sidebar_drag {
+                    Some(SidebarDrag::Resize) => {
+                        if let Some(r) = self.renderer.as_mut() {
+                            r.set_sidebar_width_px(position.x as f32);
+                        }
+                        self.request_redraw();
+                        return;
+                    }
+                    Some(SidebarDrag::Scroll) => {
+                        let f = self.renderer.as_ref().and_then(|r| {
+                            r.sidebar_scroll_hit(
+                                r.metrics().sidebar as f32 - 1.0,
+                                position.y as f32,
+                            )
+                        });
+                        if let Some(f) = f {
+                            self.sidebar_scroll_to(f);
+                        }
+                        return;
+                    }
+                    None => {}
+                }
                 if let Some(scrollbar) = self.strip_drag {
                     self.strip_scroll(scrollbar);
                 } else if self.dragging {
@@ -3423,6 +3500,25 @@ impl ApplicationHandler<UserEvent> for App {
                         self.request_redraw();
                     }
                     return;
+                }
+                // Barre latérale : son bord se glisse pour la redimensionner, son curseur pour
+                // la faire défiler.
+                if button == MouseButton::Left {
+                    let grab = self.renderer.as_ref().and_then(|r| {
+                        if r.sidebar_edge_hit(x, y) {
+                            Some((SidebarDrag::Resize, None))
+                        } else {
+                            r.sidebar_scroll_hit(x, y)
+                                .map(|f| (SidebarDrag::Scroll, Some(f)))
+                        }
+                    });
+                    if let Some((drag, fraction)) = grab {
+                        self.sidebar_drag = Some(drag);
+                        if let Some(f) = fraction {
+                            self.sidebar_scroll_to(f);
+                        }
+                        return;
+                    }
                 }
                 let (hit, tab_button, strip, area) = match self.renderer.as_ref() {
                     Some(r) => {
@@ -3494,6 +3590,7 @@ impl ApplicationHandler<UserEvent> for App {
             } => {
                 self.dragging = false;
                 self.strip_drag = None;
+                self.sidebar_drag = None;
             }
             WindowEvent::CursorLeft { .. } => self.update_hover(false),
             WindowEvent::DroppedFile(path) => self.open_path(path),
@@ -3521,6 +3618,14 @@ impl ApplicationHandler<UserEvent> for App {
         if self.minimap_pending && now >= self.minimap_at + MINIMAP_DELAY {
             self.request_redraw();
         }
+        if let Some(due) = self.refresh_due {
+            if now >= due {
+                self.refresh_due = None;
+                for dir in self.dirty_dirs.drain() {
+                    self.jobs.send(Job::ListDir { path: dir }).ok();
+                }
+            }
+        }
         if let Some(due) = self.overview_due {
             if now >= due {
                 self.overview_due = None;
@@ -3537,6 +3642,9 @@ impl ApplicationHandler<UserEvent> for App {
             .as_ref()
             .map_or(self.next_blink, |(_, until)| (*until).min(self.next_blink));
         if let Some(due) = self.overview_due {
+            wake = wake.min(due);
+        }
+        if let Some(due) = self.refresh_due {
             wake = wake.min(due);
         }
         if self.minimap_pending {
