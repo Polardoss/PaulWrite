@@ -12,6 +12,19 @@ use nucleo::{Config, Injector, Matcher, Nucleo, Status, Utf32Str};
 /// Poignée pour ajouter des candidats depuis n'importe quel thread (voir [`FuzzyFinder::injector`]).
 pub type FuzzyInjector = Injector<String>;
 
+/// Nombre de threads de classement : `PAULWRITE_FUZZY_THREADS` s'il est défini, sinon le choix de
+/// nucleo (un par thread matériel).
+///
+/// Essayé : limiter à « threads matériels − 4 » semblait diviser la queue de latence par deux dans
+/// une série de mesures (p99 11 ms au lieu de 25 ms), mais ce résultat ne s'est pas reproduit
+/// ensuite (p99 21 à 25 ms quel que soit le nombre de threads) : aucun réglage n'est donc imposé.
+fn worker_threads() -> Option<usize> {
+    std::env::var("PAULWRITE_FUZZY_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+}
+
 /// Classe une liste de chemins selon une requête floue.
 pub struct FuzzyFinder {
     nucleo: Nucleo<String>,
@@ -36,7 +49,12 @@ impl FuzzyFinder {
     #[must_use]
     pub fn new(notify: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
-            nucleo: Nucleo::new(Config::DEFAULT.match_paths(), Arc::new(notify), None, 1),
+            nucleo: Nucleo::new(
+                Config::DEFAULT.match_paths(),
+                Arc::new(notify),
+                worker_threads(),
+                1,
+            ),
             query: String::new(),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
         }
@@ -136,6 +154,13 @@ mod tests {
             }
         }
         panic!("le classement ne se termine pas");
+    }
+
+    #[test]
+    fn nombre_de_threads_par_defaut() {
+        if std::env::var_os("PAULWRITE_FUZZY_THREADS").is_none() {
+            assert_eq!(worker_threads(), None);
+        }
     }
 
     #[test]

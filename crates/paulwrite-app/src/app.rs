@@ -264,6 +264,9 @@ struct App {
     confirming: bool,
     /// Dossier du projet (dossier ouvert, glissé ou passé en argument).
     project_root: Option<PathBuf>,
+    /// Un réveil du fuzzy finder est déjà en route vers la boucle d'événements.
+    wake_pending: Arc<AtomicBool>,
+
     palette: Option<PaletteState>,
     /// Le contenu du panneau a changé : à renvoyer au moteur de rendu.
     overlay_dirty: bool,
@@ -271,6 +274,8 @@ struct App {
     palette_query_at: Option<Instant>,
     palette_settled: bool,
     palette_latency: Samples,
+    /// Frappe -> classement terminé (avant l'affichage) : sépare nucleo du dessin.
+    palette_settle_latency: Samples,
     index_started: Option<Instant>,
     index_time: Option<Duration>,
     search_started: Option<Instant>,
@@ -325,11 +330,13 @@ impl App {
             quit_queue: Vec::new(),
             confirming: false,
             project_root: None,
+            wake_pending: Arc::new(AtomicBool::new(false)),
             palette: None,
             overlay_dirty: false,
             palette_query_at: None,
             palette_settled: false,
             palette_latency: Samples::default(),
+            palette_settle_latency: Samples::default(),
             index_started: None,
             index_time: None,
             search_started: None,
@@ -689,10 +696,17 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    /// Fonction appelée par les threads de nucleo quand de nouveaux résultats sont prêts. nucleo ne
+    /// regroupe pas ses notifications (une par candidat ajouté, soit 100 000 pour un gros
+    /// projet) : on n'envoie qu'un seul réveil à la fois, le suivant n'est permis qu'une fois le
+    /// premier traité (voir `UserEvent::PaletteWake`).
     fn wake_callback(&self) -> impl Fn() + Send + Sync + 'static {
         let proxy = self.proxy.clone();
+        let pending = self.wake_pending.clone();
         move || {
-            let _ = proxy.send_event(UserEvent::PaletteWake);
+            if !pending.swap(true, Ordering::AcqRel) {
+                let _ = proxy.send_event(UserEvent::PaletteWake);
+            }
         }
     }
 
@@ -780,7 +794,8 @@ impl App {
 
     /// Un jeu de résultats à jour vient d'être calculé pour la dernière saisie.
     fn note_settled(&mut self, settled: bool) {
-        if settled && self.palette_query_at.is_some() {
+        if let (true, Some(at), false) = (settled, self.palette_query_at, self.palette_settled) {
+            self.palette_settle_latency.push(at.elapsed());
             self.palette_settled = true;
         }
     }
@@ -802,21 +817,21 @@ impl App {
                 let reset = force_reset || st.reset;
                 if status.changed || reset {
                     let top = finder.top(200);
+                    // La mise en évidence des caractères trouvés est calculée plus tard, pour les
+                    // seules lignes affichées (`refresh_overlay`).
                     let items: Vec<Item> = top
                         .into_iter()
                         .filter_map(|cand| {
-                            let highlights = finder.indices(&cand);
                             if mode == PaletteMode::Files {
                                 Some(Item {
                                     target: Target::File(cand.clone()),
                                     label: cand,
                                     detail: String::new(),
-                                    highlights,
+                                    highlights: Vec::new(),
                                 })
                             } else {
                                 let &i = st.candidate_index.get(&cand)?;
                                 let (cmd, title, shortcut) = &st.commands[i];
-                                let n = title.chars().count() as u32;
                                 Some(Item {
                                     label: title.clone(),
                                     detail: if shortcut.is_empty() {
@@ -824,13 +839,13 @@ impl App {
                                     } else {
                                         shortcut.clone()
                                     },
-                                    highlights: highlights.into_iter().filter(|&h| h < n).collect(),
+                                    highlights: Vec::new(),
                                     target: Target::Command(*cmd),
                                 })
                             }
                         })
                         .collect();
-                    st.palette.set_items(items, reset);
+                    st.palette.set_items_lazy(items, reset);
                     st.reset = false;
                 }
                 if mode == PaletteMode::Files {
@@ -1090,6 +1105,34 @@ impl App {
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
+        // Caractères trouvés : calculés pour les seules lignes visibles.
+        if let Some(PaletteState {
+            palette,
+            finder: Some(finder),
+            ..
+        }) = self.palette.as_mut()
+        {
+            match palette.mode() {
+                PaletteMode::Files => {
+                    palette.fill_visible_highlights(|item| finder.indices(&item.label));
+                }
+                PaletteMode::Commands => {
+                    palette.fill_visible_highlights(|item| {
+                        let Target::Command(cmd) = &item.target else {
+                            return Vec::new();
+                        };
+                        let title = cmd.title();
+                        let n = title.chars().count() as u32;
+                        finder
+                            .indices(&format!("{title} {}", cmd.name()))
+                            .into_iter()
+                            .filter(|&h| h < n)
+                            .collect()
+                    });
+                }
+                _ => {}
+            }
+        }
         match &self.palette {
             Some(st) => {
                 let overlay = st.palette.to_overlay(r.overlay_columns());
@@ -1338,11 +1381,14 @@ impl App {
                         }
                         typed += 1;
                     }
-                    std::thread::sleep(Duration::from_millis(120));
+                    std::thread::sleep(Duration::from_millis(250));
                     let _ = proxy.send_event(UserEvent::BenchPalette {
                         at: Instant::now(),
                         ch: None,
                     });
+                    // laisse le temps d'effacer avant la requête suivante (sinon les premiers
+                    // caractères attendent derrière l'effacement et faussent la mesure)
+                    std::thread::sleep(Duration::from_millis(250));
                 }
             }
             std::thread::sleep(Duration::from_millis(150));
@@ -1451,6 +1497,11 @@ impl App {
             report.push_str(&format!(
                 "  Goto Anything, parcours + indexation du projet : {:.0} ms\n",
                 ms(t)
+            ));
+        }
+        if let Some(s) = self.palette_settle_latency.summary() {
+            report.push_str(&format!(
+                "  Goto Anything, frappe -> classement terminé (avant dessin) : {s}\n"
             ));
         }
         if let Some(s) = self.palette_latency.summary() {
@@ -1590,6 +1641,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::BenchDone => self.finish_bench(el),
             UserEvent::PaletteWake => {
+                // Autorise le prochain réveil *avant* de lire les résultats : un résultat publié
+                // pendant la lecture déclenchera un nouveau réveil, rien n'est perdu.
+                self.wake_pending.store(false, Ordering::Release);
                 let settled = self.refresh_palette_items(false);
                 self.note_settled(settled);
                 self.request_redraw();
@@ -1623,15 +1677,16 @@ impl ApplicationHandler<UserEvent> for App {
                         self.palette_apply(&PaletteKey::Text(c.to_string()), el);
                     }
                     None => {
-                        let len = self
-                            .palette
-                            .as_ref()
-                            .map_or(0, |s| s.palette.query().chars().count());
-                        for _ in 0..len {
-                            self.palette_apply(&PaletteKey::Backspace, el);
-                        }
+                        // Effacement entre deux requêtes : pas de mesure pour ces retours arrière.
                         self.palette_query_at = None;
                         self.palette_settled = false;
+                        if self
+                            .palette
+                            .as_mut()
+                            .is_some_and(|s| s.palette.clear() == Outcome::QueryChanged)
+                        {
+                            self.palette_query_changed();
+                        }
                     }
                 }
                 self.request_redraw();

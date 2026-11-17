@@ -100,6 +100,8 @@ pub struct Palette {
     /// Position du curseur dans la saisie, en caractères.
     caret: usize,
     items: Vec<Item>,
+    /// Pour chaque résultat : sa mise en évidence est calculée (voir `fill_visible_highlights`).
+    filled: Vec<bool>,
     selected: usize,
     /// Premier résultat visible.
     offset: usize,
@@ -115,6 +117,7 @@ impl Palette {
             query: String::new(),
             caret: 0,
             items: Vec::new(),
+            filled: Vec::new(),
             selected: 0,
             offset: 0,
             note: String::new(),
@@ -142,8 +145,32 @@ impl Palette {
         self.items.get(self.selected)
     }
 
+    /// Comme [`set_items`](Self::set_items), mais la mise en évidence des caractères trouvés n'est
+    /// pas calculée : [`fill_visible_highlights`](Self::fill_visible_highlights) le fait pour les
+    /// seules lignes affichées (10 au lieu de plusieurs centaines à chaque frappe).
+    pub fn set_items_lazy(&mut self, items: Vec<Item>, reset: bool) {
+        self.set_items(items, reset);
+        self.filled.iter_mut().for_each(|f| *f = false);
+    }
+
+    /// Calcule, avec `f`, la mise en évidence des résultats visibles qui n'en ont pas encore.
+    /// Renvoie `true` si quelque chose a changé.
+    pub fn fill_visible_highlights(&mut self, mut f: impl FnMut(&Item) -> Vec<u32>) -> bool {
+        let end = (self.offset + MAX_VISIBLE).min(self.items.len());
+        let mut changed = false;
+        for i in self.offset..end {
+            if !self.filled[i] {
+                self.items[i].highlights = f(&self.items[i]);
+                self.filled[i] = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Ajoute des résultats à la suite (recherche dans le projet) sans toucher à la sélection.
     pub fn append_items(&mut self, more: Vec<Item>) {
+        self.filled.resize(self.filled.len() + more.len(), true);
         self.items.extend(more);
         self.clamp();
     }
@@ -155,6 +182,7 @@ impl Palette {
     /// Remplace les résultats. `reset` : la saisie vient de changer, la sélection repart du
     /// premier résultat ; sinon (résultats qui arrivent au fil de l'eau) elle reste où elle est.
     pub fn set_items(&mut self, items: Vec<Item>, reset: bool) {
+        self.filled = vec![true; items.len()];
         self.items = items;
         if reset {
             self.selected = 0;
@@ -180,6 +208,16 @@ impl Palette {
             .char_indices()
             .nth(chars)
             .map_or(self.query.len(), |(b, _)| b)
+    }
+
+    /// Efface toute la saisie. Renvoie [`Outcome::QueryChanged`] si elle n'était pas vide.
+    pub fn clear(&mut self) -> Outcome {
+        if self.query.is_empty() {
+            return Outcome::None;
+        }
+        self.query.clear();
+        self.caret = 0;
+        Outcome::QueryChanged
     }
 
     /// Traite une touche.
@@ -496,6 +534,18 @@ mod tests {
     }
 
     #[test]
+    fn effacer_toute_la_saisie() {
+        let mut p = Palette::new(PaletteMode::Files);
+        assert_eq!(p.clear(), Outcome::None);
+        type_text(&mut p, "abc");
+        assert_eq!(p.clear(), Outcome::QueryChanged);
+        assert_eq!(p.query(), "");
+        // le curseur est revenu au début : une nouvelle saisie ne plante pas
+        assert_eq!(type_text(&mut p, "x"), Outcome::QueryChanged);
+        assert_eq!(p.query(), "x");
+    }
+
+    #[test]
     fn selection_boucle_et_la_fenetre_suit() {
         let mut p = Palette::new(PaletteMode::Files);
         p.set_items(files(25), true);
@@ -626,6 +676,35 @@ mod tests {
         assert!(row.text.ends_with("FIN"));
         // le curseur reste dans la zone affichée, juste après « FIN »
         assert_eq!(row.caret, Some(row.text.chars().count()));
+    }
+
+    #[test]
+    fn la_mise_en_evidence_est_calculee_seulement_pour_les_lignes_visibles() {
+        let mut p = Palette::new(PaletteMode::Files);
+        p.set_items_lazy(files(30), true);
+        let mut calls = 0;
+        assert!(p.fill_visible_highlights(|_| {
+            calls += 1;
+            vec![1]
+        }));
+        assert_eq!(calls, MAX_VISIBLE);
+        assert_eq!(p.items()[0].highlights, vec![1]);
+        assert!(p.items()[MAX_VISIBLE].highlights.is_empty());
+        // rien de nouveau à calculer tant que la fenêtre ne bouge pas
+        assert!(!p.fill_visible_highlights(|_| vec![9]));
+        // en défilant, les nouvelles lignes visibles sont calculées, pas les anciennes
+        p.scroll(5);
+        let mut seen = Vec::new();
+        p.fill_visible_highlights(|i| {
+            seen.push(i.label.clone());
+            vec![2]
+        });
+        assert_eq!(seen.len(), 5);
+        assert_eq!(p.items()[0].highlights, vec![1]);
+        assert_eq!(p.items()[14].highlights, vec![2]);
+        // des résultats ajoutés (recherche) sont considérés comme déjà prêts
+        p.append_items(files(3));
+        assert!(!p.fill_visible_highlights(|_| vec![7]));
     }
 
     #[test]
