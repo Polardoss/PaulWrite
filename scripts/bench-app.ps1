@@ -8,7 +8,7 @@
 # - Demarrage : la fenetre apparait ~100 ms a l'ecran (sans prendre le focus), une fois par execution.
 # - Frappe, coloration et defilement : fenetre HORS de la zone visible de l'ecran (rien ne gene l'utilisateur).
 #   La copie vers la fenetre y est un peu sous-estimee (rien a afficher) : voir docs/benchmarks.md.
-param([int]$Runs = 7, [int]$Typing = 300, [int]$Scroll = 600, [int]$Syntax = 300, [string]$File = "")
+param([int]$Runs = 7, [int]$Typing = 300, [int]$Scroll = 600, [int]$Syntax = 300, [string]$File = "", [string]$Project = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $exe = Join-Path $root "target\release\paulwrite.exe"
@@ -47,4 +47,17 @@ $o = Run-Bench @("--bench-scroll", "$Scroll")
 $o = Run-Bench @("--bench-syntax", "$Syntax")
 "COLORATION ($Syntax frappes dans un fichier Rust de ~1 Mo, une toutes les 20 ms) :"
 ($o -split "`n" | Where-Object { $_ -match 'frappe|coloration' }) -join "`n"
+# Panneau (Goto Anything, recherche dans le projet) : demande un projet genere par
+# `cargo run --release -p paulwrite-search --example gen_project -- bench-data\project-100k`.
+if (-not $Project) { $Project = Join-Path $root "bench-data\project-100k" }
+if (Test-Path $Project) {
+    $o = Run-Bench @("--bench-palette", "300", $Project)
+    "GOTO ANYTHING (300 frappes, projet $(Split-Path $Project -Leaf), 1 toutes les 25 ms) :"
+    ($o -split "`n" | Where-Object { $_ -match 'Goto Anything' }) -join "`n"
+    foreach ($q in "needle_xyz", "_handler") {
+        $o = Run-Bench @("--bench-palette-search", $q, $Project)
+        "RECHERCHE DANS LE PROJET « $q » :"
+        ($o -split "`n" | Where-Object { $_ -match 'recherche dans le projet' }) -join "`n"
+    }
+} else { "(panneau non mesure : projet de test absent : $Project)" }
 Remove-Item $tmp -ErrorAction SilentlyContinue

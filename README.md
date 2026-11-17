@@ -4,10 +4,9 @@
 La vitesse est le critère n°1, avant les fonctionnalités. Pas d'Electron, pas de webview, pas de
 framework UI lourd.
 
-> État : en construction. Étapes 0 à 3 en place : l'éditeur ouvre, édite et enregistre des fichiers
-> dans des onglets, avec coloration syntaxique (Rust, JSON, TOML, Python, JavaScript, HTML, CSS).
-> La recherche (fichiers, texte, fuzzy) existe en bibliothèque mais n'a pas encore d'interface
-> (étape 4).
+> État : en construction. Étapes 0 à 4 en place : l'éditeur ouvre, édite et enregistre des fichiers
+> dans des onglets, avec coloration syntaxique (Rust, JSON, TOML, Python, JavaScript, HTML, CSS),
+> Goto Anything, palette de commandes et recherche dans le projet.
 
 ## Objectifs de performance
 
@@ -42,7 +41,7 @@ Workspace Cargo (`crates/`) :
 |---|---|
 | `paulwrite-core` | Buffer ([ropey]), sélections et curseurs multiples, undo/redo transactionnel, encodages, I/O. Aucune dépendance UI. |
 | `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié (7 langages). |
-| `paulwrite-search` | Liste de fichiers, recherche de texte (moteur de ripgrep) et fuzzy finder (nucleo), respectent `.gitignore`. Interface : étape 4. |
+| `paulwrite-search` | Liste de fichiers, recherche de texte (moteur de ripgrep) et fuzzy finder (nucleo), respectent `.gitignore`. |
 | `paulwrite-render` | Rendu du texte : Direct2D logiciel + DirectWrite par régions sales, presse-papiers, boîtes de dialogue. Choix mesuré : [`docs/rendering.md`](docs/rendering.md). |
 | `paulwrite-app` | Fenêtre winit, commandes nommées, raccourcis, éditeur, worker de fichiers. Produit le binaire `paulwrite`. |
 
@@ -79,10 +78,19 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+S, Ctrl+Maj+S, Ctrl+O | enregistrer, enregistrer sous, ouvrir (dans un nouvel onglet) |
 | Ctrl+N, Ctrl+W | nouvel onglet, fermer l'onglet |
 | Ctrl+Tab, Ctrl+Maj+Tab, clic, clic milieu | onglet suivant, précédent, activer, fermer |
+| Ctrl+P | Goto Anything : ouvrir un fichier du projet (recherche floue) |
+| Ctrl+Maj+P | palette de commandes (toutes les commandes, avec leur raccourci) |
+| Ctrl+G | aller à la ligne |
+| Ctrl+Maj+F | rechercher du texte dans le projet |
 | Ctrl+Alt+↑ / Ctrl+Alt+↓ | ajouter un curseur au-dessus / en dessous |
 | Échap | revenir à un seul curseur |
 | Ctrl+↑ / Ctrl+↓, molette | faire défiler sans bouger le curseur |
 | Clic, glisser, Maj+clic | placer le curseur, sélectionner |
+
+Dans le panneau (Goto Anything, palette, recherche) : saisir pour filtrer, ↑ ↓ PgUp PgDn pour
+choisir, Entrée ou clic pour valider, Échap ou clic à côté pour fermer. Le **projet** est le dossier
+passé en argument (`paulwrite C:\chemin\projet`) ou glissé sur la fenêtre ; sinon le dossier du
+fichier courant. `.gitignore` est respecté.
 
 Plusieurs fichiers peuvent être passés en argument (`paulwrite a.rs b.json`) ou glissés sur la
 fenêtre : un onglet chacun. Un fichier déjà ouvert est simplement activé.

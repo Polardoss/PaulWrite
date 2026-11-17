@@ -192,3 +192,58 @@ donné 89 ms de médiane (maximum 123 ms) : machine occupée, non reproduite sur
   défaut) : insertion au milieu de 500 Mo 187 ns (185 ns à l'étape 1), insertion + suppression 408 ns
   (400 ns), frappe + undo 805 ns (786 ns), 1000 curseurs 225 µs (222 µs), 1000 curseurs avec undo
   402 µs (373 µs, +8 %, à comparer au seuil de 2 ms). Aucune régression bloquante.
+
+## Étape 4 — palette de commandes, Goto Anything, recherche dans le projet
+
+Mesures faites **dans l'application réelle** (binaire `release`, fenêtre hors écran) sur le projet de
+100 000 fichiers de l'étape 3 : `.\scripts\bench-app.ps1` (section « Goto Anything » et
+« Recherche dans le projet »), ou directement
+`paulwrite --bench-palette 300 --bench-out rapport.txt bench-data\project-100k` et
+`paulwrite --bench-palette-search needle_xyz --bench-out rapport.txt bench-data\project-100k`.
+Goto Anything : 300 frappes simulées (une toutes les 25 ms) sur trois requêtes (par exemple
+`mod_017/sub_05/file_0023.py`), la saisie étant effacée entre deux requêtes. La latence va de
+l'arrivée de la frappe dans la boucle d'événements jusqu'à la copie vers la fenêtre de l'image qui
+montre les résultats **à jour** de cette frappe (le classement de nucleo est terminé).
+
+| Scénario (100 000 fichiers, cache chaud) | Objectif | Mesuré | Verdict |
+|---|---|---|---|
+| Goto Anything, latence par frappe | < 30 ms | p50 2,3 à 5,7 ms, p95 8,7 à 19,8 ms, **p99 10,7 à 27,4 ms**, maximum 11,5 à 29,9 ms | OK, marge faible sur la pire frappe |
+| dont classement seul (nucleo, avant le dessin) | — | p50 0,8 à 2,0 ms, p99 9 à 24 ms | — |
+| Goto Anything, parcours + indexation du projet à l'ouverture | — | 140 à 220 ms (une fois en 351 ms), en arrière-plan : la saisie reste possible | — |
+| Recherche dans le projet, premiers résultats affichés (motif courant `_handler`) | < 200 ms | **29 à 40 ms** ; terminée (2000 résultats) en 0,8 s | OK |
+| Recherche dans le projet, premiers résultats affichés (motif rare `needle_xyz`, 100 résultats) | < 200 ms | 54 à 131 ms ; terminée en 2,0 à 3,6 s | OK |
+| Démarrage à froid, étape 3 contre étape 4, **même session, runs alternés** (25 + 25) | < 100 ms | médiane 84 ms contre 83 ms (min 74 / 74, max 95 / 95) | OK, aucune régression |
+| Latence de frappe dans le texte (300 frappes) | < 10 ms | moy 0,95 ms, p99 2,3 ms | OK |
+| Défilement (600 images), coloration (frappe → couleurs) | — | p99 3,3 ms ; moy 12,4 ms, p99 17,4 ms | inchangé |
+| Taille de l'exécutable | — | 5,0 Mo (4,1 Mo à l'étape 3 : +0,9 Mo pour `ignore`, `grep-*`, `nucleo`) | — |
+
+### Remarques et limites (étape 4)
+
+- **Variabilité entre sessions** : la même mesure de Goto Anything a donné des p99 de 11 à 27 ms
+  selon le moment (même binaire, même machine). La plage ci-dessus regroupe une trentaine de
+  séries. La frappe la plus lente d'une série a atteint 29,9 ms avec la configuration par défaut,
+  donc l'objectif « < 30 ms » est tenu mais sans marge sur la pire frappe. Une série avec 4 threads
+  de classement imposés a mesuré 31,4 ms ; ce n'est pas la configuration par défaut.
+- **D'où vient la queue** : l'interface elle-même ajoute environ 2 ms (de « classement terminé » à
+  « résultats affichés ») ; le reste est le classement de nucleo sur les **premières lettres d'une
+  requête**, quand 100 000 candidats correspondent encore. Dès que la requête se précise, c'est
+  quasi instantané (médiane 0,8 à 2 ms). Tests sans effet mesurable, **retirés** : limiter le nombre
+  de threads de classement (une série isolée a montré un gain de 2× qui ne s'est pas reproduit),
+  demander une minuterie de 1 ms à Windows, désactiver le bridage des processus d'arrière-plan,
+  sonder la fin du classement.
+- **Bug trouvé par la mesure** : nucleo notifie la boucle à chaque candidat ajouté (100 000 fois pour
+  un gros projet) ; sans regroupement des réveils, la boucle de l'application était saturée et
+  Goto Anything ne se terminait jamais. Un seul réveil est maintenant en route à la fois.
+- **Premier passage à froid** : comme à l'étape 3, la première recherche après un changement de
+  binaire ou sur des fichiers non relus peut prendre plusieurs secondes (analyse antivirus à la
+  première lecture) ; non reproductible à volonté.
+- **Recherche dans le projet** : texte littéral, insensible à la casse sauf si la saisie contient une
+  majuscule ; minimum 2 caractères ; 2 000 résultats au plus (la liste signale quand elle est
+  tronquée). Pas encore d'expressions régulières ni de remplacement dans l'interface.
+- **Goto Anything** : les 200 meilleurs résultats sont navigables ; le nombre total de
+  correspondances est affiché. Les chemins longs sont tronqués par la gauche (le nom du fichier
+  reste visible).
+- **Non vérifié** : saisie dans le panneau avec un vrai clavier (accents, AltGr), composition IME dans
+  le panneau (seule la validation est prise en compte), clic de souris dans le panneau (zones de
+  clic testées, pas essayées à la main), comportement sur plusieurs écrans. Les mesures utilisent
+  des frappes simulées.
