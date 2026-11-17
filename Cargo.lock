@@ -1348,6 +1348,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "paulwrite-lsp"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "paulwrite-core",
+ "ropey",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "paulwrite-plugins"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,29 @@
+[package]
+name = "paulwrite-lsp"
+description = "Client LSP : serveurs de langage sur threads dédiés (étape 5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+paulwrite-core = { path = "../paulwrite-core" }
+ropey.workspace = true
+crossbeam-channel = "0.5"
+# Le protocole LSP est du JSON-RPC : serde_json est la référence en Rust. On manipule des
+# `serde_json::Value` et on n'écrit que les quelques types nécessaires, plutôt que d'ajouter le
+# crate `lsp-types` (des centaines de types dont presque aucun ne servirait).
+serde_json = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# Faux serveur de langage utilisé par les tests (et par `--bench-lsp` de l'application) :
+# il parle réellement le protocole, de façon déterministe, sans rien télécharger.
+[[bin]]
+name = "paulwrite-fake-lsp"
+path = "src/bin/fake_server.rs"
+
+[lints]
+workspace = true

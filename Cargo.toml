@@ -5,6 +5,7 @@ members = [
     "crates/paulwrite-syntax",
     "crates/paulwrite-search",
     "crates/paulwrite-plugins",
+    "crates/paulwrite-lsp",
     "crates/paulwrite-render",
     "crates/paulwrite-app",
 ]
