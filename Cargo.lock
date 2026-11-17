@@ -1327,6 +1327,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "paulwrite-core",
+ "paulwrite-plugins",
  "paulwrite-render",
  "paulwrite-search",
  "paulwrite-syntax",

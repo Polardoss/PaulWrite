@@ -65,6 +65,12 @@ impl Config {
         std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("PaulWrite").join("config.toml"))
     }
 
+    /// Dossier des plugins Lua : `%APPDATA%\\PaulWrite\\plugins`.
+    #[must_use]
+    pub fn plugins_dir() -> Option<PathBuf> {
+        std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("PaulWrite").join("plugins"))
+    }
+
     /// Charge la configuration : défauts, puis fichier, puis variables d'environnement
     /// (`PAULWRITE_HIGHLIGHT_MAX_BYTES`). **Bloquant** : à appeler depuis un worker.
     #[must_use]

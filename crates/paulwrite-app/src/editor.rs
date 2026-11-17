@@ -246,6 +246,28 @@ impl Editor {
         self.ensure_caret_visible();
     }
 
+    /// Texte sélectionné (sélections jointes par des sauts de ligne), tronqué à `max_bytes`.
+    #[must_use]
+    pub fn selection_string(&self, max_bytes: usize) -> String {
+        let mut s = self.selected_text().unwrap_or_default();
+        if s.len() > max_bytes {
+            let mut end = max_bytes;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            s.truncate(end);
+        }
+        s
+    }
+
+    /// Ligne et colonne (à partir de 1, en caractères) du curseur principal.
+    #[must_use]
+    pub fn caret_line_col(&self) -> (usize, usize) {
+        let head = self.doc.selections().primary().head;
+        let (line, col) = self.doc.buffer().char_to_line_col(head);
+        (line + 1, col + 1)
+    }
+
     /// Nombre de lignes du document.
     #[must_use]
     pub fn line_count(&self) -> usize {
@@ -362,6 +384,7 @@ impl Editor {
             Command::CommandPalette => return Some(Effect::OpenPalette(PaletteMode::Commands)),
             Command::GotoLine => return Some(Effect::OpenPalette(PaletteMode::GotoLine)),
             Command::SearchProject => return Some(Effect::OpenPalette(PaletteMode::Search)),
+            Command::ReloadPlugins => return Some(Effect::ReloadPlugins),
             Command::Quit => return Some(Effect::Quit),
         }
         None
@@ -834,6 +857,24 @@ mod tests {
         e.build_view();
         assert_eq!(e.view().row(0).text, "ab");
         assert_eq!(e.view().row(0).underline, None);
+    }
+
+    #[test]
+    fn contexte_pour_les_plugins() {
+        let mut e = editor("abc\ndéf\nghi");
+        assert_eq!(e.caret_line_col(), (1, 1));
+        assert_eq!(e.selection_string(100), "");
+        e.execute(Command::Move(Motion::Down), 0);
+        e.execute(Command::Move(Motion::Right), 0);
+        e.execute(Command::Extend(Motion::Right), 0);
+        assert_eq!(e.caret_line_col(), (2, 3));
+        assert_eq!(e.selection_string(100), "é");
+        // troncature sur une frontière de caractère : « é » fait 2 octets
+        assert_eq!(e.selection_string(1), "");
+        assert_eq!(
+            e.execute(Command::ReloadPlugins, 0),
+            Some(Effect::ReloadPlugins)
+        );
     }
 
     #[test]

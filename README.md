@@ -43,9 +43,10 @@ Workspace Cargo (`crates/`) :
 | `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié (7 langages). |
 | `paulwrite-search` | Liste de fichiers, recherche de texte (moteur de ripgrep) et fuzzy finder (nucleo), respectent `.gitignore`. |
 | `paulwrite-render` | Rendu du texte : Direct2D logiciel + DirectWrite par régions sales, presse-papiers, boîtes de dialogue. Choix mesuré : [`docs/rendering.md`](docs/rendering.md). |
+| `paulwrite-plugins` | Plugins Lua sur thread dédié : commandes et événements, instantané O(1) du texte, limites de temps et de mémoire. Voir [`docs/plugins.md`](docs/plugins.md). |
 | `paulwrite-app` | Fenêtre winit, commandes nommées, raccourcis, éditeur, worker de fichiers. Produit le binaire `paulwrite`. |
 
-Plus tard : `paulwrite-lsp`, `paulwrite-plugins`.
+Plus tard : `paulwrite-lsp`.
 
 [ropey]: https://crates.io/crates/ropey
 
@@ -91,6 +92,9 @@ Dans le panneau (Goto Anything, palette, recherche) : saisir pour filtrer, ↑ �
 choisir, Entrée ou clic pour valider, Échap ou clic à côté pour fermer. Le **projet** est le dossier
 passé en argument (`paulwrite C:\chemin\projet`) ou glissé sur la fenêtre ; sinon le dossier du
 fichier courant. `.gitignore` est respecté.
+
+Les plugins Lua (`%APPDATA%\PaulWrite\plugins`) ajoutent leurs commandes à la palette : voir
+[`docs/plugins.md`](docs/plugins.md).
 
 Plusieurs fichiers peuvent être passés en argument (`paulwrite a.rs b.json`) ou glissés sur la
 fenêtre : un onglet chacun. Un fichier déjà ouvert est simplement activé.

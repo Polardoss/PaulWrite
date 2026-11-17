@@ -13,7 +13,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
-use paulwrite_render::{platform, since_process_start, Colors, SoftRenderer, TabInfo};
+use paulwrite_plugins as plugins;
+use paulwrite_render::{
+    platform, since_process_start, Colors, Overlay, OverlayRow, OverlayRowKind, SoftRenderer,
+    TabInfo,
+};
 use paulwrite_search::{self as search, FuzzyFinder, IndexOptions, SearchOptions, TextQuery};
 use paulwrite_syntax::{self as syntax, Language};
 use winit::application::ApplicationHandler;
@@ -65,6 +69,8 @@ pub enum UserEvent {
     },
     /// Frappe simulée dans le panneau (`None` : efface la saisie).
     BenchPalette { at: Instant, ch: Option<char> },
+    /// Réponse du thread de plugins Lua.
+    Plugin(plugins::Response),
 }
 
 /// Mode de mesure.
@@ -84,6 +90,8 @@ pub enum BenchKind {
     Palette(usize),
     /// Recherche dans le projet (dossier donné) du texte passé en argument.
     PaletteSearch,
+    /// `n` appels de la commande de plugin passée en argument (dossier : `PAULWRITE_PLUGINS_DIR`).
+    Plugin(usize),
 }
 
 /// Options de la ligne de commande.
@@ -119,6 +127,13 @@ impl Options {
                 "--bench-syntax" => o.bench = Some(BenchKind::Syntax(count("--bench-syntax")?)),
                 "--bench-scroll" => o.bench = Some(BenchKind::Scroll(count("--bench-scroll")?)),
                 "--bench-palette" => o.bench = Some(BenchKind::Palette(count("--bench-palette")?)),
+                "--bench-plugin" => {
+                    o.bench = Some(BenchKind::Plugin(count("--bench-plugin")?));
+                    o.bench_arg = Some(
+                        it.next()
+                            .ok_or("--bench-plugin attend un nom de commande")?,
+                    );
+                }
                 "--bench-palette-search" => {
                     o.bench = Some(BenchKind::PaletteSearch);
                     o.bench_arg = Some(it.next().ok_or("--bench-palette-search attend un texte")?);
@@ -194,7 +209,7 @@ struct PaletteState {
     /// Goto Anything et palette de commandes : classement des candidats par nucleo.
     finder: Option<FuzzyFinder>,
     /// Palette de commandes : (commande, intitulé, raccourci) dans l'ordre d'injection.
-    commands: Vec<(Command, String, String)>,
+    commands: Vec<(Target, String, String)>,
     /// Palette de commandes : texte classé -> indice dans `commands`.
     candidate_index: HashMap<String, usize>,
     /// Annule le parcours ou la recherche en cours quand le panneau se ferme ou que la saisie change.
@@ -266,6 +281,19 @@ struct App {
     project_root: Option<PathBuf>,
     /// Un réveil du fuzzy finder est déjà en route vers la boucle d'événements.
     wake_pending: Arc<AtomicBool>,
+    // plugins Lua (thread dédié, démarré après la première image)
+    plugins_tx: Option<Sender<plugins::Request>>,
+    plugins_started: bool,
+    plugin_commands: Vec<plugins::CommandInfo>,
+    plugin_next_id: u64,
+    plugin_reload_requested: bool,
+    /// Message bref affiché en haut de la fenêtre jusqu'à l'échéance.
+    toast: Option<(String, Instant)>,
+    // mesures des plugins
+    plugin_load: Option<(usize, usize, Duration)>,
+    plugin_latency: Samples,
+    plugin_sent_at: Option<Instant>,
+    plugin_bench_left: usize,
 
     palette: Option<PaletteState>,
     /// Le contenu du panneau a changé : à renvoyer au moteur de rendu.
@@ -331,6 +359,16 @@ impl App {
             confirming: false,
             project_root: None,
             wake_pending: Arc::new(AtomicBool::new(false)),
+            plugins_tx: None,
+            plugins_started: false,
+            plugin_commands: Vec::new(),
+            plugin_next_id: 0,
+            plugin_reload_requested: false,
+            toast: None,
+            plugin_load: None,
+            plugin_latency: Samples::default(),
+            plugin_sent_at: None,
+            plugin_bench_left: 0,
             palette: None,
             overlay_dirty: false,
             palette_query_at: None,
@@ -560,6 +598,7 @@ impl App {
 
     /// Ferme l'onglet sans rien demander. Il en reste toujours au moins un.
     fn close_now(&mut self, index: usize) {
+        self.plugin_event("close", Some(index));
         let tab = self.tabs.remove(index);
         if tab.syntax_on {
             self.syntax_tx
@@ -679,6 +718,102 @@ impl App {
         el.exit();
     }
 
+    // --- Plugins Lua -------------------------------------------------------------------------
+
+    /// Démarre le thread de plugins (qui lit le dossier et charge les scripts lui-même). Appelé
+    /// après la première image : les plugins ne comptent pas dans le temps de démarrage.
+    fn start_plugins(&mut self) {
+        self.plugins_started = true;
+        let dir = std::env::var_os("PAULWRITE_PLUGINS_DIR")
+            .map(PathBuf::from)
+            .or_else(Config::plugins_dir);
+        let Some(dir) = dir else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        let reserved = Command::all().iter().map(|c| c.name().to_owned()).collect();
+        self.plugins_tx = Some(plugins::spawn(dir, reserved, move |r| {
+            let _ = proxy.send_event(UserEvent::Plugin(r));
+        }));
+    }
+
+    /// Instantané de l'onglet `index` pour les plugins (copie O(1) du texte).
+    fn plugin_context(&self, index: usize) -> plugins::EditorContext {
+        let e = &self.tabs[index].editor;
+        let (line, column) = e.caret_line_col();
+        plugins::EditorContext {
+            path: e.path().map(|p| p.display().to_string()),
+            rope: e.document().buffer().rope().clone(),
+            selection: e.selection_string(1 << 20),
+            line,
+            column,
+        }
+    }
+
+    fn invoke_plugin(&mut self, command: String) {
+        if self.plugins_tx.is_none() {
+            self.toast("Plugins non chargés");
+            return;
+        }
+        self.plugin_next_id += 1;
+        let request = plugins::Request::Invoke {
+            id: self.plugin_next_id,
+            command,
+            ctx: self.plugin_context(self.active),
+        };
+        if let Some(tx) = &self.plugins_tx {
+            tx.send(request).ok();
+        }
+    }
+
+    /// Événement de l'éditeur pour les plugins (`open`, `save`, `close`).
+    fn plugin_event(&self, name: &str, index: Option<usize>) {
+        if let (Some(tx), Some(i)) = (&self.plugins_tx, index) {
+            tx.send(plugins::Request::Event {
+                name: name.to_owned(),
+                ctx: self.plugin_context(i),
+            })
+            .ok();
+        }
+    }
+
+    fn apply_plugin_actions(&mut self, actions: Vec<plugins::Action>, el: &ActiveEventLoop) {
+        for action in actions {
+            match action {
+                plugins::Action::Insert(text) => {
+                    let now = self.now_ms();
+                    ed!(self).insert_text(&text, now);
+                }
+                plugins::Action::Message(m) => self.toast(m),
+                plugins::Action::Run(name) => match Command::from_name(&name) {
+                    Some(cmd) => self.execute(cmd, el),
+                    None => self.toast(format!("Commande inconnue : {name}")),
+                },
+                plugins::Action::GotoLine(n) => ed!(self).goto(n, 0),
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Affiche un message bref (3 s) en haut de la fenêtre.
+    fn toast(&mut self, text: impl Into<String>) {
+        self.toast = Some((text.into(), Instant::now() + Duration::from_secs(3)));
+        self.overlay_dirty = true;
+        self.request_redraw();
+    }
+
+    /// Mode `--bench-plugin` : prochain appel de la commande, ou fin de la mesure.
+    fn bench_plugin_next(&mut self, el: &ActiveEventLoop) {
+        if self.plugin_bench_left == 0 {
+            self.finish_bench(el);
+            return;
+        }
+        self.plugin_bench_left -= 1;
+        self.plugin_sent_at = Some(Instant::now());
+        let command = self.opts.bench_arg.clone().unwrap_or_default();
+        self.invoke_plugin(command);
+    }
+
     // --- Panneau flottant --------------------------------------------------------------------
 
     /// Dossier du projet : celui qu'on a ouvert, sinon le dossier du fichier courant, sinon le
@@ -758,9 +893,25 @@ impl App {
                     let title = cmd.title();
                     let candidate = format!("{title} {}", cmd.name());
                     let shortcut = keymap::shortcut_label(cmd).unwrap_or_default();
+                    let detail = if shortcut.is_empty() {
+                        cmd.name().to_owned()
+                    } else {
+                        shortcut
+                    };
                     st.candidate_index
                         .insert(candidate.clone(), st.commands.len());
-                    st.commands.push((cmd, title.to_owned(), shortcut));
+                    st.commands
+                        .push((Target::Command(cmd), title.to_owned(), detail));
+                    FuzzyFinder::add(&injector, candidate);
+                }
+                // Commandes déclarées par les plugins Lua.
+                for c in &self.plugin_commands {
+                    let title = format!("Plugin : {}", c.title);
+                    let candidate = format!("{title} {}", c.name);
+                    st.candidate_index
+                        .insert(candidate.clone(), st.commands.len());
+                    st.commands
+                        .push((Target::Plugin(c.name.clone()), title, c.name.clone()));
                     FuzzyFinder::add(&injector, candidate);
                 }
                 st.finder = Some(finder);
@@ -831,16 +982,12 @@ impl App {
                                 })
                             } else {
                                 let &i = st.candidate_index.get(&cand)?;
-                                let (cmd, title, shortcut) = &st.commands[i];
+                                let (target, title, detail) = &st.commands[i];
                                 Some(Item {
                                     label: title.clone(),
-                                    detail: if shortcut.is_empty() {
-                                        cmd.name().to_owned()
-                                    } else {
-                                        shortcut.clone()
-                                    },
+                                    detail: detail.clone(),
                                     highlights: Vec::new(),
-                                    target: Target::Command(*cmd),
+                                    target: target.clone(),
                                 })
                             }
                         })
@@ -1015,6 +1162,7 @@ impl App {
             Target::Match { path, line } => {
                 self.open_path_at(root.join(path), Some(line as usize));
             }
+            Target::Plugin(name) => self.invoke_plugin(name),
         }
     }
 
@@ -1118,13 +1266,16 @@ impl App {
                 }
                 PaletteMode::Commands => {
                     palette.fill_visible_highlights(|item| {
-                        let Target::Command(cmd) = &item.target else {
-                            return Vec::new();
+                        // Texte classé = « intitulé nom » ; seuls les caractères de l'intitulé sont
+                        // mis en évidence.
+                        let name = match &item.target {
+                            Target::Command(cmd) => cmd.name(),
+                            Target::Plugin(name) => name.as_str(),
+                            _ => return Vec::new(),
                         };
-                        let title = cmd.title();
-                        let n = title.chars().count() as u32;
+                        let n = item.label.chars().count() as u32;
                         finder
-                            .indices(&format!("{title} {}", cmd.name()))
+                            .indices(&format!("{} {name}", item.label))
                             .into_iter()
                             .filter(|&h| h < n)
                             .collect()
@@ -1138,7 +1289,29 @@ impl App {
                 let overlay = st.palette.to_overlay(r.overlay_columns());
                 r.set_overlay(Some(&overlay));
             }
-            None => r.set_overlay(None),
+            None => match &self.toast {
+                Some((text, _)) => {
+                    let cols = r.overlay_columns();
+                    let first = text.lines().next().unwrap_or("");
+                    let shown: String = if first.chars().count() > cols {
+                        first
+                            .chars()
+                            .take(cols.saturating_sub(1))
+                            .chain(std::iter::once('\u{2026}'))
+                            .collect()
+                    } else {
+                        first.to_owned()
+                    };
+                    r.set_overlay(Some(&Overlay {
+                        rows: vec![OverlayRow {
+                            kind: OverlayRowKind::Note,
+                            text: shown,
+                            ..OverlayRow::default()
+                        }],
+                    }));
+                }
+                None => r.set_overlay(None),
+            },
         }
     }
 
@@ -1194,6 +1367,9 @@ impl App {
             }
         }
         let presented = Instant::now();
+        if !self.plugins_started && !self.is_bench() {
+            self.start_plugins();
+        }
         self.palette_after_present(presented);
         if let Some(t) = self.input_at.take() {
             self.latency.push(presented - t);
@@ -1302,6 +1478,14 @@ impl App {
                 self.activate((self.active + self.tabs.len() - 1) % self.tabs.len());
             }
             Effect::OpenPalette(mode) => self.open_palette(mode),
+            Effect::ReloadPlugins => {
+                if let Some(tx) = &self.plugins_tx {
+                    self.plugin_reload_requested = true;
+                    tx.send(plugins::Request::Reload).ok();
+                } else {
+                    self.toast("Plugins non chargés");
+                }
+            }
             Effect::Quit => self.request_quit(el),
         }
     }
@@ -1416,6 +1600,12 @@ impl App {
             }
             // La frappe démarre à la première réponse de coloration (voir `user_event`).
             BenchKind::Syntax(_) => {}
+            BenchKind::Plugin(n) => {
+                if !self.plugins_started {
+                    self.plugin_bench_left = n;
+                    self.start_plugins();
+                }
+            }
             // Le panneau s'ouvre à la première image ; les frappes commencent quand le projet est
             // indexé (voir `UserEvent::IndexDone`).
             BenchKind::Palette(_) | BenchKind::PaletteSearch => {
@@ -1493,6 +1683,21 @@ impl App {
         if let Some(s) = self.scroll_frames.summary() {
             report.push_str(&format!("  défilement, dessin + copie par image : {s}\n"));
         }
+        if let Some((loaded, commands, time)) = self.plugin_load {
+            report.push_str(&format!(
+                "  plugins : {loaded} chargé(s), {commands} commande(s), chargement {:.1} ms (thread dédié)\n",
+                ms(time)
+            ));
+        }
+        if let Some(s) = self.plugin_latency.summary() {
+            report.push_str(&format!(
+                "  plugins, commande -> actions appliquées (aller-retour complet) : {s}\n"
+            ));
+            report.push_str(&format!(
+                "  texte final du document : {} octets\n",
+                ed!(self).document().buffer().len_bytes()
+            ));
+        }
         if let Some(t) = self.index_time {
             report.push_str(&format!(
                 "  Goto Anything, parcours + indexation du projet : {:.0} ms\n",
@@ -1546,6 +1751,7 @@ impl ApplicationHandler<UserEvent> for App {
                     | BenchKind::Syntax(_)
                     | BenchKind::Palette(_)
                     | BenchKind::PaletteSearch
+                    | BenchKind::Plugin(_)
             )
         );
         // `PAULWRITE_OFFSCREEN=1` : fenêtre hors de l'écran et sans focus, pour les tests
@@ -1640,6 +1846,44 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             UserEvent::BenchDone => self.finish_bench(el),
+            UserEvent::Plugin(resp) => match resp {
+                plugins::Response::Loaded(report) => {
+                    self.plugin_commands = report.commands.clone();
+                    self.plugin_load =
+                        Some((report.loaded, report.commands.len(), report.load_time));
+                    if !report.errors.is_empty() {
+                        let shown: Vec<&str> =
+                            report.errors.iter().take(5).map(String::as_str).collect();
+                        self.show_error(format!(
+                            "Erreurs de plugin ({} au total) :\n{}",
+                            report.errors.len(),
+                            shown.join("\n")
+                        ));
+                    } else if self.plugin_reload_requested {
+                        self.toast(format!(
+                            "{} plugin(s) rechargé(s), {} commande(s)",
+                            report.loaded,
+                            report.commands.len()
+                        ));
+                    }
+                    self.plugin_reload_requested = false;
+                    if matches!(self.opts.bench, Some(BenchKind::Plugin(_))) {
+                        self.bench_plugin_next(el);
+                    }
+                }
+                plugins::Response::Done { id, actions, error } => {
+                    self.apply_plugin_actions(actions, el);
+                    if let Some(e) = error {
+                        self.toast(format!("Plugin : {e}"));
+                    }
+                    if id != 0 && matches!(self.opts.bench, Some(BenchKind::Plugin(_))) {
+                        if let Some(t) = self.plugin_sent_at.take() {
+                            self.plugin_latency.push(t.elapsed());
+                        }
+                        self.bench_plugin_next(el);
+                    }
+                }
+            },
             UserEvent::PaletteWake => {
                 // Autorise le prochain réveil *avant* de lire les résultats : un résultat publié
                 // pendant la lecture déclenchera un nouveau réveil, rien n'est perdu.
@@ -1792,6 +2036,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.tabs[i].editor.goto(l, 0);
                             }
                             self.attach_syntax(i, None);
+                            self.plugin_event("open", Some(i));
                         }
                         Err(e) => {
                             self.show_error(format!(
@@ -1825,6 +2070,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.tabs[i].editor.mark_saved(revision);
                                 }
                                 self.tabs_dirty = true;
+                                self.plugin_event("save", Some(i));
                             }
                             match self.after_save.take() {
                                 Some(AfterSave::CloseTab(id)) if id == tab => {
@@ -2033,13 +2279,22 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let now = Instant::now();
+        if self.toast.as_ref().is_some_and(|(_, until)| now >= *until) {
+            self.toast = None;
+            self.overlay_dirty = true;
+            self.request_redraw();
+        }
         if now >= self.next_blink {
             let on = !ed!(self).caret_visible();
             ed!(self).set_caret_visible(on);
             self.next_blink = now + BLINK;
             self.request_redraw();
         }
-        el.set_control_flow(ControlFlow::WaitUntil(self.next_blink));
+        let wake = self
+            .toast
+            .as_ref()
+            .map_or(self.next_blink, |(_, until)| (*until).min(self.next_blink));
+        el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
 

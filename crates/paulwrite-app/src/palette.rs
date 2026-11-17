@@ -46,6 +46,8 @@ pub enum Target {
     Line(usize),
     /// Ouvrir ce fichier à cette ligne.
     Match { path: String, line: u64 },
+    /// Exécuter cette commande de plugin (par son nom).
+    Plugin(String),
 }
 
 /// Un résultat de la liste.

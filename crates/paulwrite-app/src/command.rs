@@ -49,6 +49,8 @@ pub enum Command {
     GotoLine,
     /// Rechercher du texte dans le projet.
     SearchProject,
+    /// Recharger les plugins Lua depuis le disque.
+    ReloadPlugins,
     Quit,
 }
 
@@ -113,6 +115,7 @@ impl Command {
             Command::CommandPalette => "palette.commands",
             Command::GotoLine => "goto.line",
             Command::SearchProject => "search.project",
+            Command::ReloadPlugins => "plugins.reload",
             Command::Quit => "app.quit",
         }
     }
@@ -159,6 +162,7 @@ impl Command {
             Command::CommandPalette,
             Command::GotoLine,
             Command::SearchProject,
+            Command::ReloadPlugins,
             Command::Quit,
         ]);
         v
@@ -200,6 +204,7 @@ impl Command {
             Command::CommandPalette => "Palette de commandes",
             Command::GotoLine => "Aller à la ligne",
             Command::SearchProject => "Rechercher dans le projet",
+            Command::ReloadPlugins => "Plugins : recharger",
             Command::Quit => "Application : quitter",
         }
     }
@@ -285,6 +290,8 @@ pub enum Effect {
     PrevTab,
     /// Ouvrir le panneau flottant dans ce mode.
     OpenPalette(PaletteMode),
+    /// Recharger les plugins Lua.
+    ReloadPlugins,
     Quit,
 }
 

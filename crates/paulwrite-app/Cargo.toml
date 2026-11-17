@@ -20,6 +20,7 @@ paulwrite-core = { path = "../paulwrite-core" }
 paulwrite-render = { path = "../paulwrite-render" }
 paulwrite-syntax = { path = "../paulwrite-syntax" }
 paulwrite-search = { path = "../paulwrite-search" }
+paulwrite-plugins = { path = "../paulwrite-plugins" }
 # Fenêtre, boucle d'événements, clavier, IME, DPI, multi-écrans : écrire cela à la main sur
 # Win32 reviendrait à réimplémenter winit. Coût mesuré au démarrage : 3 à 11 ms (EventLoop::build).
 winit = "0.30"
