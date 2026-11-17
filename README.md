@@ -90,6 +90,9 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Clic dans la gouttière | sélectionner la ligne |
 | Clic ou glisser dans la minimap, glisser la barre de défilement | faire défiler |
 | Ctrl+K puis Ctrl+B, icône en bas à gauche | afficher / masquer la barre latérale |
+| Alt+Z (View ▸ Word Wrap) | retour à la ligne automatique (actif par défaut) |
+| Ctrl+Maj+[ / Ctrl+Maj+], flèches de la gouttière, clic sur « … » | replier / déplier une région (par indentation) ; Edit ▸ Fold All / Unfold All |
+| Maj+molette, molette latérale | défilement horizontal (sans retour à la ligne) |
 
 Dans le panneau (Goto Anything, palette, recherche) : saisir pour filtrer, ↑ ↓ PgUp PgDn pour
 choisir, Entrée ou clic pour valider, Échap ou clic à côté pour fermer. Le **projet** est le dossier
@@ -111,6 +114,8 @@ Réglages (facultatifs) dans `%APPDATA%\PaulWrite\config.toml` :
 ```toml
 highlight = true                # false : pas de coloration syntaxique
 highlight_max_bytes = 1048576   # au-delà de cette taille (octets), pas de coloration
+word_wrap = true                # false : pas de retour à la ligne automatique
+word_wrap_max_bytes = 16777216  # au-delà de cette taille (octets), pas de retour à la ligne
 lsp = false                     # true : serveurs de langage (programmes externes à installer)
 lsp_rust = "rust-analyzer"      # commande d'un langage (voir docs/lsp.md)
 ```

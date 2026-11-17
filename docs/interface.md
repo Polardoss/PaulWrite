@@ -26,7 +26,9 @@ Segoe UI pour l'interface).
 |---|---|
 | Barre de menus | native Windows : File, Edit, Selection, Find, View, Goto, Tools, Project, Preferences, Help. Chaque entrée est une commande nommée (`menu.rs`) avec son raccourci affiché. |
 | Onglets | arrondis ; × pour fermer, pastille pour « modifié » ; ◀ ▶ précédent/suivant, + nouveau, ▾ liste des onglets ouverts. |
-| Gouttière | numéros de ligne, ligne du curseur en évidence ; un clic sélectionne la ligne. Largeur adaptée au nombre de chiffres. |
+| Gouttière | numéros de ligne, ligne du curseur en évidence ; un clic sélectionne la ligne. Largeur adaptée au nombre de chiffres. Flèches de repli : ▼ (région repliable, visible quand la souris survole la gouttière) et ▶ (région repliée, toujours visible) ; un clic dessus replie ou déplie. |
+| Retour à la ligne | actif par défaut : une ligne longue occupe plusieurs rangées (le numéro n'est sur que la première). Alt+Z ou View ▸ Word Wrap pour le désactiver ; sans lui, la vue défile horizontalement (Maj+molette, molette latérale, ou en suivant le curseur). |
+| Repli de code | Edit ▸ Fold / Unfold / Fold All / Unfold All, Ctrl+Maj+[ et Ctrl+Maj+]. Une région repliée se termine par « … » (un clic dessus la déplie) ; entrer dedans au clavier la déplie. |
 | Guides d'indentation | traits pointillés tous les 4 colonnes avant le premier caractère. |
 | Minimap | tout le document en miniature (2 px par ligne) ; un clic ou un glissement fait défiler. Mise à jour au plus tous les 150 ms pendant la frappe. |
 | Barre de défilement | curseur proportionnel, glissable. |
@@ -68,12 +70,42 @@ Mesurées sur la capture de référence (`CHROME_COLORS` et `DEFAULT_KINDS` dans
 La barre latérale n'avait pas de capture de référence : ses couleurs (`#2a3139`, texte `#b7bfc9`,
 sélection `#3a444e`) et l'espacement des lignes (24 px) sont **estimés** à partir du thème.
 
+## Retour à la ligne et repli (étape 6)
+
+Le moteur de rendu ne connaît ni l'un ni l'autre : il dessine des **rangées** indépendantes. C'est
+l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne occupe chaque rangée.
+
+- **Rangée** = un segment de ligne. Sans retour à la ligne, une rangée montre une fenêtre de la ligne
+  (à partir du défilement horizontal, ~4 × la largeur au plus) : une ligne de 2 millions de
+  caractères ne coûte pas plus qu'une ligne courte.
+- **Découpe** (`wrap.rs`) : police à chasse fixe, donc en colonnes ; on coupe après le dernier espace,
+  tiret ou barre qui précède le débordement, sinon au caractère. Jamais dans l'indentation. Les
+  espaces de fin de rangée restent sur elle. Calculée **uniquement pour les rangées visibles**.
+- **Défilement** par rangées : la vue mémorise (ligne, segment). La barre de défilement et la
+  minimap restent exprimées en lignes du document.
+- **Repli** (`fold.rs`) : déduit de l'**indentation**, sans analyse syntaxique : une ligne est
+  repliable si la prochaine ligne non vide est plus indentée ; la région va jusqu'à la dernière ligne
+  plus indentée. La ligne de fermeture (`}`) reste visible. Les régions repliées sont mémorisées en
+  octets et suivent les modifications du texte ; une modification qui les chevauche les déplie.
+- **Haut / Bas** suivent les rangées affichées (colonne visée conservée) et sautent les lignes
+  repliées. Page suivante / précédente aussi.
+- **Réglages** : `word_wrap = false` (défaut `true`) et `word_wrap_max_bytes` (défaut 16 Mo) dans
+  `config.toml`. Au-delà de cette taille, ou pour une ligne de plus de 200 000 caractères, pas de
+  retour à la ligne (voir `docs/benchmarks.md`).
+
 ## Limites connues
 
-- Pas de **repli de code** : les flèches ▼ de la gouttière de Sublime Text ne sont pas dessinées
-  (elles seraient factices). L'espace qu'elles occupent est réservé.
-- Pas de **retour à la ligne automatique** : les lignes longues sont coupées par le bord de la
-  fenêtre (pas de défilement horizontal non plus).
+- **Repli** : par indentation seulement (pas de repli des accolades sur une même ligne, des
+  commentaires multi-lignes ni des régions Markdown) ; l'état de repli n'est pas conservé à la
+  fermeture ; la minimap montre toujours tout le texte ; Fold All est limité aux 100 000 premières
+  lignes et prend ~80 ms sur 150 000 lignes (sur le thread de l'interface, une seule fois).
+- **Retour à la ligne** : les rangées de continuation ne sont pas indentées ; une tabulation au
+  milieu d'une rangée de continuation s'aligne à partir du début de cette rangée ; Début / Fin vont
+  au début / à la fin de la **ligne** (pas de la rangée) ; les caractères larges (CJK, emoji) comptent
+  pour une colonne ; la bascule n'a pas de coche dans le menu (un message s'affiche dans la barre
+  d'état).
+- Ctrl+Maj+[ / ] ne fonctionnent pas sur les claviers où `[` demande AltGr (AZERTY) : utiliser le menu
+  Edit ou la palette.
 - La minimap n'est **pas colorée** par la syntaxe (texte gris) : la coloration ne couvre que les
   lignes visibles.
 - Intitulés des menus, de la barre d'état et « untitled » en **anglais**, comme Sublime Text ;

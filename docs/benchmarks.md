@@ -338,6 +338,75 @@ La référence « avant » est la même machine, la même séance, juste avant l
   racine seulement, mais l'arbre aplati est reconstruit à chaque dépli), rendu à 125 % et 150 % de
   mise à l'échelle Windows, minimap d'un fichier de 500 Mo (elle lit les lignes affichées seulement).
 
+## Retour à la ligne et repli de code (étape 6)
+
+Ajout : retour à la ligne automatique (actif par défaut), repli par indentation, défilement
+horizontal (voir [`interface.md`](interface.md)). Comme pour l'interface, la mesure compare
+**deux binaires construits dans la même séance** : le commit précédent (`8e0b12c`, dans un worktree
+à part) et la version courante, lancés en alternance (même machine, même charge) avec
+`.\scripts\bench-app.ps1` (fenêtre hors écran 1100×720). Le texte synthétique des mesures a des
+lignes de 30 à 110 caractères : une partie d'entre elles se coupe dans une fenêtre de 1100 px, donc
+le retour à la ligne **travaille réellement** pendant la mesure.
+
+| Scénario | Objectif | Avant | **Après** | Verdict |
+|---|---|---|---|---|
+| Frappe → image copiée, 300 frappes (8 paires) | < 10 ms (p99 < 16) | moy 2,9–4,1 ms, p99 6,3–8,0, max ≤ 17,4 | **moy 3,3–4,4 ms, p99 6,8–7,8** dans 6 séries sur 8, max ≤ 12,9 ; **2 séries avec un pic** (p99 20,1 ms, max 31 ms ; max 73 ms) | OK en général, **non reproduit** : voir ci-dessous |
+| Défilement, 600 images de 3 lignes (4 paires) | fluide | moy 1,18–1,27 ms, p99 2,8–3,3 | **moy 1,24–1,31 ms, p99 3,0–3,4** | OK, écart négligeable |
+| Frappe dans un fichier Rust de 1 Mo, coloration (3 paires) | < 10 ms | moy 1,70–1,79, p99 4,4–5,5 | **moy 1,75–1,78, p99 4,5–5,3** | OK, identique |
+
+Les valeurs absolues sont plus hautes que celles du tableau de l'interface (machine plus chargée ce
+jour-là) ; seul l'écart entre les deux binaires, mesurés en alternance, compte. Sur la frappe, la
+moyenne augmente d'environ **0,1 à 0,3 ms** (la construction des rangées passe de 0,07 à 0,21 ms
+dans l'application, rangées de la fenêtre construites à froid) ; au p99, +0,5 ms.
+
+Les deux séries avec pic se suivaient dans le temps ; le binaire « avant » a eu un pic de 17 ms dans
+la série 7 ; une vingtaine d'autres séries de la version courante, mesurées dans la même séance,
+n'ont jamais dépassé p99 9,4 ms / max 17,6 ms. Je les attribue à la machine (antivirus), mais **je
+ne peux pas l'exclure** : elles ne se sont pas reproduites.
+
+### Coût de la construction des rangées sur un gros document
+
+Mesure sans fenêtre (`cargo test --release -p paulwrite-app --test frame_cost cout_du_retour --
+--ignored --nocapture`) : 150 000 lignes, 7,2 Mo, vue de 40 rangées de 90 colonnes.
+
+| Opération | Sans retour à la ligne | Avec retour à la ligne |
+|---|---|---|
+| Construction des rangées (`build_view`), moyenne / p99 | 0,04 / 0,05 ms | 0,06 / 0,10 ms |
+| Molette (3 rangées) + construction | 0,03 / 0,05 ms | 0,05 / 0,08 ms |
+| Frappe + construction | 0,02 / 0,03 ms | 0,07 / 0,12 ms |
+| Fold All (25 000 régions, 150 000 lignes) | — | **73 à 85 ms** (une fois, thread de l'interface) |
+| Unfold All | — | 0,1 ms |
+
+(Ctrl+Fin, Ctrl+Début et page suivante : 0,03 à 0,25 ms, mesurés avant les dernières optimisations.)
+
+### Ce que la mesure a montré
+
+- **Le coût du retour à la ligne est faible** : la découpe n'est calculée que pour les ~40 rangées
+  visibles ; aucune structure ne dépend de la taille du document, sauf le repli (une entrée par
+  région repliée). Une première version coûtait 0,07 ms (sans retour à la ligne) / 0,11 ms (avec)
+  par construction : chercher les lignes repliables pour les flèches ▼ à chaque image (maintenant
+  fait seulement pendant le survol de la gouttière), et relire plusieurs fois le texte de chaque
+  ligne (maintenant une seule lecture) ont ramené cela à 0,04 / 0,06 ms.
+- **Le coût visible en frappe vient surtout du reflux du texte** : taper au début d'une ligne longue
+  redessine toutes ses rangées (3 ou 4), là où le texte clippé n'en redessinait qu'une. C'est inhérent
+  au retour à la ligne.
+- **Première version de Fold All : 398 ms.** Elle appelait `Folds::fold` en boucle (insertion triée,
+  quadratique) : 25 000 régions → 625 millions d'opérations. Remplacé par une construction linéaire
+  (`replace_all`) : 73 à 85 ms (la lecture des lignes en est la plus grande part, non détaillé).
+  **Reste supérieur à 50 ms** : c'est une commande ponctuelle, bornée à 100 000 lignes, mais elle
+  fige l'interface ce temps-là ; la déplacer sur un worker est possible si cela gêne.
+- **Recalcul des régions à chaque frappe** : recalculer la forme en lignes de toutes les régions à
+  chaque frappe coûterait de l'ordre de plusieurs ms après un Fold All sur 25 000 régions (estimé,
+  non mesuré). Une modification qui garde le même nombre de lignes ne recalcule plus rien (seuls les
+  décalages en octets sont mis à jour).
+- **Taper au bord droit sans retour à la ligne** coûtait 5 ms par frappe (toutes les rangées
+  redessinées à chaque défilement horizontal d'une colonne) : le défilement se fait maintenant par
+  à-coups d'un quart de largeur.
+- **Plafonds** : retour à la ligne désactivé au-delà de 16 Mo (`word_wrap_max_bytes`) et pour les
+  lignes de plus de 200 000 caractères, qui ne sont pas découpées (un parcours complet par image).
+- **Non mesuré** : défilement avec retour à la ligne dans un fichier de 16 Mo en fenêtre 4K ; rendu à
+  125 % et 150 % ; fichiers dont toutes les lignes se coupent en dizaines de rangées.
+
 ## Correction : défilement (bug de l'étape 2 trouvé à l'étape 4)
 
 **Bug** : après un défilement, le milieu de la fenêtre gardait l'ancien texte pendant que le haut et
