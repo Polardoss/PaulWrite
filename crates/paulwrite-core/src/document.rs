@@ -76,6 +76,17 @@ impl Document {
         self.buffer.track_edits(on);
     }
 
+    /// Active le journal des modifications au format LSP (synchronisation d'un serveur de langage).
+    pub fn track_changes(&mut self, on: bool) {
+        self.buffer.track_changes(on);
+    }
+
+    /// Modifications au format LSP (plages UTF-16 d'avant modification) faites depuis le dernier
+    /// appel, dans l'ordre. Vide si le suivi est désactivé.
+    pub fn take_changes(&mut self) -> Vec<crate::buffer::TextChange> {
+        self.buffer.take_changes()
+    }
+
     /// Modifications (octets, points) faites depuis le dernier appel : frappe, collage,
     /// undo/redo, multi-curseurs. Vide si le suivi est désactivé.
     pub fn take_edits(&mut self) -> Vec<crate::buffer::TextEdit> {

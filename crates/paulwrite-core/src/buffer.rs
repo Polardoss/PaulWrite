@@ -30,11 +30,23 @@ pub struct TextEdit {
     pub new_end_point: (usize, usize),
 }
 
+/// Une modification du texte au format du protocole LSP : plage `(ligne, colonne en unités
+/// UTF-16)` **dans le texte d'avant la modification**, et texte inséré à la place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextChange {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub text: String,
+}
+
 /// Contenu texte d'un document.
 #[derive(Clone, Default)]
 pub struct Buffer {
     rope: Rope,
     revision: u64,
+    /// Journal des modifications au format LSP, tenu seulement si [`Buffer::track_changes`]
+    /// l'a activé (aucun coût sinon).
+    change_log: Option<Vec<TextChange>>,
     /// Journal des modifications, tenu seulement si [`Buffer::track_edits`] l'a activé (aucun coût
     /// sinon).
     edit_log: Option<Vec<TextEdit>>,
@@ -65,6 +77,7 @@ impl Buffer {
             rope: Rope::from_str(text),
             revision: 0,
             edit_log: None,
+            change_log: None,
         }
     }
 
@@ -75,6 +88,7 @@ impl Buffer {
             rope,
             revision: 0,
             edit_log: None,
+            change_log: None,
         }
     }
 
@@ -131,6 +145,43 @@ impl Buffer {
             .unwrap_or_default()
     }
 
+    /// Active ou désactive le journal des modifications au format LSP (synchronisation d'un
+    /// serveur de langage). Désactiver vide le journal.
+    pub fn track_changes(&mut self, on: bool) {
+        self.change_log = on.then(Vec::new);
+    }
+
+    /// Retire et renvoie les modifications faites depuis le dernier appel, dans l'ordre.
+    pub fn take_changes(&mut self) -> Vec<TextChange> {
+        self.change_log
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// (ligne, colonne en unités UTF-16) d'un offset de caractères : le format des positions LSP.
+    #[must_use]
+    pub fn lsp_position(&self, char_idx: usize) -> (usize, usize) {
+        let line = self.rope.char_to_line(char_idx);
+        let line_start = self.rope.line_to_char(line);
+        (
+            line,
+            self.rope.char_to_utf16_cu(char_idx) - self.rope.char_to_utf16_cu(line_start),
+        )
+    }
+
+    /// Offset de caractères d'une position LSP `(ligne, colonne UTF-16)`, ramenée dans le texte.
+    #[must_use]
+    pub fn char_at_lsp_position(&self, line: usize, col16: usize) -> usize {
+        let line = line.min(self.rope.len_lines().saturating_sub(1));
+        let start = self.rope.line_to_char(line);
+        let base = self.rope.char_to_utf16_cu(start);
+        let line_end = self.line_end(line);
+        let target = (base + col16).min(self.rope.char_to_utf16_cu(line_end));
+        // `utf16_cu_to_char` arrondit vers le bas si la position tombe au milieu d'une paire.
+        self.rope.utf16_cu_to_char(target).clamp(start, line_end)
+    }
+
     /// (octet, (ligne, colonne en octets)) d'un offset de caractères.
     fn byte_and_point(&self, char_idx: usize) -> (usize, (usize, usize)) {
         let byte = self.rope.char_to_byte(char_idx);
@@ -140,6 +191,16 @@ impl Buffer {
 
     /// Insère `text` à `char_idx`.
     pub fn insert(&mut self, char_idx: usize, text: &str) {
+        if self.change_log.is_some() && !text.is_empty() {
+            let p = self.lsp_position(char_idx);
+            if let Some(log) = self.change_log.as_mut() {
+                log.push(TextChange {
+                    start: p,
+                    end: p,
+                    text: text.to_owned(),
+                });
+            }
+        }
         if self.edit_log.is_some() && !text.is_empty() {
             let (start_byte, start_point) = self.byte_and_point(char_idx);
             let rows = text.matches('\n').count();
@@ -166,6 +227,16 @@ impl Buffer {
     /// Supprime la plage de caractères.
     pub fn delete(&mut self, range: Range<usize>) {
         if range.start < range.end {
+            if self.change_log.is_some() {
+                let (start, end) = (self.lsp_position(range.start), self.lsp_position(range.end));
+                if let Some(log) = self.change_log.as_mut() {
+                    log.push(TextChange {
+                        start,
+                        end,
+                        text: String::new(),
+                    });
+                }
+            }
             if self.edit_log.is_some() {
                 let (start_byte, start_point) = self.byte_and_point(range.start);
                 let (old_end_byte, old_end_point) = self.byte_and_point(range.end);
@@ -421,6 +492,72 @@ cc",
         b.insert(0, "z");
         b.track_edits(false);
         assert!(b.take_edits().is_empty());
+    }
+
+    #[test]
+    fn journal_au_format_lsp_en_utf16() {
+        // « é » = 1 unité UTF-16, « 😀 » = 2 : les colonnes LSP ne sont ni des octets ni des
+        // caractères.
+        let mut b = Buffer::from_text("aé😀b\nsuite\n");
+        b.track_changes(true);
+        // insertion après « aé😀 » (colonne UTF-16 4), à la ligne 0
+        b.insert(3, "XY");
+        // suppression de « 😀 » (caractères 2..3 -> colonnes UTF-16 2..4)
+        b.delete(2..3);
+        // suppression à cheval sur deux lignes : de la fin de la ligne 0 au début de « sui »
+        let text = b.to_string();
+        let start = text.chars().position(|c| c == 'b').unwrap() + 1;
+        b.delete(start..start + 4);
+        let changes = b.take_changes();
+        assert_eq!(
+            changes,
+            vec![
+                TextChange {
+                    start: (0, 4),
+                    end: (0, 4),
+                    text: "XY".into()
+                },
+                TextChange {
+                    start: (0, 2),
+                    end: (0, 4),
+                    text: String::new()
+                },
+                TextChange {
+                    start: (0, 5),
+                    end: (1, 3),
+                    text: String::new()
+                },
+            ]
+        );
+        // désactivé par défaut et après désactivation : rien
+        b.insert(0, "z");
+        b.track_changes(false);
+        b.insert(0, "z");
+        assert!(b.take_changes().is_empty());
+    }
+
+    #[test]
+    fn positions_lsp_dans_les_deux_sens() {
+        let b = Buffer::from_text("aé😀b\nsuite");
+        // caractères : a0 é1 😀2 b3 saut4 s5… ; colonnes UTF-16 de la ligne 0 : 0 1 2 4 5
+        assert_eq!(b.lsp_position(0), (0, 0));
+        assert_eq!(b.lsp_position(2), (0, 2));
+        assert_eq!(b.lsp_position(3), (0, 4), "« 😀 » compte pour 2 unités");
+        assert_eq!(b.lsp_position(4), (0, 5), "fin de ligne, avant le saut");
+        assert_eq!(b.lsp_position(5), (1, 0));
+        for c in 0..=b.len_chars() {
+            let (l, col) = b.lsp_position(c);
+            assert_eq!(
+                b.char_at_lsp_position(l, col),
+                c,
+                "aller-retour du caractère {c}"
+            );
+        }
+        // hors du texte : ramené à la fin de la ligne / à la dernière ligne
+        assert_eq!(b.char_at_lsp_position(0, 99), 4);
+        assert_eq!(b.char_at_lsp_position(99, 0), 5);
+        // au milieu d'une paire de substitution : arrondi vers le début du caractère
+        assert_eq!(b.char_at_lsp_position(0, 3), 2);
     }
 
     #[test]
