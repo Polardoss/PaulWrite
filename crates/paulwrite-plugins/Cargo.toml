@@ -1,0 +1,22 @@
+[package]
+name = "paulwrite-plugins"
+description = "Plugins Lua : commandes et événements, exécutés sur un thread dédié (étape 5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ropey.workspace = true
+crossbeam-channel = "0.5"
+# Moteur de script : Lua 5.4 compilé avec le crate (≈ 0,3 Mo, démarrage de la machine virtuelle en
+# quelques centaines de microsecondes). Choisi contre WASM (moteur de plusieurs Mo, compilation
+# longue) : voir docs/plugins.md.
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -4,6 +4,7 @@ members = [
     "crates/paulwrite-core",
     "crates/paulwrite-syntax",
     "crates/paulwrite-search",
+    "crates/paulwrite-plugins",
     "crates/paulwrite-render",
     "crates/paulwrite-app",
 ]
