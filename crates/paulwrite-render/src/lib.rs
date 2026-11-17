@@ -21,7 +21,8 @@ pub use png::write_png;
 
 pub use soft::{
     Band, Chrome, Colors, Metrics, MinimapSource, Overlay, OverlayRow, OverlayRowKind, Row,
-    RowSource, Scroll, SoftRenderer, StripHit, TabButton, TabInfo, KIND_SLOTS,
+    RowSource, Scroll, Sidebar, SidebarKind, SidebarRow, SoftRenderer, StripHit, TabButton,
+    TabInfo, KIND_SLOTS,
 };
 
 use std::time::Duration;

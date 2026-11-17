@@ -162,7 +162,7 @@ impl Editor {
     #[must_use]
     pub fn display_name(&self) -> String {
         self.path.as_ref().and_then(|p| p.file_name()).map_or_else(
-            || "Sans titre".to_owned(),
+            || "untitled".to_owned(),
             |n| n.to_string_lossy().into_owned(),
         )
     }
@@ -171,7 +171,11 @@ impl Editor {
     #[must_use]
     pub fn title(&self) -> String {
         let star = if self.is_modified() { "*" } else { "" };
-        format!("{}{star} — PaulWrite", self.display_name())
+        let name = self
+            .path
+            .as_ref()
+            .map_or_else(|| self.display_name(), |p| p.to_string_lossy().into_owned());
+        format!("{name}{star} - PaulWrite")
     }
 
     // --- Coloration syntaxique ---------------------------------------------------------------
@@ -459,6 +463,11 @@ impl Editor {
             Command::GotoLine => return Some(Effect::OpenPalette(PaletteMode::GotoLine)),
             Command::SearchProject => return Some(Effect::OpenPalette(PaletteMode::Search)),
             Command::ReloadPlugins => return Some(Effect::ReloadPlugins),
+            Command::OpenFolder => return Some(Effect::OpenFolder),
+            Command::CloseFolder => return Some(Effect::CloseFolder),
+            Command::ToggleSidebar => return Some(Effect::ToggleSidebar),
+            Command::OpenSettings => return Some(Effect::OpenSettings),
+            Command::About => return Some(Effect::About),
             Command::LspCompletion => return Some(Effect::Lsp(LspAction::Completion)),
             Command::LspDefinition => return Some(Effect::Lsp(LspAction::Definition)),
             Command::LspHover => return Some(Effect::Lsp(LspAction::Hover)),
@@ -902,7 +911,7 @@ mod tests {
         assert_eq!(e.document().buffer().rope().to_string(), "");
         e.execute(Command::Redo, 101);
         assert_eq!(e.document().buffer().rope().to_string(), "abc");
-        assert_eq!(e.title(), "Sans titre* — PaulWrite");
+        assert_eq!(e.title(), "untitled* - PaulWrite");
         e.mark_saved(e.document().buffer().revision());
         assert!(!e.is_modified());
     }
@@ -1194,10 +1203,124 @@ mod tests {
         );
     }
 
+    fn status(e: &Editor) -> String {
+        let mut s = String::new();
+        e.write_status(&mut s);
+        s
+    }
+
+    #[test]
+    fn texte_de_la_barre_d_etat() {
+        let mut e = editor(
+            "ab
+	cdef
+z",
+        );
+        assert_eq!(status(&e), "Line 1, Column 1");
+        e.click(1, 1, false);
+        // la tabulation compte pour 4 colonnes, comme à l'écran
+        assert_eq!(status(&e), "Line 2, Column 5");
+        // sélection sur une ligne, sur plusieurs lignes, plusieurs curseurs
+        e.click(1, 1, false);
+        e.click(1, 4, true);
+        assert_eq!(status(&e), "3 characters selected");
+        e.click(0, 1, false);
+        e.click(1, 2, true);
+        assert_eq!(status(&e), "2 lines, 4 characters selected");
+        e.click(0, 0, false);
+        e.click(0, 1, true);
+        assert_eq!(status(&e), "1 character selected");
+        e.execute(Command::AddCursorBelow, 0);
+        assert_eq!(status(&e), "2 selection regions");
+    }
+
+    #[test]
+    fn gouttiere_numeros_et_ligne_courante() {
+        let mut e = Editor::from_document(
+            Document::from_text(
+                &"x
+"
+                .repeat(120),
+            ),
+            None,
+        );
+        e.set_viewport_rows(5);
+        assert_eq!(e.line_digits(), 3);
+        e.click(2, 0, false);
+        e.build_view();
+        let v = e.view();
+        let rows: Vec<_> = (0..v.len())
+            .map(|i| (v.row(i).number, v.row(i).current))
+            .collect();
+        assert_eq!(
+            rows,
+            [(1, false), (2, false), (3, true), (4, false), (5, false)]
+        );
+        // en bas du document : pas de numéro au-delà de la dernière ligne
+        e.scroll_by(1000);
+        e.build_view();
+        let v = e.view();
+        assert_eq!(v.row(0).number, 121);
+        assert_eq!(v.row(1).number, 0);
+        assert_eq!(Editor::new().line_digits(), 1);
+    }
+
+    #[test]
+    fn defilement_par_la_minimap_et_la_barre() {
+        let mut e = Editor::from_document(
+            Document::from_text(
+                &"ligne
+"
+                .repeat(100),
+            ),
+            None,
+        );
+        e.set_viewport_rows(10);
+        e.scroll_to_center(50);
+        assert_eq!(e.first_line(), 45);
+        e.scroll_to_fraction(0.0);
+        assert_eq!(e.first_line(), 0);
+        e.scroll_to_fraction(1.0);
+        assert_eq!(e.first_line(), e.line_count() - 1);
+        assert_eq!(e.scroll().total, e.line_count());
+        // le curseur n'a pas bougé
+        assert_eq!(status(&e), "Line 1, Column 1");
+        // texte de la minimap : ligne sans fin de ligne
+        let mut line = String::new();
+        e.minimap().line(3, &mut line);
+        assert_eq!(line, "ligne");
+        assert_eq!(e.minimap().len(), e.line_count());
+    }
+
+    #[test]
+    fn clic_dans_la_gouttiere_selectionne_la_ligne() {
+        let mut e = editor(
+            "un
+deux
+trois",
+        );
+        e.select_row(1);
+        assert_eq!(
+            e.selected_text().as_deref(),
+            Some(
+                "deux
+"
+            )
+        );
+        e.select_row(2);
+        assert_eq!(e.selected_text().as_deref(), Some("trois"));
+        // au-delà de la fin : dernière ligne
+        e.select_row(4);
+        assert_eq!(e.selected_text().as_deref(), Some("trois"));
+    }
+
     #[test]
     fn titre_avec_nom_de_fichier() {
         let e = Editor::from_document(Document::new(), Some(PathBuf::from("dossier/notes.txt")));
-        assert_eq!(e.title(), "notes.txt — PaulWrite");
+        assert!(
+            e.title().ends_with("notes.txt - PaulWrite"),
+            "chemin complet comme Sublime Text"
+        );
     }
 
     #[test]

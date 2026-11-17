@@ -1,4 +1,4 @@
-//! Services Win32 : presse-papiers, boîtes de dialogue.
+//! Services Win32 : presse-papiers, boîtes de dialogue, barre de menus.
 //!
 //! Les boîtes de dialogue sont **modales et bloquantes** : à appeler depuis un worker (fichiers)
 //! ou, pour la confirmation de fermeture, depuis le thread UI (l'utilisateur attend de toute façon).
@@ -7,6 +7,9 @@ use std::path::PathBuf;
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
@@ -16,8 +19,12 @@ use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
+use windows::Win32::UI::Shell::{
+    FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL,
+    AppendMenuW, CreateMenu, CreatePopupMenu, MessageBoxW, SetMenu, IDNO, IDYES, MB_ICONERROR,
+    MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, WM_COMMAND,
 };
 
 /// Texte du presse-papiers (s'il y en a).
@@ -173,4 +180,82 @@ pub fn pick_open_file(owner: isize) -> Option<PathBuf> {
 #[must_use]
 pub fn pick_save_file(owner: isize, suggested_name: &str) -> Option<PathBuf> {
     file_dialog(owner, true, suggested_name)
+}
+
+/// Boîte « Ouvrir un dossier » ; `None` si l'utilisateur annule. Bloquante : à appeler depuis un
+/// worker (elle initialise COM sur le thread appelant).
+#[must_use]
+pub fn pick_folder(owner: isize) -> Option<PathBuf> {
+    // SAFETY: appels COM sur le thread courant ; la boîte et le texte renvoyé sont libérés ici.
+    unsafe {
+        // S_FALSE (déjà initialisé) est sans conséquence.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        dialog
+            .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+            .ok()?;
+        dialog.Show(Some(HWND(owner as *mut _))).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(name.0 as *const _));
+        path
+    }
+}
+
+/// Une entrée d'un menu déroulant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MenuEntry {
+    /// Identifiant renvoyé par [`menu_command`] et intitulé (`\t` sépare le raccourci affiché).
+    Item(u32, String),
+    Separator,
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Installe une barre de menus native sur la fenêtre. Renvoie `false` en cas d'échec.
+#[must_use]
+pub fn set_menu(hwnd: isize, menus: &[(String, Vec<MenuEntry>)]) -> bool {
+    // SAFETY: les menus créés sont possédés par la fenêtre une fois `SetMenu` réussi ; les chaînes
+    // sont terminées par 0 et copiées par Windows pendant `AppendMenuW`.
+    unsafe {
+        let Ok(bar) = CreateMenu() else {
+            return false;
+        };
+        for (title, entries) in menus {
+            let Ok(popup) = CreatePopupMenu() else {
+                return false;
+            };
+            for e in entries {
+                let _ = match e {
+                    MenuEntry::Item(id, label) => {
+                        let text = wide(label);
+                        AppendMenuW(popup, MF_STRING, *id as usize, PCWSTR(text.as_ptr()))
+                    }
+                    MenuEntry::Separator => AppendMenuW(popup, MF_SEPARATOR, 0, PCWSTR::null()),
+                };
+            }
+            let text = wide(title);
+            let _ = AppendMenuW(bar, MF_POPUP, popup.0 as usize, PCWSTR(text.as_ptr()));
+        }
+        SetMenu(HWND(hwnd as *mut _), Some(bar)).is_ok()
+    }
+}
+
+/// Si `msg` (le `MSG` brut reçu par le crochet de messages de la boucle d'événements) est le
+/// choix d'une entrée de menu, renvoie son identifiant.
+#[must_use]
+pub fn menu_command(msg: *const std::ffi::c_void) -> Option<u32> {
+    if msg.is_null() {
+        return None;
+    }
+    // SAFETY: la boucle d'événements fournit un pointeur valide vers un `MSG` pendant l'appel.
+    let m = unsafe { &*msg.cast::<MSG>() };
+    // Menu : mot de poids fort de `wParam` = 0 et `lParam` = 0 (sinon contrôle ou accélérateur).
+    (m.message == WM_COMMAND && (m.wParam.0 >> 16) & 0xffff == 0 && m.lParam.0 == 0)
+        .then_some((m.wParam.0 & 0xffff) as u32)
 }

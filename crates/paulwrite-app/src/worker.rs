@@ -13,6 +13,7 @@ use paulwrite_render::platform::{self, SaveChoice};
 use ropey::Rope;
 
 use crate::config::Config;
+use crate::sidebar::{is_hidden_dir, sort_entries, Entry};
 
 /// Identifiant d'onglet (stable pendant la vie de l'onglet).
 pub type TabId = u64;
@@ -44,6 +45,10 @@ pub enum Job {
     Open { tab: TabId, path: PathBuf },
     /// Boîte « Ouvrir » (bloquante).
     PickOpen { owner: isize },
+    /// Boîte « Ouvrir un dossier » (bloquante).
+    PickFolder { owner: isize },
+    /// Liste le contenu d'un dossier (barre latérale).
+    ListDir { path: PathBuf },
     /// Boîte « Enregistrer sous » (bloquante) pour l'onglet `tab`.
     PickSave {
         tab: TabId,
@@ -67,6 +72,8 @@ impl std::fmt::Debug for Job {
             Job::ShowError { .. } => write!(f, "ShowError"),
             Job::Open { tab, path } => write!(f, "Open({tab}, {path:?})"),
             Job::PickOpen { .. } => write!(f, "PickOpen"),
+            Job::PickFolder { .. } => write!(f, "PickFolder"),
+            Job::ListDir { path } => write!(f, "ListDir({path:?})"),
             Job::PickSave { tab, .. } => write!(f, "PickSave({tab})"),
             Job::Save { tab, path, .. } => write!(f, "Save({tab}, {path:?})"),
         }
@@ -104,6 +111,12 @@ pub enum Done {
         result: Result<(), String>,
     },
     OpenPicked(Option<PathBuf>),
+    FolderPicked(Option<PathBuf>),
+    /// Contenu d'un dossier (déjà trié) ; vide si la lecture a échoué.
+    DirListed {
+        path: PathBuf,
+        entries: Vec<Entry>,
+    },
     SavePicked {
         tab: TabId,
         path: Option<PathBuf>,
@@ -126,10 +139,41 @@ impl std::fmt::Debug for Done {
                 tab, path, result, ..
             } => write!(f, "Saved({tab}, {path:?}, ok={})", result.is_ok()),
             Done::OpenPicked(p) => write!(f, "OpenPicked({p:?})"),
+            Done::FolderPicked(p) => write!(f, "FolderPicked({p:?})"),
+            Done::DirListed { path, entries } => {
+                write!(f, "DirListed({path:?}, {} éléments)", entries.len())
+            }
             Done::SavePicked { tab, path } => write!(f, "SavePicked({tab}, {path:?})"),
         }
     }
 }
+
+/// Contenu d'un dossier, trié (appelé sur le worker). Vide si la lecture échoue.
+fn list_dir(path: &Path) -> Vec<Entry> {
+    let Ok(read) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<Entry> = read
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // `metadata` suit les liens symboliques : un lien vers un dossier est un dossier.
+            let is_dir = e.path().is_dir();
+            (!(is_dir && is_hidden_dir(&name))).then_some(Entry { name, is_dir })
+        })
+        .collect();
+    sort_entries(&mut entries);
+    entries
+}
+
+/// Contenu d'un fichier de configuration neuf (tout est commenté : les valeurs par défaut
+/// s'appliquent).
+const CONFIG_TEMPLATE: &str =
+    "# Configuration de PaulWrite (une valeur par ligne : clé = valeur)\n\
+# highlight = true                # false : pas de coloration syntaxique\n\
+# highlight_max_bytes = 1048576   # au-delà de cette taille (octets), pas de coloration\n\
+# lsp = false                     # true : serveurs de langage (programmes externes)\n\
+# lsp_rust = \"rust-analyzer\"\n";
 
 /// Charge un fichier en document (appelé sur le worker).
 fn load(tab: TabId, path: &Path, notify: &dyn Fn(Done)) -> Result<Document, String> {
@@ -167,6 +211,13 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                     }),
                     Job::ShowError { owner, text } => platform::show_error(owner, &text),
                     Job::Open { tab, path } => {
+                        // Le fichier de configuration est créé à la première ouverture.
+                        if !path.exists() && Config::path().as_deref() == Some(path.as_path()) {
+                            if let Some(dir) = path.parent() {
+                                let _ = std::fs::create_dir_all(dir);
+                            }
+                            let _ = std::fs::write(&path, CONFIG_TEMPLATE);
+                        }
                         if path.is_dir() {
                             notify(Done::Directory { tab, path });
                         } else {
@@ -176,6 +227,13 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                     }
                     Job::PickOpen { owner } => {
                         notify(Done::OpenPicked(platform::pick_open_file(owner)));
+                    }
+                    Job::PickFolder { owner } => {
+                        notify(Done::FolderPicked(platform::pick_folder(owner)));
+                    }
+                    Job::ListDir { path } => {
+                        let entries = list_dir(&path);
+                        notify(Done::DirListed { path, entries });
                     }
                     Job::PickSave {
                         tab,

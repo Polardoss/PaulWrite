@@ -85,7 +85,7 @@ mod tests {
     fn onglet_vierge() {
         let mut t = Tab::new(1);
         assert!(t.is_pristine());
-        assert_eq!(t.label(), "Sans titre");
+        assert_eq!(t.label(), "untitled");
         t.editor.insert_text("a", 0);
         assert!(!t.is_pristine());
 

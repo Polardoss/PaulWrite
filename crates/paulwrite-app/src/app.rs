@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
@@ -26,6 +26,7 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Cursor, CursorIcon, Window, WindowId};
 
@@ -33,12 +34,17 @@ use crate::command::{Command, Effect, LspAction};
 use crate::config::Config;
 use crate::editor::{Preedit, Squiggle};
 use crate::keymap;
+use crate::menu;
 use crate::metrics::Samples;
 use crate::palette::{parse_goto, Item, Outcome, Palette, PaletteKey, PaletteMode, Target};
+use crate::sidebar::{Click, SidebarTree};
 use crate::tab::{Tab, SYNTAX_MARGIN_LINES};
 use crate::worker::{self, ConfirmFor, Done, Job, TabId};
 
 const BLINK: Duration = Duration::from_millis(530);
+/// Délai minimal entre deux reconstructions de la minimap pendant la frappe : elle se met à jour
+/// au plus tous les 150 ms (et à la fin de la frappe), jamais à chaque touche.
+const MINIMAP_DELAY: Duration = Duration::from_millis(150);
 
 /// Éditeur de l'onglet actif (macro plutôt que méthode : emprunt disjoint des autres champs).
 macro_rules! ed {
@@ -75,7 +81,12 @@ pub enum UserEvent {
     Lsp(lsp::Event),
     /// Étape d'une capture d'écran (`--screenshot`).
     Screenshot(u8),
+    /// Entrée choisie dans la barre de menus (identifiant : voir [`menu::build`]).
+    Menu(u32),
 }
+
+/// Pont entre le crochet de messages de la boucle d'événements (créé avant elle) et l'application.
+static MENU_PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
 
 /// Mode de mesure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,8 +338,22 @@ struct App {
     bench_keys: usize,
     /// Texte de la barre d'état, reconstruit à chaque image (tampon réutilisé).
     status_buf: String,
+    /// Mesures : durée de chaque étape d'une image (préparation, interface, dessin, copie).
+    stages: [Samples; 6],
+    /// Dernière minimap fournie au rendu : clé (onglet, révision, première ligne) et instant.
+    minimap_key: Option<(TabId, u64, usize)>,
+    minimap_at: Instant,
+    /// La minimap est en retard sur le texte : une image est à redemander à l'échéance.
+    minimap_pending: bool,
     /// Glissement en cours dans la zone de droite : `true` barre de défilement, `false` minimap.
     strip_drag: Option<bool>,
+    /// Arborescence du dossier ouvert ; la barre latérale est affichée si `sidebar_open`.
+    sidebar: Option<SidebarTree>,
+    sidebar_open: bool,
+    /// Commandes de la barre de menus, par identifiant (voir [`menu::build`]).
+    menu_commands: Vec<Command>,
+    /// Ctrl+K a été pressé : la touche suivante complète un raccourci à deux temps.
+    chord_k: bool,
 
     palette: Option<PaletteState>,
     /// Le contenu du panneau a changé : à renvoyer au moteur de rendu.
@@ -412,7 +437,15 @@ impl App {
             lsp_req_at: None,
             bench_keys: 0,
             status_buf: String::new(),
+            stages: Default::default(),
+            minimap_key: None,
+            minimap_at: Instant::now(),
+            minimap_pending: false,
             strip_drag: None,
+            sidebar: None,
+            sidebar_open: false,
+            menu_commands: Vec::new(),
+            chord_k: false,
             palette: None,
             overlay_dirty: false,
             palette_query_at: None,
@@ -974,6 +1007,60 @@ impl App {
         let settled = self.refresh_palette_items(true);
         self.note_settled(settled);
         self.overlay_dirty = true;
+        self.request_redraw();
+    }
+
+    /// Ouvre un dossier : il devient le projet et sa barre latérale s'affiche.
+    fn set_project_root(&mut self, path: PathBuf) {
+        self.sidebar = Some(SidebarTree::new(path.clone()));
+        self.sidebar_open = true;
+        self.project_root = Some(path);
+        self.request_redraw();
+    }
+
+    /// Affiche ou masque la barre latérale ; sans dossier ouvert, propose d'en choisir un.
+    fn toggle_sidebar(&mut self) {
+        if self.sidebar.is_none() {
+            self.jobs.send(Job::PickFolder { owner: self.hwnd }).ok();
+            return;
+        }
+        self.sidebar_open = !self.sidebar_open;
+        self.request_redraw();
+    }
+
+    /// Envoie la barre latérale au moteur de rendu et demande au worker les dossiers à lister.
+    fn refresh_sidebar(&mut self) {
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        match self.sidebar.as_mut() {
+            Some(tree) if self.sidebar_open => {
+                for dir in tree.take_listing_requests() {
+                    self.jobs.send(Job::ListDir { path: dir }).ok();
+                }
+                let capacity = r.sidebar_capacity();
+                r.set_sidebar(Some(tree.render(capacity)));
+            }
+            _ => r.set_sidebar(None),
+        }
+    }
+
+    /// Clic dans la barre latérale : déplie un dossier ou ouvre un fichier.
+    fn sidebar_click(&mut self, y: f32) {
+        let Some(row) = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.sidebar_row_at(1.0, y))
+        else {
+            return;
+        };
+        let Some(tree) = self.sidebar.as_mut() else {
+            return;
+        };
+        match tree.click(row) {
+            Click::OpenFile(path) => self.open_path(path),
+            Click::Toggled | Click::Nothing => {}
+        }
         self.request_redraw();
     }
 
@@ -1784,12 +1871,18 @@ impl App {
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
+        let t0 = Instant::now();
         ed!(self).build_view();
+        let t1 = Instant::now();
         let scrolled = ed!(self).scrolled_since_draw();
         if let Err(e) = r.draw(&ed!(self).view(), scrolled) {
             eprintln!("erreur de rendu : {e}");
         }
         ed!(self).mark_drawn();
+        if self.is_bench() {
+            self.stages[4].push(t1 - t0);
+            self.stages[5].push(t1.elapsed());
+        }
     }
 
     /// Gouttière, barre d'état, minimap et barre de défilement de l'onglet actif.
@@ -1812,8 +1905,26 @@ impl App {
             status_right: &["Tab Size: 4", language],
             scroll: Some(tab.editor.scroll()),
         });
-        if let Err(e) = r.set_minimap(&tab.editor.minimap(), tab.editor.revision()) {
-            eprintln!("minimap : {e}");
+        // La minimap suit le défilement tout de suite, mais le texte tapé avec retard.
+        let key = (tab.id, tab.editor.revision(), tab.editor.first_line());
+        let missing = r.minimap_needs_source();
+        if self.minimap_key != Some(key) || missing {
+            let text_only = !missing
+                && self
+                    .minimap_key
+                    .is_some_and(|(id, _, first)| id == key.0 && first == key.2);
+            if text_only && self.minimap_at.elapsed() < MINIMAP_DELAY {
+                self.minimap_pending = true;
+            } else {
+                // clé d'image : l'onglet fait partie de la révision (deux onglets peuvent avoir la même)
+                let revision = key.1 ^ key.0.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                if let Err(e) = r.set_minimap(&tab.editor.minimap(), revision) {
+                    eprintln!("minimap : {e}");
+                }
+                self.minimap_key = Some(key);
+                self.minimap_at = Instant::now();
+                self.minimap_pending = false;
+            }
         }
         // La gouttière ou la barre d'état peuvent changer le nombre de rangées visibles.
         let rows = r.metrics().rows_for(r.size().1);
@@ -1828,8 +1939,12 @@ impl App {
         self.sync_lsp();
         self.refresh_tabs();
         self.refresh_overlay();
+        self.refresh_sidebar();
+        let t_prepared = Instant::now();
         self.refresh_chrome();
+        let t_chrome = Instant::now();
         self.draw();
+        let t_drawn = Instant::now();
         if let Some(r) = self.renderer.as_mut() {
             let result = if self.full_present {
                 self.full_present = false;
@@ -1842,6 +1957,12 @@ impl App {
             }
         }
         let presented = Instant::now();
+        if self.is_bench() {
+            self.stages[0].push(t_prepared - started);
+            self.stages[1].push(t_chrome - t_prepared);
+            self.stages[2].push(t_drawn - t_chrome);
+            self.stages[3].push(presented - t_drawn);
+        }
         if !self.plugins_started && !self.is_bench() {
             self.start_plugins();
         }
@@ -1953,6 +2074,24 @@ impl App {
                 self.activate((self.active + self.tabs.len() - 1) % self.tabs.len());
             }
             Effect::OpenPalette(mode) => self.open_palette(mode),
+            Effect::OpenFolder => {
+                self.jobs.send(Job::PickFolder { owner: self.hwnd }).ok();
+            }
+            Effect::CloseFolder => {
+                self.project_root = None;
+                self.sidebar = None;
+                self.sidebar_open = false;
+                self.request_redraw();
+            }
+            Effect::ToggleSidebar => self.toggle_sidebar(),
+            Effect::OpenSettings => match Config::path() {
+                Some(path) => self.open_path(path),
+                None => self.toast("Dossier de configuration introuvable (%APPDATA%)"),
+            },
+            Effect::About => self.toast(format!(
+                "PaulWrite {} \u{2014} éditeur de texte rapide",
+                env!("CARGO_PKG_VERSION")
+            )),
             Effect::Lsp(action) => self.lsp_request(action),
             Effect::ReloadPlugins => {
                 if let Some(tx) = &self.plugins_tx {
@@ -2205,6 +2344,13 @@ impl App {
             ms(self.t_visible),
             ms(self.t_first_present.unwrap_or_default())
         ));
+        if let Some(r) = self.renderer.as_ref() {
+            let (w, h) = r.size();
+            report.push_str(&format!(
+                "  fenêtre {w}x{h} px
+"
+            ));
+        }
         if let Some(t) = self.t_file_shown {
             report.push_str(&format!(
                 "  fichier affiché : {:.0} ms depuis la création du processus\n",
@@ -2214,6 +2360,20 @@ impl App {
         if let Some(s) = self.latency.summary() {
             report.push_str(&format!(
                 "  frappe, événement -> image copiée vers la fenêtre : {s}\n"
+            ));
+        }
+        if let [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)] =
+            self.stages.each_ref().map(Samples::summary)
+        {
+            report.push_str(&format!(
+                "  dessin = construction des rangées {:.2}/{:.2} + moteur de rendu {:.2}/{:.2}
+",
+                e.mean, e.p99, f.mean, f.p99
+            ));
+            report.push_str(&format!(
+                "  étapes d'une image (moyenne, p99 en ms) : préparation {:.2}/{:.2} | interface {:.2}/{:.2} | dessin {:.2}/{:.2} | copie {:.2}/{:.2}
+",
+                a.mean, a.p99, b.mean, b.p99, c.mean, c.p99, d.mean, d.p99
             ));
         }
         if let Some(s) = self.color_latency.summary() {
@@ -2327,6 +2487,13 @@ impl ApplicationHandler<UserEvent> for App {
             Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
             _ => 0,
         };
+        // Barre de menus native (avant de lire la taille : elle réduit la zone cliente).
+        if !self.is_bench() {
+            let (bar, table) = menu::build();
+            if platform::set_menu(self.hwnd, &bar) {
+                self.menu_commands = table;
+            }
+        }
         let size = window.inner_size();
         let renderer = SoftRenderer::new(
             window.scale_factor() as f32,
@@ -2448,6 +2615,13 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::BenchDone => self.finish_bench(el),
             UserEvent::Lsp(event) => self.on_lsp_event(event),
             UserEvent::Screenshot(step) => self.screenshot_step(step, el),
+            UserEvent::Menu(id) => {
+                let index = id.wrapping_sub(menu::MENU_BASE) as usize;
+                if let Some(cmd) = self.menu_commands.get(index).copied() {
+                    self.execute(cmd, el);
+                    self.touch(Instant::now());
+                }
+            }
             UserEvent::Plugin(resp) => match resp {
                 plugins::Response::Loaded(report) => {
                     self.plugin_commands = report.commands.clone();
@@ -2568,9 +2742,17 @@ impl ApplicationHandler<UserEvent> for App {
                         self.config = c;
                     }
                 }
+                Done::FolderPicked(Some(path)) => self.set_project_root(path),
+                Done::FolderPicked(None) => {}
+                Done::DirListed { path, entries } => {
+                    if let Some(tree) = self.sidebar.as_mut() {
+                        tree.set_listing(path, entries);
+                        self.request_redraw();
+                    }
+                }
                 Done::Directory { tab, path } => {
                     // Un dossier devient la racine du projet ; son onglet n'a pas de raison d'être.
-                    self.project_root = Some(path);
+                    self.set_project_root(path);
                     if let Some(i) = self.tab_index(tab) {
                         self.tabs[i].loading = None;
                         if self.tabs.len() > 1 {
@@ -2758,6 +2940,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let at = Instant::now();
                 let plain = event.key_without_modifiers();
+                // Raccourci à deux temps : Ctrl+K puis Ctrl+B (barre latérale), comme Sublime Text.
+                let is_letter =
+                    |k: &str| matches!(&plain, Key::Character(s) if s.eq_ignore_ascii_case(k));
+                let ctrl_only = self.mods.control_key() && !self.mods.alt_key();
+                if std::mem::take(&mut self.chord_k) && ctrl_only && is_letter("b") {
+                    self.execute(Command::ToggleSidebar, el);
+                    self.touch(at);
+                    return;
+                }
+                if ctrl_only && !self.mods.shift_key() && is_letter("k") {
+                    self.chord_k = true;
+                    return;
+                }
                 if let Some(cmd) = keymap::command_for(&plain, self.mods) {
                     self.execute(cmd, el);
                 } else if !(self.mods.control_key() && !self.mods.alt_key()) {
@@ -2804,6 +2999,22 @@ impl ApplicationHandler<UserEvent> for App {
                     st.palette.scroll(lines.round() as isize);
                     self.overlay_dirty = true;
                     self.request_redraw();
+                    return;
+                }
+                let on_sidebar = self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|r| (self.mouse.x as i32) < r.metrics().sidebar);
+                if on_sidebar {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y * 3.0,
+                        MouseScrollDelta::PixelDelta(p) => -(p.y as f32) / 24.0,
+                    };
+                    let capacity = self.renderer.as_ref().map_or(20, |r| r.sidebar_capacity());
+                    if let Some(tree) = self.sidebar.as_mut() {
+                        tree.scroll_by(lines.round() as isize, capacity);
+                        self.request_redraw();
+                    }
                     return;
                 }
                 let lh = self
@@ -2862,13 +3073,26 @@ impl ApplicationHandler<UserEvent> for App {
                     Some(r) => {
                         let m = r.metrics();
                         let bottom = r.size().1 as i32 - m.status_bar;
+                        if x < m.sidebar as f32 && (y as i32) < bottom {
+                            // la barre latérale prend tous les clics de sa colonne
+                            if button == MouseButton::Left {
+                                self.sidebar_click(y);
+                            }
+                            return;
+                        }
+                        if (y as i32) >= bottom && r.status_sidebar_button_at(x, y) {
+                            if button == MouseButton::Left {
+                                self.toggle_sidebar();
+                            }
+                            return;
+                        }
                         (
                             r.tab_at(x, y),
                             r.tab_button_at(x, y),
                             r.strip_hit(x, y),
                             // zone des rangées : (gouttière ?, à l'intérieur ?)
                             Some((
-                                x < m.gutter as f32,
+                                x >= m.sidebar as f32 && x < (m.sidebar + m.gutter) as f32,
                                 (self.mouse.y as i32) >= m.top && (self.mouse.y as i32) < bottom,
                             )),
                         )
@@ -2938,10 +3162,16 @@ impl ApplicationHandler<UserEvent> for App {
             self.next_blink = now + BLINK;
             self.request_redraw();
         }
-        let wake = self
+        if self.minimap_pending && now >= self.minimap_at + MINIMAP_DELAY {
+            self.request_redraw();
+        }
+        let mut wake = self
             .toast
             .as_ref()
             .map_or(self.next_blink, |(_, until)| (*until).min(self.next_blink));
+        if self.minimap_pending {
+            wake = wake.min(self.minimap_at + MINIMAP_DELAY);
+        }
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
@@ -2951,10 +3181,20 @@ impl ApplicationHandler<UserEvent> for App {
 /// # Errors
 /// Échec de création de la boucle d'événements.
 pub fn run(opts: Options) -> Result<(), String> {
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    // Les choix de menu arrivent comme messages Windows bruts : on les transmet à l'application.
+    builder.with_msg_hook(|msg| match platform::menu_command(msg) {
+        Some(id) => {
+            if let Some(p) = MENU_PROXY.get() {
+                let _ = p.send_event(UserEvent::Menu(id));
+            }
+            true
+        }
+        None => false,
+    });
+    let event_loop = builder.build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
+    let _ = MENU_PROXY.set(proxy.clone());
     let worker_proxy = proxy.clone();
     let jobs = worker::spawn(move |done| {
         let _ = worker_proxy.send_event(UserEvent::Done(done));

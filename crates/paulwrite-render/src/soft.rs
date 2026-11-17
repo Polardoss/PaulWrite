@@ -47,7 +47,9 @@ const MAX_CACHED_LAYOUTS: usize = 1024;
 const FONT_PX: f32 = 15.0;
 
 mod chrome;
-pub use chrome::{Chrome, MinimapSource, Scroll, StripHit, TabButton};
+pub use chrome::{
+    Chrome, MinimapSource, Scroll, Sidebar, SidebarKind, SidebarRow, StripHit, TabButton,
+};
 
 /// Pinceaux : 0 texte, 1 fond, 2 sélection, 3 curseur, puis `3 + catégorie` (1..`KIND_SLOTS`) ;
 /// ensuite ceux de l'interface (voir `CHROME_COLORS`), dans l'ordre.
@@ -76,11 +78,16 @@ const BR_SCROLL_THUMB: usize = BR_CHROME + 19;
 /// Soulignements des diagnostics : erreur, avertissement, information (3 pinceaux consécutifs).
 const BR_PANEL_SEL_TEXT: usize = BR_CHROME + 20;
 const BR_PANEL_THUMB: usize = BR_CHROME + 21;
-const BR_SQUIGGLE: usize = BR_CHROME + 22;
+const BR_SIDEBAR_BG: usize = BR_CHROME + 22;
+const BR_SIDEBAR_SEL: usize = BR_CHROME + 23;
+const BR_SIDEBAR_TEXT: usize = BR_CHROME + 24;
+const BR_SIDEBAR_TEXT_SEL: usize = BR_CHROME + 25;
+const BR_SIDEBAR_DIM: usize = BR_CHROME + 26;
+const BR_SQUIGGLE: usize = BR_CHROME + 27;
 
 /// Couleurs de l'interface (thème « Mariana » de Sublime Text, mesurées sur une capture), dans
 /// l'ordre des `BR_*` ci-dessus.
-const CHROME_COLORS: [[f32; 3]; 25] = [
+const CHROME_COLORS: [[f32; 3]; 30] = [
     rgb8(0x72, 0x78, 0x7e), // barre d'onglets
     rgb8(0xc6, 0xc9, 0xcb), // onglet inactif : texte
     rgb8(0xff, 0xff, 0xff), // onglet actif : texte
@@ -103,6 +110,11 @@ const CHROME_COLORS: [[f32; 3]; 25] = [
     rgb8(0x69, 0x6f, 0x75), // barre de défilement : curseur
     rgb8(0x2d, 0x32, 0x39), // panneau : texte de la sélection
     rgb8(0xb3, 0xb7, 0xbc), // panneau : barre de défilement
+    rgb8(0x2a, 0x31, 0x39), // barre latérale : fond
+    rgb8(0x3a, 0x44, 0x4e), // barre latérale : sélection
+    rgb8(0xb7, 0xbf, 0xc9), // barre latérale : texte
+    rgb8(0xff, 0xff, 0xff), // barre latérale : texte sélectionné
+    rgb8(0x7d, 0x86, 0x90), // barre latérale : titre et flèches
     rgb8(0xec, 0x5f, 0x67), // erreur
     rgb8(0xfa, 0xc8, 0x63), // avertissement
     rgb8(0x66, 0x99, 0xcc), // information
@@ -180,6 +192,8 @@ pub struct Metrics {
     pub gutter: i32,
     /// Largeur de la zone de droite (minimap et barre de défilement) ; 0 si elle est masquée.
     pub minimap: i32,
+    /// Largeur de la barre latérale (à gauche de tout, onglets compris) ; 0 si elle est masquée.
+    pub sidebar: i32,
 }
 
 impl Metrics {
@@ -436,6 +450,9 @@ pub struct SoftRenderer {
     // Minimap et barre de défilement (zone de droite)
     minimap: chrome::MinimapState,
     strip_dirty: bool,
+    // Barre latérale (arborescence du dossier ouvert)
+    sidebar: Option<Sidebar>,
+    sidebar_clean: bool,
     // Panneau flottant
     overlay: Option<Overlay>,
     overlay_hashes: Vec<u64>,
@@ -537,6 +554,8 @@ impl SoftRenderer {
                 status_clean: false,
                 minimap: chrome::MinimapState::default(),
                 strip_dirty: false,
+                sidebar: None,
+                sidebar_clean: false,
                 overlay: None,
                 overlay_hashes: Vec::new(),
                 drawn_overlay: None,
@@ -679,12 +698,20 @@ impl SoftRenderer {
         } else {
             0
         };
-        let pad_x = gutter as f32 + (TEXT_PAD * s).round();
+        let sidebar = if self.sidebar.is_some() {
+            (250.0 * s).round() as i32
+        } else {
+            0
+        };
+        let pad_x = (sidebar + gutter) as f32 + (TEXT_PAD * s).round();
         let m = &mut self.metrics;
-        if (m.top, m.gutter, m.minimap) != (top, gutter, minimap) || (m.pad_x - pad_x).abs() > 0.1 {
+        if (m.top, m.gutter, m.minimap, m.sidebar) != (top, gutter, minimap, sidebar)
+            || (m.pad_x - pad_x).abs() > 0.1
+        {
             m.top = top;
             m.gutter = gutter;
             m.minimap = minimap;
+            m.sidebar = sidebar;
             m.pad_x = pad_x;
             self.valid = false;
         }
@@ -694,7 +721,7 @@ impl SoftRenderer {
     /// absente dans une fenêtre étroite.
     fn minimap_width(&self) -> f32 {
         let s = self.scale;
-        let w = self.size.0 as f32;
+        let w = self.size.0 as f32 - self.metrics.sidebar as f32;
         if w < 560.0 * s {
             0.0
         } else {
@@ -705,7 +732,10 @@ impl SoftRenderer {
     /// Abscisses `[gauche, droite)` de la zone des rangées (entre le bord gauche et la zone de
     /// droite).
     fn editor_x(&self) -> (i32, i32) {
-        (0, self.size.0 as i32 - self.metrics.minimap)
+        (
+            self.metrics.sidebar,
+            self.size.0 as i32 - self.metrics.minimap,
+        )
     }
 
     /// Redessine ce qui a changé. `scrolled_by` : de combien de rangées le contenu a défilé depuis
@@ -755,7 +785,20 @@ impl SoftRenderer {
         let overlay_now = self.panel_geometry();
         if self.valid {
             if !self.tabs_clean && top > 0 {
-                self.bands.push(Band::rows(0, top, w));
+                self.bands.push(Band {
+                    left: ex0,
+                    right: w,
+                    top: 0,
+                    bottom: top,
+                });
+            }
+            if !self.sidebar_clean && ex0 > 0 {
+                self.bands.push(Band {
+                    left: 0,
+                    right: ex0,
+                    top: 0,
+                    bottom: status_top,
+                });
             }
             let mut r = 0;
             while r < rows {
@@ -783,7 +826,8 @@ impl SoftRenderer {
                 });
             }
             if !self.status_clean && self.metrics.status_bar > 0 {
-                self.bands.push(Band::rows(status_top, h, w));
+                let band = self.status_band(status_top, h);
+                self.bands.push(band);
             }
             self.overlay_bands(overlay_now.as_ref());
         } else {
@@ -796,7 +840,9 @@ impl SoftRenderer {
         self.bands = bands;
         result?;
         self.tabs_clean = true;
+        self.sidebar_clean = true;
         self.status_clean = true;
+        self.status.right_dirty = false;
         self.strip_dirty = false;
         self.drawn_overlay = overlay_now.map(|(rect, _)| (rect, self.overlay_hashes.clone()));
 
@@ -868,7 +914,7 @@ impl SoftRenderer {
         let lh = self.metrics.line_height.max(1);
         let top = self.metrics.top;
         let pad = self.metrics.pad_x;
-        let (_, ex1) = self.editor_x();
+        let (ex0, ex1) = self.editor_x();
         let status_top = h - self.metrics.status_bar;
         for band in bands {
             let b = Band {
@@ -878,6 +924,12 @@ impl SoftRenderer {
                 bottom: band.bottom.min(h),
             };
             if b.is_empty() {
+                continue;
+            }
+            // Bande entièrement dans la zone de droite, entre les onglets et la barre d'état :
+            // copie de pixels seulement (pas de Direct2D).
+            if ex1 < w && b.left >= ex1 && b.top >= top && b.bottom <= status_top {
+                self.blit_strip(&b);
                 continue;
             }
             // On ne lie à la cible Direct2D que la bande modifiée : `BindDC` et `EndDraw`
@@ -904,8 +956,11 @@ impl SoftRenderer {
                     },
                     &self.brushes[BR_BG],
                 );
-                if b.top < top {
+                if b.top < top && b.right > ex0 {
                     self.paint_tabs(w)?;
+                }
+                if b.left < ex0 && b.top < status_top {
+                    self.paint_sidebar(ex0, status_top)?;
                 }
                 if b.bottom > top && b.top < status_top && rows > 0 {
                     let r0 = ((b.top - top).max(0) / lh) as usize;
@@ -916,14 +971,12 @@ impl SoftRenderer {
                         self.paint_row(&row, pad, y, lh as f32)?;
                     }
                 }
-                if b.right > ex1 && ex1 < w && b.bottom > top && b.top < status_top {
-                    self.paint_strip(ex1, w, top, status_top)?;
-                }
                 if b.bottom > status_top && self.metrics.status_bar > 0 {
                     self.paint_status(w, status_top, h)?;
                 }
                 self.paint_overlay(&b)?;
                 self.rt.EndDraw(None, None)?;
+                self.blit_strip(&b);
             }
         }
         Ok(())
@@ -1212,6 +1265,7 @@ unsafe fn make_format(dwrite: &IDWriteFactory, scale: f32) -> Result<(IDWriteTex
             status_bar: (STATUS_BAR_H * scale).round() as i32,
             gutter: 0,
             minimap: 0,
+            sidebar: 0,
         },
     ))
 }
@@ -1788,14 +1842,36 @@ mod tests {
         let n = r.metrics().rows_for(300);
         let s = Rows::new(lines(0, n), None, None);
         r.draw(&s, 0).unwrap();
+        // le texte de gauche change (à chaque frappe) : seule la partie gauche est redessinée
         r.set_chrome(&chrome("Line 9, Column 2", 0, n));
         let (h, st) = (r.size().1 as i32, r.metrics().status_bar);
+        let bands = r.draw(&s, 0).unwrap().to_vec();
+        assert_eq!(bands.len(), 1);
+        assert_eq!((bands[0].top, bands[0].bottom), (h - st, h));
+        assert!(
+            bands[0].left > 0 && bands[0].left < 40,
+            "sans l'icône : {}",
+            bands[0].left
+        );
+        assert!(
+            bands[0].right > 100 && bands[0].right < 320,
+            "texte de gauche seulement : {}",
+            bands[0].right
+        );
+        r.set_chrome(&chrome("Line 9, Column 2", 0, n));
+        assert!(r.draw(&s, 0).unwrap().is_empty(), "rien ne change");
+        // un texte plus court : l'ancien est effacé
+        r.set_chrome(&chrome("L1", 0, n));
+        let band = r.draw(&s, 0).unwrap()[0];
+        assert!(band.right > 100, "couvre l'ancien texte : {}", band.right);
+        // un élément de droite change : toute la largeur
+        let mut c = chrome("L1", 0, n);
+        c.status_right = &["Tab Size: 2", "Rust"];
+        r.set_chrome(&c);
         assert_eq!(
             r.draw(&s, 0).unwrap().to_vec(),
             vec![Band::rows(h - st, h, 640)]
         );
-        r.set_chrome(&chrome("Line 9, Column 2", 0, n));
-        assert!(r.draw(&s, 0).unwrap().is_empty(), "rien ne change");
     }
 
     #[test]
@@ -1834,6 +1910,167 @@ mod tests {
         ));
         assert_eq!(r.strip_hit(100.0, y), None);
         assert_eq!(r.strip_hit(x_map, h as f32 - 2.0), None, "barre d'état");
+    }
+
+    fn sidebar(selected: usize, n: usize) -> Sidebar {
+        let mut rows = vec![SidebarRow {
+            label: "Folders".into(),
+            depth: 0,
+            kind: SidebarKind::Header,
+            selected: false,
+        }];
+        for i in 0..n {
+            rows.push(SidebarRow {
+                label: format!("fichier_{i}.rs"),
+                depth: i % 3,
+                kind: match i % 3 {
+                    0 => SidebarKind::FolderClosed,
+                    1 => SidebarKind::FolderOpen,
+                    _ => SidebarKind::File,
+                },
+                selected: i == selected,
+            });
+        }
+        Sidebar { rows }
+    }
+
+    #[test]
+    fn la_barre_laterale_decale_tout_et_se_redessine_seule() {
+        let mut r = renderer();
+        let n = r.metrics().rows_for(300);
+        let s = Rows::new(lines(0, n), None, None);
+        r.draw(&s, 0).unwrap();
+        let pad_without = r.metrics().pad_x;
+        r.set_sidebar(Some(&sidebar(0, 5)));
+        let m = r.metrics();
+        assert!(m.sidebar > 100, "colonne de gauche réservée");
+        assert!(
+            (m.pad_x - pad_without - m.sidebar as f32).abs() < 1.0,
+            "le texte est décalé"
+        );
+        // apparition : redessin complet
+        assert_eq!(r.draw(&s, 0).unwrap().len(), 1);
+        // le contenu change : seule la colonne de gauche est redessinée
+        r.set_sidebar(Some(&sidebar(1, 5)));
+        let h = r.size().1 as i32;
+        assert_eq!(
+            r.draw(&s, 0).unwrap().to_vec(),
+            vec![Band {
+                left: 0,
+                right: m.sidebar,
+                top: 0,
+                bottom: h - m.status_bar
+            }]
+        );
+        assert!(r.draw(&s, 0).unwrap().is_empty());
+        // clics sur les lignes (24 px chacune) et hors de la colonne
+        let row_h = (24.0 * 1.0) as f32;
+        assert_eq!(r.sidebar_row_at(10.0, row_h * 2.5), Some(2));
+        assert_eq!(
+            r.sidebar_row_at(10.0, row_h * 7.5),
+            None,
+            "sous la dernière ligne"
+        );
+        assert_eq!(r.sidebar_row_at(m.sidebar as f32 + 5.0, 10.0), None);
+        assert!(r.sidebar_capacity() >= 8);
+        // masquer la barre rend la place
+        r.set_sidebar(None);
+        assert_eq!(r.metrics().sidebar, 0);
+        assert!((r.metrics().pad_x - pad_without).abs() < 0.5);
+    }
+
+    #[test]
+    fn barre_laterale_regions_identiques_au_redessin_complet() {
+        let tabs = [tab("a.rs", false, true), tab("b.rs", true, false)];
+        let mut inc = renderer();
+        let mut full = renderer();
+        inc.set_tabs(&tabs);
+        full.set_tabs(&tabs);
+        let n = inc.metrics().rows_for(300);
+        let mut first = 20usize;
+        let mut state = Rows::new(lines(first, n), Some((2, 1)), None);
+        for step in 0..48 {
+            let mut scrolled = 0isize;
+            match step % 6 {
+                0 => {
+                    inc.set_sidebar(Some(&sidebar(step % 4, 3 + step % 5)));
+                    full.set_sidebar(Some(&sidebar(step % 4, 3 + step % 5)));
+                }
+                1 => state.texts[3].push('x'),
+                2 => {
+                    first += 2;
+                    state.set_texts(lines(first, n));
+                    scrolled = 2;
+                }
+                3 => {
+                    inc.set_overlay(Some(&overlay(1, "ab", 3)));
+                    full.set_overlay(Some(&overlay(1, "ab", 3)));
+                }
+                4 => {
+                    first -= 1;
+                    state.set_texts(lines(first, n));
+                    scrolled = -1;
+                    inc.set_overlay(None);
+                    full.set_overlay(None);
+                }
+                _ => {
+                    if step % 12 == 5 {
+                        inc.set_sidebar(None);
+                        full.set_sidebar(None);
+                    }
+                    state.set_caret(Some((step % n, 2)));
+                }
+            }
+            let n_now = inc.metrics().rows_for(300);
+            assert_eq!(
+                n_now, n,
+                "la barre latérale ne change pas la hauteur des rangées"
+            );
+            inc.draw(&state, scrolled).unwrap();
+            full.invalidate();
+            full.draw(&state, 0).unwrap();
+            assert!(
+                inc.pixels() == full.pixels(),
+                "pixels différents à l'étape {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn boutons_de_la_barre_d_onglets_et_de_la_barre_d_etat() {
+        let mut r = renderer();
+        assert_eq!(r.tab_button_at(5.0, 5.0), None, "pas de barre");
+        r.set_tabs(&[tab("a.rs", false, true), tab("b.rs", true, false)]);
+        let bar = r.metrics().tab_bar as f32;
+        let w = r.size().0 as f32;
+        assert_eq!(r.tab_button_at(8.0, 5.0), Some(TabButton::Previous));
+        assert_eq!(r.tab_button_at(30.0, 5.0), Some(TabButton::Next));
+        assert_eq!(r.tab_button_at(w - 34.0, 5.0), Some(TabButton::New));
+        assert_eq!(r.tab_button_at(w - 8.0, 5.0), Some(TabButton::List));
+        assert_eq!(r.tab_button_at(w - 34.0, bar + 2.0), None, "sous la barre");
+        // le milieu de la barre appartient aux onglets
+        let geo = r.tab_geometry();
+        assert_eq!(r.tab_button_at(geo[0].0 as f32 + 20.0, 5.0), None);
+        // icône de la barre latérale, dans la barre d'état
+        let h = r.size().1 as f32;
+        assert!(r.status_sidebar_button_at(12.0, h - 5.0));
+        assert!(!r.status_sidebar_button_at(300.0, h - 5.0));
+        assert!(
+            !r.status_sidebar_button_at(12.0, 50.0),
+            "hors de la barre d'état"
+        );
+        // avec une barre latérale, les boutons suivent les onglets
+        r.set_sidebar(Some(&sidebar(0, 3)));
+        let origin = r.metrics().sidebar as f32;
+        assert_eq!(
+            r.tab_button_at(origin - 5.0, 5.0),
+            None,
+            "dans la barre latérale"
+        );
+        assert_eq!(
+            r.tab_button_at(origin + 8.0, 5.0),
+            Some(TabButton::Previous)
+        );
     }
 
     fn overlay(selected: usize, query: &str, n_items: usize) -> Overlay {
@@ -2066,4 +2303,63 @@ mod tests {
             );
         }
     }
+
+    /// Décompose le coût d'une frappe (fenêtre 1100x720, minimap de 5 000 lignes) :
+    /// `cargo test --release -p paulwrite-render mesure_frappe -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure"]
+    fn mesure_frappe() {
+        struct Big;
+        impl MinimapSource for Big {
+            fn len(&self) -> usize {
+                5000
+            }
+            fn line(&self, index: usize, out: &mut String) {
+                out.push_str(&format!(
+                    "{}ligne {index} fn main() {{ let x = {}; }} // commentaire plus long",
+                    " ".repeat(index % 3 * 4),
+                    index * 7
+                ));
+            }
+        }
+        let size = (1100u32, 720u32);
+        let mut r = SoftRenderer::new(1.0, size, Colors::default()).unwrap();
+        let window = FakeWindow::new(size);
+        r.set_tabs(&[tab("a.rs", false, true)]);
+        let n = r.metrics().rows_for(size.1);
+        r.set_chrome(&chrome("Line 1, Column 1", 100, n));
+        r.set_minimap(&Big, 0).unwrap();
+        let mut state = Rows::new(lines(100, n), Some((3, 0)), None);
+        r.draw(&state, 0).unwrap();
+        window.present(&mut r);
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let med = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            (v[v.len() / 2], v[v.len() * 95 / 100])
+        };
+        // 0 : texte seul ; 1 : + barre d'état ; 2 : + minimap reconstruite
+        for mode in 0..3 {
+            let mut t_draw = Vec::new();
+            for step in 1..=200u64 {
+                state.texts[3].push('x');
+                if mode >= 1 {
+                    let label = format!("Line 4, Column {mode}{step}");
+                    r.set_chrome(&chrome(&label, 100, n));
+                }
+                if mode >= 2 {
+                    r.set_minimap(&Big, 1000 * mode + step).unwrap();
+                }
+                let t = std::time::Instant::now();
+                r.draw(&state, 0).unwrap();
+                t_draw.push(ms(t));
+            }
+            println!(
+                "frappe, mode {mode} (0 texte, 1 + état, 2 + minimap) : dessin {:?} ms (p50, p95)",
+                med(&mut t_draw)
+            );
+        }
+        let _ = (&window, &mut t_map_unused());
+    }
+
+    fn t_map_unused() {}
 }

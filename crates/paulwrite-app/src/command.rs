@@ -59,6 +59,16 @@ pub enum Command {
     LspHover,
     /// Liste des diagnostics (erreurs, avertissements) du document.
     LspDiagnostics,
+    /// Choisir un dossier à ouvrir (il devient le projet).
+    OpenFolder,
+    /// Fermer le dossier ouvert.
+    CloseFolder,
+    /// Afficher ou masquer la barre latérale.
+    ToggleSidebar,
+    /// Ouvrir le fichier de configuration.
+    OpenSettings,
+    /// À propos de PaulWrite.
+    About,
     Quit,
 }
 
@@ -128,6 +138,11 @@ impl Command {
             Command::LspDefinition => "lsp.definition",
             Command::LspHover => "lsp.hover",
             Command::LspDiagnostics => "lsp.diagnostics",
+            Command::OpenFolder => "project.open_folder",
+            Command::CloseFolder => "project.close_folder",
+            Command::ToggleSidebar => "view.toggle_sidebar",
+            Command::OpenSettings => "preferences.open_settings",
+            Command::About => "help.about",
             Command::Quit => "app.quit",
         }
     }
@@ -179,6 +194,11 @@ impl Command {
             Command::LspDefinition,
             Command::LspHover,
             Command::LspDiagnostics,
+            Command::OpenFolder,
+            Command::CloseFolder,
+            Command::ToggleSidebar,
+            Command::OpenSettings,
+            Command::About,
             Command::Quit,
         ]);
         v
@@ -225,6 +245,11 @@ impl Command {
             Command::LspDefinition => "Langage : aller à la définition",
             Command::LspHover => "Langage : survol (documentation)",
             Command::LspDiagnostics => "Langage : afficher les diagnostics",
+            Command::OpenFolder => "Projet : ouvrir un dossier",
+            Command::CloseFolder => "Projet : fermer le dossier",
+            Command::ToggleSidebar => "Affichage : barre latérale",
+            Command::OpenSettings => "Préférences : ouvrir la configuration",
+            Command::About => "Aide : à propos de PaulWrite",
             Command::Quit => "Application : quitter",
         }
     }
@@ -314,6 +339,11 @@ pub enum Effect {
     ReloadPlugins,
     /// Demande au serveur de langage (voir [`LspAction`]).
     Lsp(LspAction),
+    OpenFolder,
+    CloseFolder,
+    ToggleSidebar,
+    OpenSettings,
+    About,
     Quit,
 }
 

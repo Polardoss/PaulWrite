@@ -3,11 +3,7 @@
 //! dans la même DIB que le texte ; les coordonnées sont celles de la fenêtre (une translation
 //! de la cible Direct2D ramène à la bande en cours).
 
-use windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U;
-use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_PROPERTIES,
-    D2D1_ELLIPSE, D2D1_ROUNDED_RECT,
-};
+use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, D2D1_ROUNDED_RECT};
 use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_RANGE};
 
 use super::*;
@@ -59,6 +55,32 @@ pub enum TabButton {
     List,
 }
 
+/// Nature d'une ligne de la barre latérale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarKind {
+    /// Titre de la section (« FOLDERS »).
+    Header,
+    File,
+    FolderClosed,
+    FolderOpen,
+}
+
+/// Une ligne de la barre latérale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarRow {
+    pub label: String,
+    /// Niveau d'imbrication (0 : dossier racine).
+    pub depth: usize,
+    pub kind: SidebarKind,
+    pub selected: bool,
+}
+
+/// Contenu visible de la barre latérale (les lignes déjà défilées sont retirées par l'appelant).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sidebar {
+    pub rows: Vec<SidebarRow>,
+}
+
 /// Ce que l'on touche dans la zone de droite.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StripHit {
@@ -76,6 +98,11 @@ pub(super) struct Status {
     left: String,
     right: Vec<String>,
     pub scroll: Option<Scroll>,
+    /// Les éléments de droite ont changé : toute la largeur de la barre est à redessiner (sinon
+    /// seule la partie gauche, qui change à chaque frappe).
+    pub right_dirty: bool,
+    /// Abscisse de fin du texte de gauche tel qu'il est dessiné.
+    pub left_extent: f32,
 }
 
 pub(super) struct UiLayout {
@@ -86,7 +113,11 @@ pub(super) struct UiLayout {
 
 #[derive(Default)]
 pub(super) struct MinimapState {
-    bitmap: Option<ID2D1Bitmap>,
+    /// Image de la minimap (pixels opaques, `width * height`) copiée dans la DIB sans passer par
+    /// Direct2D (une image Direct2D de cette taille coûtait 10 fois plus à froid).
+    pixels: Vec<u32>,
+    width: usize,
+    ready: bool,
     key: Option<(u64, usize, usize, i32, i32)>,
     /// Première ligne du document représentée en haut de la minimap.
     first: usize,
@@ -199,6 +230,7 @@ impl SoftRenderer {
                 .any(|(a, b)| a != b)
         {
             self.status.right = c.status_right.iter().map(|s| (*s).to_owned()).collect();
+            self.status.right_dirty = true;
             self.status_clean = false;
         }
         if self.status.scroll != c.scroll {
@@ -232,7 +264,7 @@ impl SoftRenderer {
 
     /// Largeur réservée aux boutons à gauche des onglets.
     fn tabs_left(&self) -> f32 {
-        (40.0 * self.scale).round()
+        self.metrics.sidebar as f32 + (40.0 * self.scale).round()
     }
 
     /// Largeur réservée au bouton « + » à droite des onglets.
@@ -291,8 +323,12 @@ impl SoftRenderer {
         }
         let left = self.tabs_left();
         let w = self.size.0 as f32;
+        let origin = self.metrics.sidebar as f32;
+        if x < origin {
+            return None;
+        }
         if x < left {
-            return Some(if x < left / 2.0 {
+            return Some(if x < (origin + left) / 2.0 {
                 TabButton::Previous
             } else {
                 TabButton::Next
@@ -312,14 +348,15 @@ impl SoftRenderer {
     pub(super) unsafe fn paint_tabs(&mut self, w: i32) -> Result<()> {
         let s = self.scale;
         let bar_h = self.metrics.tab_bar as f32;
+        let origin = self.metrics.sidebar as f32;
         self.rt.FillRectangle(
-            &d2d_rect(0.0, 0.0, w as f32, bar_h),
+            &d2d_rect(origin, 0.0, w as f32, bar_h),
             &self.brushes[BR_TAB_BAR],
         );
         // Boutons de défilement des onglets (triangles) à gauche.
         let cy = (bar_h / 2.0).round();
         let t = (4.5 * s).round().max(2.0);
-        for (cx, dir) in [(12.0 * s, -1.0_f32), (26.0 * s, 1.0)] {
+        for (cx, dir) in [(origin + 12.0 * s, -1.0_f32), (origin + 26.0 * s, 1.0)] {
             self.triangle(cx.round(), cy, t, dir, BR_TAB_BUTTON);
         }
         let geometry = self.tab_geometry();
@@ -437,9 +474,10 @@ impl SoftRenderer {
         if g <= 0.0 {
             return Ok(());
         }
+        let origin = self.metrics.sidebar as f32;
         if row.current {
             self.rt.FillRectangle(
-                &d2d_rect(0.0, y, g, y + lh),
+                &d2d_rect(origin, y, origin + g, y + lh),
                 &self.brushes[BR_GUTTER_CUR_BG],
             );
         }
@@ -448,7 +486,7 @@ impl SoftRenderer {
         }
         let text = row.number.to_string();
         let width = text.len() as f32 * self.metrics.advance;
-        let x = g - (GUTTER_FOLD * self.scale).round() - width;
+        let x = origin + g - (GUTTER_FOLD * self.scale).round() - width;
         let hash = hash_bytes(text.as_bytes()) ^ UI_SALT;
         if let Some((layout, _)) = self.layout_for(&text, hash)? {
             let brush = if row.current {
@@ -519,13 +557,9 @@ impl SoftRenderer {
             .FillRectangle(&d2d_rect(ix, iy, ix + (6.0 * s).round(), iy + ih), icon);
 
         let left = self.status.left.clone();
-        self.ui_text(
-            &left,
-            UiFont::Small,
-            (34.0 * s).round(),
-            (t, b),
-            BR_STATUS_TEXT,
-        )?;
+        let x_left = (34.0 * s).round();
+        let width = self.ui_text(&left, UiFont::Small, x_left, (t, b), BR_STATUS_TEXT)?;
+        self.status.left_extent = x_left + width;
         // Éléments de droite : alignés à droite, séparés de 65 px.
         let items = self.status.right.clone();
         let mut x = w as f32 - (48.0 * s).round();
@@ -536,6 +570,27 @@ impl SoftRenderer {
             x -= (65.0 * s).round();
         }
         Ok(())
+    }
+
+    /// Bande de la barre d'état à redessiner : pleine largeur si les éléments de droite ont
+    /// changé, sinon la partie gauche seule (ancien et nouveau texte compris).
+    pub(super) fn status_band(&mut self, top: i32, bottom: i32) -> Band {
+        let w = self.size.0 as i32;
+        if self.status.right_dirty {
+            return Band::rows(top, bottom, w);
+        }
+        let left = std::mem::take(&mut self.status.left);
+        let new_width = self.ui_width(&left, UiFont::Small).unwrap_or(0.0);
+        self.status.left = left;
+        let x = (34.0 * self.scale).round()
+            + new_width.max(self.status.left_extent - (34.0 * self.scale).round());
+        // à partir de l'icône exclue : elle ne change pas avec le texte
+        Band {
+            left: (30.0 * self.scale).round() as i32,
+            right: ((x + 8.0 * self.scale).ceil() as i32).min(w),
+            top,
+            bottom,
+        }
     }
 
     /// Le point est sur l'icône de la barre latérale (barre d'état, à gauche).
@@ -562,6 +617,13 @@ impl SoftRenderer {
         Some((pitch, area_h / pitch, mm_w, area_h))
     }
 
+    /// La minimap est affichable mais son image manque (après un redimensionnement, un
+    /// changement d'échelle ou de barre latérale) : à reconstruire avec [`set_minimap`](Self::set_minimap).
+    #[must_use]
+    pub fn minimap_needs_source(&self) -> bool {
+        self.minimap_geometry().is_some() && !self.minimap.ready
+    }
+
     /// Reconstruit l'image de la minimap si le texte ou la position ont changé. Rapide (un
     /// passage sur les lignes affichées) mais à n'appeler qu'une fois par image.
     ///
@@ -571,7 +633,7 @@ impl SoftRenderer {
         let (Some((pitch, fit, mm_w, area_h)), Some(scroll)) =
             (self.minimap_geometry(), self.status.scroll)
         else {
-            self.minimap.bitmap = None;
+            self.minimap.ready = false;
             self.minimap.key = None;
             return Ok(());
         };
@@ -585,7 +647,7 @@ impl SoftRenderer {
             (frac * max_first).round() as usize
         };
         let key = (revision, first, total, mm_w, area_h);
-        if self.minimap.key == Some(key) && self.minimap.bitmap.is_some() {
+        if self.minimap.key == Some(key) && self.minimap.ready {
             return Ok(());
         }
         let bg = argb(self.colors.background);
@@ -595,7 +657,9 @@ impl SoftRenderer {
         }
         let fg = argb(text);
         let (w, h) = (mm_w as usize, area_h as usize);
-        let mut pixels = vec![bg; w * h];
+        let mut pixels = std::mem::take(&mut self.minimap.pixels);
+        pixels.clear();
+        pixels.resize(w * h, bg);
         let s = self.scale.round().max(1.0) as usize;
         let mut line = String::new();
         for li in first..total.min(first + fit + 1) {
@@ -628,79 +692,88 @@ impl SoftRenderer {
                 }
             }
         }
-        let props = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_IGNORE,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        // SAFETY: `pixels` contient `w * h` pixels de 32 bits, valides pendant l'appel (Direct2D
-        // copie les données).
-        let bitmap = unsafe {
-            self.rt.CreateBitmap(
-                D2D_SIZE_U {
-                    width: w as u32,
-                    height: h as u32,
-                },
-                Some(pixels.as_ptr().cast()),
-                (w * 4) as u32,
-                &props,
-            )?
-        };
-        self.minimap.bitmap = Some(bitmap);
+        self.minimap.pixels = pixels;
+        self.minimap.width = w;
+        self.minimap.ready = true;
         self.minimap.key = Some(key);
         self.minimap.first = first;
         self.strip_dirty = true;
         Ok(())
     }
 
-    /// Zone de droite : minimap puis barre de défilement.
-    pub(super) unsafe fn paint_strip(
-        &mut self,
-        left: i32,
-        right: i32,
-        top: i32,
-        bottom: i32,
-    ) -> Result<()> {
+    /// Dessine la zone de droite (minimap puis barre de défilement) dans la DIB, dans la partie de
+    /// `band` qu'elle recouvre, **sans passer par Direct2D** : copie de pixels, nettement moins
+    /// chère (une image Direct2D de cette taille coûtait 10 fois plus à froid). À appeler après
+    /// `EndDraw` ; ce que Direct2D a dessiné au même endroit (le panneau flottant) est préservé.
+    pub(super) fn blit_strip(&mut self, band: &Band) {
+        if self.metrics.minimap == 0 {
+            return;
+        }
+        let (w, top) = (self.size.0 as i32, self.metrics.top);
+        let bottom = self.size.1 as i32 - self.metrics.status_bar;
+        let x_start = w - self.metrics.minimap;
+        let (xa, xb) = (band.left.max(x_start), band.right.min(w));
+        let (ya, yb) = (band.top.max(top), band.bottom.min(bottom));
+        if xa >= xb || ya >= yb {
+            return;
+        }
+        let mm_w = self.minimap_geometry().map_or(0, |g| g.2);
+        let image = self.minimap.ready && self.minimap.width == mm_w as usize && mm_w > 0;
+        let mm_end = x_start + if image { mm_w } else { 0 };
+        let bg = argb(self.colors.background);
         let s = self.scale;
-        let (l, r, t, b) = (left as f32, right as f32, top as f32, bottom as f32);
-        self.rt
-            .FillRectangle(&d2d_rect(l, t, r, b), &self.brushes[BR_BG]);
-        if let (Some(bitmap), Some((_, _, mm_w, area_h))) =
-            (self.minimap.bitmap.clone(), self.minimap_geometry())
-        {
-            self.rt.DrawBitmap(
-                &bitmap,
-                Some(&d2d_rect(l, t, l + mm_w as f32, t + area_h as f32)),
-                1.0,
-                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-                None,
-            );
+        let (tx0, tx1) = (w - (10.0 * s).round() as i32, w - (2.0 * s).round() as i32);
+        let radius = (4.0 * s).round();
+        let track = argb(CHROME_COLORS[BR_SCROLL_TRACK - BR_CHROME]);
+        let thumb_color = argb(CHROME_COLORS[BR_SCROLL_THUMB - BR_CHROME]);
+        let thumb = self.thumb(top, bottom);
+        let panel = self.panel_geometry().map(|(rect, _)| rect);
+        for y in ya..yb {
+            let mut segments = [(xa, xb), (0, 0)];
+            if let Some(p) = panel {
+                if y >= p.top && y < p.bottom && p.left < xb && p.right > xa {
+                    segments = [(xa, p.left.max(xa)), (p.right.min(xb), xb)];
+                }
+            }
+            for (a, b) in segments {
+                if a >= b {
+                    continue;
+                }
+                // SAFETY: `y < hauteur` et `a..b` est dans la largeur de la DIB (`band` est
+                // rognée à la fenêtre par l'appelant) ; la DIB est vivante tant que `self` l'est.
+                let row = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        self.bits.add(y as usize * w as usize + a as usize),
+                        (b - a) as usize,
+                    )
+                };
+                // minimap : copie ; le reste (colonne de la barre de défilement) : fond
+                let img_end = b.min(mm_end).max(a);
+                if img_end > a {
+                    let src = (y - top) as usize * mm_w as usize + (a - x_start) as usize;
+                    let n = (img_end - a) as usize;
+                    row[..n].copy_from_slice(&self.minimap.pixels[src..src + n]);
+                }
+                row[(img_end - a) as usize..].fill(bg);
+                // rail et curseur de la barre de défilement (bords arrondis, lissés)
+                for x in a.max(tx0)..b.min(tx1) {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let slot = &mut row[(x - a) as usize];
+                    let cov = rounded_coverage(
+                        px,
+                        py,
+                        (tx0 as f32, top as f32, tx1 as f32, bottom as f32),
+                        radius,
+                    );
+                    *slot = blend(*slot, track, cov);
+                    if let Some((ty, th)) = thumb {
+                        let c =
+                            rounded_coverage(px, py, (tx0 as f32, ty, tx1 as f32, ty + th), radius);
+                        *slot = blend(*slot, thumb_color, c);
+                    }
+                }
+            }
         }
-        if let Some((ty, th)) = self.thumb(top, bottom) {
-            let tx0 = r - (10.0 * s).round();
-            let tx1 = r - (2.0 * s).round();
-            let radius = (4.0 * s).round();
-            self.rt.FillRoundedRectangle(
-                &D2D1_ROUNDED_RECT {
-                    rect: d2d_rect(tx0, t, tx1, b),
-                    radiusX: radius,
-                    radiusY: radius,
-                },
-                &self.brushes[BR_SCROLL_TRACK],
-            );
-            self.rt.FillRoundedRectangle(
-                &D2D1_ROUNDED_RECT {
-                    rect: d2d_rect(tx0, ty, tx1, ty + th),
-                    radiusX: radius,
-                    radiusY: radius,
-                },
-                &self.brushes[BR_SCROLL_THUMB],
-            );
-        }
-        Ok(())
     }
 
     /// Ordonnée et hauteur du curseur de la barre de défilement. Le document peut défiler
@@ -741,6 +814,119 @@ impl SoftRenderer {
         Some(StripHit::Minimap {
             line: line.min(sc.total.saturating_sub(1)),
         })
+    }
+
+    // --- Barre latérale ----------------------------------------------------------------------
+
+    /// Affiche, remplace ou retire (`None`) la barre latérale. Un changement de visibilité décale
+    /// tout (redessin complet) ; un changement de contenu ne redessine que la barre.
+    pub fn set_sidebar(&mut self, sidebar: Option<&Sidebar>) {
+        if self.sidebar.as_ref() == sidebar {
+            return;
+        }
+        let visibility_changed = self.sidebar.is_some() != sidebar.is_some();
+        self.sidebar = sidebar.cloned();
+        self.sidebar_clean = false;
+        if visibility_changed {
+            self.minimap = MinimapState::default();
+            self.refresh_metrics();
+            self.valid = false;
+        }
+    }
+
+    fn sidebar_row_h(&self) -> i32 {
+        (24.0 * self.scale).round() as i32
+    }
+
+    /// Nombre de lignes que la barre latérale peut afficher.
+    #[must_use]
+    pub fn sidebar_capacity(&self) -> usize {
+        let h = self.size.1 as i32 - self.metrics.status_bar;
+        (h.max(0) / self.sidebar_row_h().max(1)) as usize
+    }
+
+    /// Ligne de la barre latérale sous le point `(x, y)`.
+    #[must_use]
+    pub fn sidebar_row_at(&self, x: f32, y: f32) -> Option<usize> {
+        let sb = self.sidebar.as_ref()?;
+        if x < 0.0 || x >= self.metrics.sidebar as f32 || y < 0.0 {
+            return None;
+        }
+        let i = (y as i32 / self.sidebar_row_h().max(1)) as usize;
+        (i < sb.rows.len()).then_some(i)
+    }
+
+    /// Dessine la barre latérale (colonne de gauche, de haut en bas jusqu'à la barre d'état).
+    pub(super) unsafe fn paint_sidebar(&mut self, width: i32, bottom: i32) -> Result<()> {
+        let Some(sb) = self.sidebar.clone() else {
+            return Ok(());
+        };
+        let s = self.scale;
+        let (w, b) = (width as f32, bottom as f32);
+        self.rt
+            .FillRectangle(&d2d_rect(0.0, 0.0, w, b), &self.brushes[BR_SIDEBAR_BG]);
+        let row_h = self.sidebar_row_h() as f32;
+        let indent = (14.0 * s).round();
+        for (i, row) in sb.rows.iter().enumerate() {
+            let (t, bt) = (i as f32 * row_h, (i + 1) as f32 * row_h);
+            if t >= b {
+                break;
+            }
+            if row.kind == SidebarKind::Header {
+                self.ui_text(
+                    &row.label.to_uppercase(),
+                    UiFont::Small,
+                    (14.0 * s).round(),
+                    (t, bt),
+                    BR_SIDEBAR_DIM,
+                )?;
+                continue;
+            }
+            if row.selected {
+                self.rt
+                    .FillRectangle(&d2d_rect(0.0, t, w, bt), &self.brushes[BR_SIDEBAR_SEL]);
+            }
+            let x = (12.0 * s).round() + row.depth as f32 * indent;
+            let cy = ((t + bt) / 2.0).round();
+            match row.kind {
+                SidebarKind::FolderClosed => {
+                    self.triangle(x + 4.0 * s, cy, (3.5 * s).round(), 1.0, BR_SIDEBAR_DIM);
+                }
+                SidebarKind::FolderOpen => {
+                    let half = (3.5 * s).round();
+                    for r in 0..=(half as i32) {
+                        let len = half - r as f32;
+                        self.rt.FillRectangle(
+                            &d2d_rect(
+                                x + 4.0 * s - len,
+                                cy - half / 2.0 + r as f32,
+                                x + 4.0 * s + len + 1.0,
+                                cy - half / 2.0 + r as f32 + 1.0,
+                            ),
+                            &self.brushes[BR_SIDEBAR_DIM],
+                        );
+                    }
+                }
+                _ => {}
+            }
+            let brush = if row.selected {
+                BR_SIDEBAR_TEXT_SEL
+            } else {
+                BR_SIDEBAR_TEXT
+            };
+            let clip = d2d_rect(0.0, t, w - 4.0 * s, bt);
+            self.rt
+                .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            self.ui_text(
+                &row.label,
+                UiFont::Tab,
+                x + (16.0 * s).round(),
+                (t, bt),
+                brush,
+            )?;
+            self.rt.PopAxisAlignedClip();
+        }
+        Ok(())
     }
 
     // --- Panneau flottant --------------------------------------------------------------------
@@ -1006,4 +1192,31 @@ impl SoftRenderer {
 fn argb(c: [f32; 3]) -> u32 {
     let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
     0xFF00_0000 | (to(c[0]) << 16) | (to(c[1]) << 8) | to(c[2])
+}
+
+/// Couverture (0..1) du pixel de centre `(px, py)` par un rectangle `(gauche, haut, droite, bas)`
+/// aux coins arrondis de rayon `radius`.
+fn rounded_coverage(px: f32, py: f32, (l, t, r, b): (f32, f32, f32, f32), radius: f32) -> f32 {
+    if px < l || px > r || py < t || py > b {
+        return 0.0;
+    }
+    let cx = px.clamp(l + radius, r - radius);
+    let cy = py.clamp(t + radius, b - radius);
+    let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+    (radius - d + 0.5).clamp(0.0, 1.0)
+}
+
+/// Mélange `from` vers `to` (pixels `0xAARRGGBB` opaques) selon `coverage`.
+fn blend(from: u32, to: u32, coverage: f32) -> u32 {
+    if coverage <= 0.0 {
+        return from;
+    }
+    let ch = |shift: u32| {
+        let (a, b) = (
+            ((from >> shift) & 0xff) as f32,
+            ((to >> shift) & 0xff) as f32,
+        );
+        (a + (b - a) * coverage).round() as u32
+    };
+    0xFF00_0000 | (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
