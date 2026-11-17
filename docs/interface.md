@@ -85,6 +85,17 @@ palette de commandes, messages, boîtes de dialogue, titre « sans titre ».
   vérifient que chaque commande et chaque entrée de menu est traduite et que les deux langues ont
   les mêmes entrées.
 
+## PHP et modèles `.phtml`
+
+`.php`, `.phtml`, `.php3`–`.php7` et `.phps` sont colorés par la grammaire PHP. Le HTML qui entoure
+le code (hors `<?php … ?>` et `<?= … ?>`) l'est par la grammaire HTML : la grammaire PHP repère ces
+plages (nœuds `text`) et une seconde analyse HTML, limitée à elles, les colore. Cette seconde
+analyse réutilise son arbre d'une modification à l'autre. Mesuré (worker, fichier de 50 Ko / 200 Ko /
+1 Mo) : modification + fenêtre colorée en **6 / 25 / 125 ms** (l'analyse complète fait 20 / 93 /
+853 ms ; la première version, qui refaisait tout le HTML à chaque fois, coûtait 12 / 68 / 863 ms).
+Limites : le JavaScript d'une balise `<script>` et le CSS d'une balise `<style>` ne sont pas colorés
+(vrai aussi pour un fichier `.html`) ; au-delà de `highlight_max_bytes` (1 Mo), pas de couleurs.
+
 ## Retour à la ligne et repli (étape 6)
 
 Le moteur de rendu ne connaît ni l'un ni l'autre : il dessine des **rangées** indépendantes. C'est

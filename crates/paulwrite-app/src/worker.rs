@@ -59,6 +59,8 @@ pub enum Job {
         suggested: String,
         lang: Lang,
     },
+    /// Lance une nouvelle fenêtre : un nouveau processus `paulwrite`, sans document.
+    NewWindow,
     /// Enregistre un réglage dans `config.toml` (clé et valeur texte) ; le fichier est créé au
     /// besoin, le reste de son contenu est conservé.
     SaveSetting { key: &'static str, value: String },
@@ -83,6 +85,7 @@ impl std::fmt::Debug for Job {
             Job::ListDir { path } => write!(f, "ListDir({path:?})"),
             Job::PickSave { tab, .. } => write!(f, "PickSave({tab})"),
             Job::SaveSetting { key, .. } => write!(f, "SaveSetting({key})"),
+            Job::NewWindow => write!(f, "NewWindow"),
             Job::Save { tab, path, .. } => write!(f, "Save({tab}, {path:?})"),
         }
     }
@@ -288,6 +291,14 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                             lang.pick("All files", "Tous les fichiers"),
                         ),
                     }),
+                    Job::NewWindow => {
+                        // un processus de plus : l'état (onglets, curseurs) n'est pas partagé
+                        if let Err(e) = std::env::current_exe()
+                            .and_then(|exe| std::process::Command::new(exe).spawn().map(|_| ()))
+                        {
+                            eprintln!("nouvelle fen\u{ea}tre impossible : {e}");
+                        }
+                    }
                     Job::SaveSetting { key, value } => {
                         if let Err(e) = save_setting(key, &value) {
                             eprintln!("r\u{e9}glage {key} non enregistr\u{e9} : {e}");

@@ -38,6 +38,8 @@ pub enum Command {
     Open,
     /// Nouveau document vide dans un nouvel onglet.
     NewFile,
+    /// Nouvelle fenêtre PaulWrite (un nouveau processus, vide).
+    NewWindow,
     /// Ferme l'onglet courant.
     CloseTab,
     NextTab,
@@ -139,6 +141,7 @@ impl Command {
             Command::SaveAs => "file.save_as",
             Command::Open => "file.open",
             Command::NewFile => "file.new",
+            Command::NewWindow => "file.new_window",
             Command::CloseTab => "tab.close",
             Command::NextTab => "tab.next",
             Command::PrevTab => "tab.prev",
@@ -202,6 +205,7 @@ impl Command {
             Command::SaveAs,
             Command::Open,
             Command::NewFile,
+            Command::NewWindow,
             Command::CloseTab,
             Command::NextTab,
             Command::PrevTab,
@@ -260,6 +264,7 @@ impl Command {
             Command::SaveAs => "Fichier : enregistrer sous",
             Command::Open => "Fichier : ouvrir",
             Command::NewFile => "Fichier : nouveau",
+            Command::NewWindow => "Fichier : nouvelle fenêtre",
             Command::CloseTab => "Onglet : fermer",
             Command::NextTab => "Onglet : suivant",
             Command::PrevTab => "Onglet : précédent",
@@ -326,6 +331,7 @@ impl Command {
             Command::SaveAs => "File: save as",
             Command::Open => "File: open",
             Command::NewFile => "File: new",
+            Command::NewWindow => "File: new window",
             Command::CloseTab => "Tab: close",
             Command::NextTab => "Tab: next",
             Command::PrevTab => "Tab: previous",
@@ -460,6 +466,8 @@ pub enum Effect {
     SaveAs,
     Open,
     NewTab,
+    /// Lancer une nouvelle fenêtre.
+    NewWindow,
     CloseTab,
     NextTab,
     PrevTab,

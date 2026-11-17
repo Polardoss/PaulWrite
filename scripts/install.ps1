@@ -1,13 +1,16 @@
 # Installs PaulWrite for the current user (no administrator rights needed).
 #
-#   .\install.ps1                          # installs and adds the Start Menu entry and "Open with PaulWrite"
-#   .\install.ps1 -Associate .txt,.md,.rs  # also lists PaulWrite in "Open with" for these extensions
+#   .\install.ps1                          # installs; PaulWrite then shows up in Settings > Default apps
+#                                         # and in "Open with" for the usual text and code extensions
+#   .\install.ps1 -Associate .log,.csv     # same, for extra extensions
+#   .\install.ps1 -NoFileTypes             # does not register PaulWrite as an app for file types
 #   .\install.ps1 -AddToPath               # also lets you type `paulwrite file` in a terminal
 #   .\install.ps1 -DryRun                  # shows what would be done, changes nothing
 #
 # Everything is written under your user account: %LOCALAPPDATA%\Programs\PaulWrite, the Start Menu
 # of your profile and HKEY_CURRENT_USER. Windows does not let a program make itself the default
-# editor of a file type: after -Associate, use "Open with > Choose another app > Always".
+# editor of a file type: after installing, open Settings > Apps > Default apps > PaulWrite and pick
+# the file types (or "Open with > Choose another app > Always" on a file).
 # Remove everything with uninstall.ps1 (also listed in "Installed apps").
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\PaulWrite"),
@@ -15,9 +18,11 @@ param(
     [switch]$AddToPath,
     [switch]$NoShortcut,
     [switch]$NoContextMenu,
+    [switch]$NoFileTypes,
     [switch]$DryRun,
     # Registry locations (changed only by the tests of this script).
     [string]$ClassesKey = "HKCU:\Software\Classes",
+    [string]$SoftwareKey = "HKCU:\Software",
     [string]$UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PaulWrite"
 )
 $ErrorActionPreference = "Stop"
@@ -74,16 +79,40 @@ if (-not $NoContextMenu) {
     }
 }
 
-# 4. Optional: list PaulWrite in "Open with" for some extensions
-if ($Associate.Count -gt 0) {
-    Step "Open-with entries for: $($Associate -join ', ')"
+# 4. PaulWrite as an application for text and code files: it appears in "Open with" and in
+#    Settings > Apps > Default apps, where the user picks the file types.
+if (-not $NoFileTypes) {
+    $types = @(".txt", ".md", ".markdown", ".log", ".ini", ".cfg", ".conf", ".csv", ".json", ".toml", ".yaml", ".yml", ".xml",
+        ".html", ".htm", ".css", ".js", ".mjs", ".ts", ".php", ".phtml", ".py", ".rs", ".sh", ".bat", ".ps1", ".sql") + $Associate
+    $types = $types | ForEach-Object { if ($_.StartsWith(".")) { $_.ToLower() } else { ".$($_.ToLower())" } } | Select-Object -Unique
+    Step "File types: $($types -join ' ')"
+    # the program identifier of the files PaulWrite opens
     $prog = Join-Path $ClassesKey "PaulWrite.File"
     Set-Key $prog "" "PaulWrite document"
     Set-Key (Join-Path $prog "DefaultIcon") "" "`"$exe`",0"
     Set-Key (Join-Path $prog "shell\open\command") "" "`"$exe`" `"%1`""
-    foreach ($ext in $Associate) {
-        if (-not $ext.StartsWith(".")) { $ext = ".$ext" }
+    # the application itself (name in the Open with list, types it supports)
+    $app = Join-Path $ClassesKey "Applications\paulwrite.exe"
+    Set-Key $app "FriendlyAppName" "PaulWrite"
+    Set-Key (Join-Path $app "DefaultIcon") "" "`"$exe`",0"
+    Set-Key (Join-Path $app "shell\open\command") "" "`"$exe`" `"%1`""
+    # Settings > Default apps
+    $cap = Join-Path $SoftwareKey "PaulWrite\Capabilities"
+    Set-Key $cap "ApplicationName" "PaulWrite"
+    Set-Key $cap "ApplicationDescription" "PaulWrite - fast text editor"
+    Set-Key $cap "ApplicationIcon" "`"$exe`",0"
+    Set-Key (Join-Path $SoftwareKey "RegisteredApplications") "PaulWrite" ($cap -replace "^HKCU:\\", "")
+    foreach ($ext in $types) {
+        Set-Key (Join-Path $cap "FileAssociations") $ext "PaulWrite.File"
+        Set-Key (Join-Path $app "SupportedTypes") $ext ""
         Set-Key (Join-Path $ClassesKey "$ext\OpenWithProgids") "PaulWrite.File" ""
+    }
+    # tells the shell that associations changed (not for the tests, which use other keys)
+    if (-not $DryRun -and $ClassesKey -eq "HKCU:\Software\Classes") {
+        try {
+            Add-Type -Namespace PW -Name Shell -MemberDefinition '[System.Runtime.InteropServices.DllImport("shell32.dll")] public static extern void SHChangeNotify(int e, int f, System.IntPtr a, System.IntPtr b);'
+            [PW.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+        } catch { }
     }
 }
 
@@ -111,7 +140,7 @@ Set-Key $UninstallKey "NoModify" 1
 Set-Key $UninstallKey "NoRepair" 1
 $un = Join-Path $InstallDir "uninstall.ps1"
 $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$un`""
-if ($ClassesKey -ne "HKCU:\Software\Classes") { $cmd += " -ClassesKey `"$ClassesKey`" -UninstallKey `"$UninstallKey`"" }
+if ($ClassesKey -ne "HKCU:\Software\Classes") { $cmd += " -ClassesKey `"$ClassesKey`" -SoftwareKey `"$SoftwareKey`" -UninstallKey `"$UninstallKey`"" }
 Set-Key $UninstallKey "UninstallString" $cmd
 
 Step "Done. Run: $exe"

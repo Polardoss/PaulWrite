@@ -5,7 +5,7 @@ use std::ops::Range;
 use paulwrite_core::TextEdit;
 use ropey::Rope;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{InputEdit, Node, Parser, Point, Query, QueryCursor, Tree};
+use tree_sitter::{InputEdit, Node, Parser, Point, Query, QueryCursor, Range as TsRange, Tree};
 
 use crate::{kind, Kind, Language};
 
@@ -83,9 +83,148 @@ pub struct Highlighter {
     query: Query,
     capture_kinds: Vec<Kind>,
     cursor: QueryCursor,
+    /// Langage imbriqué : le HTML des fichiers PHP (voir [`Injection`]).
+    inject: Option<Injection>,
     // tampons réutilisés
     captures: Vec<(usize, usize, usize, Kind)>,
     paint: Vec<Kind>,
+}
+
+/// Le HTML qui entoure le code d'un fichier PHP ou `.phtml` : la grammaire PHP le repère (nœuds
+/// `text`), une seconde analyse HTML, **limitée à ces plages**, le colore. Elle est refaite en
+/// entier après chaque modification (le HTML d'un modèle est petit ; l'arbre PHP, lui, reste
+/// incrémental).
+struct Injection {
+    parser: Parser,
+    tree: Option<Tree>,
+    query: Query,
+    capture_kinds: Vec<Kind>,
+    cursor: QueryCursor,
+    ranges: Vec<TsRange>,
+}
+
+impl Injection {
+    fn new() -> Result<Self, String> {
+        let grammar: tree_sitter::Language = tree_sitter_html::LANGUAGE.into();
+        let mut parser = Parser::new();
+        parser.set_language(&grammar).map_err(|e| e.to_string())?;
+        let query =
+            Query::new(&grammar, tree_sitter_html::HIGHLIGHTS_QUERY).map_err(|e| e.to_string())?;
+        let capture_kinds = query
+            .capture_names()
+            .iter()
+            .map(|n| kind_for_capture(n))
+            .collect();
+        Ok(Self {
+            parser,
+            tree: None,
+            query,
+            capture_kinds,
+            cursor: QueryCursor::new(),
+            ranges: Vec::new(),
+        })
+    }
+
+    /// Réanalyse le HTML situé dans les nœuds `text` de l'arbre PHP. L'ancien arbre HTML est
+    /// réutilisé (modifications appliquées) : tree-sitter compare les plages incluses et ne
+    /// reparse que ce qui a changé.
+    fn reparse(&mut self, php: &Tree, rope: &Rope, edits: &[TextEdit]) {
+        self.ranges.clear();
+        collect_text_ranges(php.root_node(), &mut self.ranges);
+        if self.ranges.is_empty() || self.parser.set_included_ranges(&self.ranges).is_err() {
+            self.tree = None;
+            return;
+        }
+        if let Some(old) = self.tree.as_mut() {
+            for e in edits {
+                old.edit(&InputEdit {
+                    start_byte: e.start_byte,
+                    old_end_byte: e.old_end_byte,
+                    new_end_byte: e.new_end_byte,
+                    start_position: to_point(e.start_point),
+                    old_end_position: to_point(e.old_end_point),
+                    new_end_position: to_point(e.new_end_point),
+                });
+            }
+        }
+        let len = rope.len_bytes();
+        let mut provider = |byte: usize, _p: Point| -> &[u8] {
+            if byte >= len {
+                return &[];
+            }
+            let (chunk, start, _, _) = rope.chunk_at_byte(byte);
+            &chunk.as_bytes()[byte - start..]
+        };
+        self.tree = self
+            .parser
+            .parse_with_options(&mut provider, self.tree.as_ref(), None);
+    }
+}
+
+/// Plages des nœuds `text` (le HTML hors des balises `<?php … ?>`), dans l'ordre du document.
+fn collect_text_ranges(root: Node<'_>, out: &mut Vec<TsRange>) {
+    let mut cursor = root.walk();
+    loop {
+        if cursor.node().kind() == "text" {
+            out.push(cursor.node().range());
+        } else if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
+}
+
+/// Ajoute à `out` les captures de `query` sur `tree` dans `range` : `(motif + base, début, fin,
+/// catégorie)`. `base` départage les motifs de deux requêtes qui se recouvrent.
+#[allow(clippy::too_many_arguments)]
+fn collect_captures(
+    query: &Query,
+    cursor: &mut QueryCursor,
+    capture_kinds: &[Kind],
+    tree: &Tree,
+    rope: &Rope,
+    range: &Range<usize>,
+    base: usize,
+    out: &mut Vec<(usize, usize, usize, Kind)>,
+) {
+    let len = rope.len_bytes();
+    cursor.set_byte_range(range.clone());
+    let text = |node: Node<'_>| {
+        rope.byte_slice(node.start_byte().min(len)..node.end_byte().min(len))
+            .chunks()
+            .map(str::as_bytes)
+    };
+    let mut matches = cursor.matches(query, tree.root_node(), text);
+    while let Some(m) = matches.next() {
+        for c in m.captures() {
+            let mut k = capture_kinds[c.index as usize];
+            if k == 0 {
+                continue;
+            }
+            // Les littéraux numériques sont souvent capturés comme « constante » (Rust :
+            // `@constant.builtin`) : on les distingue d'après le type du nœud.
+            if k == kind::CONSTANT {
+                let n = c.node.kind();
+                if n.contains("integer") || n.contains("float") || n.contains("number") {
+                    k = kind::NUMBER;
+                }
+            }
+            let r = c.node.byte_range();
+            out.push((
+                base + m.pattern_index,
+                r.start.max(range.start),
+                r.end.min(range.end),
+                k,
+            ));
+        }
+    }
 }
 
 impl std::fmt::Debug for Highlighter {
@@ -122,6 +261,11 @@ impl Highlighter {
             query,
             capture_kinds,
             cursor: QueryCursor::new(),
+            inject: if language == Language::Php {
+                Some(Injection::new()?)
+            } else {
+                None
+            },
             captures: Vec::new(),
             paint: Vec::new(),
         })
@@ -158,12 +302,18 @@ impl Highlighter {
         self.tree = self
             .parser
             .parse_with_options(&mut provider, self.tree.as_ref(), None);
+        if let (Some(inject), Some(tree)) = (self.inject.as_mut(), self.tree.as_ref()) {
+            inject.reparse(tree, rope, edits);
+        }
     }
 
     /// Oublie l'arbre (document remplacé) : le prochain `update` sera un parse complet.
     pub fn reset(&mut self) {
         self.tree = None;
         self.parser.reset();
+        if let Some(inject) = self.inject.as_mut() {
+            inject.tree = None;
+        }
     }
 
     /// Plages colorées intersectant `range` (octets), triées, sans chevauchement, fusionnées.
@@ -181,40 +331,41 @@ impl Highlighter {
             query,
             cursor,
             capture_kinds,
+            inject,
             captures,
             paint,
             ..
         } = self;
         captures.clear();
-        cursor.set_byte_range(range.clone());
-        let text = |node: Node<'_>| {
-            rope.byte_slice(node.start_byte().min(len)..node.end_byte().min(len))
-                .chunks()
-                .map(str::as_bytes)
-        };
-        let mut matches = cursor.matches(query, tree.root_node(), text);
-        while let Some(m) = matches.next() {
-            for c in m.captures() {
-                let mut k = capture_kinds[c.index as usize];
-                if k == 0 {
-                    continue;
-                }
-                // Les littéraux numériques sont souvent capturés comme « constante » (Rust :
-                // `@constant.builtin`) : on les distingue d'après le type du nœud.
-                if k == kind::CONSTANT {
-                    let n = c.node.kind();
-                    if n.contains("integer") || n.contains("float") || n.contains("number") {
-                        k = kind::NUMBER;
-                    }
-                }
-                let r = c.node.byte_range();
-                captures.push((
-                    m.pattern_index,
-                    r.start.max(range.start),
-                    r.end.min(range.end),
-                    k,
-                ));
-            }
+        collect_captures(
+            query,
+            cursor,
+            capture_kinds,
+            tree,
+            rope,
+            &range,
+            0,
+            captures,
+        );
+        // le HTML d'un fichier PHP : ses motifs passent après ceux du PHP (base élevée)
+        if let Some(Injection {
+            tree: Some(html),
+            query,
+            cursor,
+            capture_kinds,
+            ..
+        }) = inject
+        {
+            collect_captures(
+                query,
+                cursor,
+                capture_kinds,
+                html,
+                rope,
+                &range,
+                1_000_000,
+                captures,
+            );
         }
 
         // Aplatit les captures qui se recouvrent en une couleur par octet : le texte le plus
@@ -389,6 +540,111 @@ mod tests {
             full.update(buf.rope(), &[]);
             let want = full.highlights(buf.rope(), 0..len);
             assert_eq!(got, want, "différence à l'étape {step}");
+        }
+    }
+
+    #[test]
+    fn php_colore_le_code_et_le_html_des_modeles() {
+        let text = "<div class=\"a\">\n<?php\n// note\n$x = 42; echo \"salut\";\nfunction f() { return $x; }\n?>\n<p>fin</p>\n</div>\n";
+        let s = spans_of(Language::Php, text);
+        let has = |t: &str, k: &str| s.iter().any(|(a, b)| a == t && *b == k);
+        // le code PHP
+        assert!(has("// note", "comment"), "{s:?}");
+        assert!(has("42", "number"), "{s:?}");
+        assert!(has("function", "keyword"), "{s:?}");
+        assert!(has("return", "keyword"), "{s:?}");
+        // le HTML qui l'entoure
+        assert!(s.iter().any(|(t, k)| t == "div" && *k == "tag"), "{s:?}");
+        assert!(s.iter().any(|(t, k)| t == "p" && *k == "tag"), "{s:?}");
+        // plages triées et sans chevauchement
+        let rope = Rope::from_str(text);
+        let mut h = Highlighter::new(Language::Php).unwrap();
+        h.update(&rope, &[]);
+        let spans = h.highlights(&rope, 0..text.len());
+        assert!(spans.windows(2).all(|w| w[0].end <= w[1].start));
+    }
+
+    #[test]
+    fn php_et_html_suivent_les_modifications() {
+        let mut buf = Buffer::from_text("<b>x</b>\n<?php $a = 1; ?>\n");
+        buf.track_edits(true);
+        let mut h = Highlighter::new(Language::Php).unwrap();
+        h.update(buf.rope(), &[]);
+        // on ajoute une balise HTML après le code : elle doit être colorée aussi
+        let at = buf.len_chars();
+        buf.insert(at, "<i>y</i>\n");
+        let edits = buf.take_edits();
+        h.update(buf.rope(), &edits);
+        let text = buf.rope().to_string();
+        let spans = h.highlights(buf.rope(), 0..text.len());
+        let tags: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.kind == kind::TAG)
+            .map(|s| &text[s.start..s.end])
+            .collect();
+        assert!(tags.contains(&"i"), "{tags:?}");
+        assert!(tags.contains(&"b"), "{tags:?}");
+    }
+
+    #[test]
+    fn php_sans_html_ni_balises() {
+        // un fichier sans aucun texte HTML (seulement `<?php`) ou vide ne plante pas
+        let s = spans_of(Language::Php, "<?php\nfunction f() {}\n");
+        assert!(
+            s.iter().any(|(t, k)| t == "function" && *k == "keyword"),
+            "{s:?}"
+        );
+        let vide = spans_of(Language::Php, "");
+        assert!(vide.is_empty());
+        let seul = spans_of(Language::Php, "juste du texte <em>HTML</em>");
+        assert!(
+            seul.iter().any(|(t, k)| t == "em" && *k == "tag"),
+            "{seul:?}"
+        );
+    }
+
+    /// Coût d'une modification dans un gros modèle PHP (HTML réanalysé en entier à chaque fois) :
+    /// `cargo test --release -p paulwrite-syntax --lib mesure_php -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure"]
+    fn mesure_php() {
+        for kb in [50usize, 200, 1000] {
+            let mut text = String::new();
+            let mut i = 0;
+            while text.len() < kb * 1024 {
+                text.push_str(&format!(
+                    "<div class=\"c{i}\"><?php foreach ($items as $it): ?>
+  <a href=\"<?= $it->url ?>\">x{i}</a>
+<?php endforeach; // fin ?>
+</div>
+"
+                ));
+                i += 1;
+            }
+            let mut buf = Buffer::from_text(&text);
+            buf.track_edits(true);
+            let mut h = Highlighter::new(Language::Php).unwrap();
+            let t = std::time::Instant::now();
+            h.update(buf.rope(), &[]);
+            let full = t.elapsed();
+            let mut times = Vec::new();
+            for k in 0..20 {
+                let at = buf.len_chars() / 2;
+                buf.insert(at, if k % 2 == 0 { "x" } else { " " });
+                let edits = buf.take_edits();
+                let t = std::time::Instant::now();
+                h.update(buf.rope(), &edits);
+                let r = buf.len_bytes() / 2;
+                let _ = h.highlights(buf.rope(), r..r + 8000);
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            println!(
+                "PHP {kb} Ko : analyse complete {:.0} ms ; modification + fenetre : p50 {:.1} ms, max {:.1} ms",
+                full.as_secs_f64() * 1000.0,
+                times[times.len() / 2],
+                times[times.len() - 1]
+            );
         }
     }
 }

@@ -5,7 +5,7 @@ La vitesse est le critère n°1, avant les fonctionnalités. Pas d'Electron, pas
 framework UI lourd.
 
 > État : en construction. Étapes 0 à 4 en place : l'éditeur ouvre, édite et enregistre des fichiers
-> dans des onglets, avec coloration syntaxique (Rust, JSON, TOML, Python, JavaScript, HTML, CSS),
+> dans des onglets, avec coloration syntaxique (Rust, JSON, TOML, Python, JavaScript, HTML, CSS, PHP et modèles `.phtml`),
 > Goto Anything, palette de commandes et recherche dans le projet.
 
 ## Objectifs de performance
@@ -40,7 +40,7 @@ Workspace Cargo (`crates/`) :
 | Crate | Rôle |
 |---|---|
 | `paulwrite-core` | Buffer ([ropey]), sélections et curseurs multiples, undo/redo transactionnel, encodages, I/O. Aucune dépendance UI. |
-| `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié (7 langages). |
+| `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié (8 langages ; le HTML des fichiers PHP est coloré aussi). |
 | `paulwrite-search` | Liste de fichiers, recherche de texte (moteur de ripgrep) et fuzzy finder (nucleo), respectent `.gitignore`. |
 | `paulwrite-render` | Rendu : Direct2D logiciel + DirectWrite par régions sales (texte, gouttière, onglets, minimap, barre d'état, barre latérale, panneau), presse-papiers, boîtes de dialogue, barre de menus. Choix mesuré : [`docs/rendering.md`](docs/rendering.md) ; apparence : [`docs/interface.md`](docs/interface.md). |
 | `paulwrite-plugins` | Plugins Lua sur thread dédié : commandes et événements, instantané O(1) du texte, limites de temps et de mémoire. Voir [`docs/plugins.md`](docs/plugins.md). |
@@ -70,8 +70,8 @@ Pas besoin de compiler : l'archive `PaulWrite-<version>-windows-x64.zip` (2 Mo) 
 `paulwrite.exe` et deux scripts. Dans le dossier décompressé :
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1   # copie dans %LOCALAPPDATA%\Programs\PaulWrite, menu Démarrer, « Open with PaulWrite »
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Associate .txt,.md,.rs  # PaulWrite apparaît aussi dans « Ouvrir avec » pour ces extensions
+powershell -ExecutionPolicy Bypass -File .\install.ps1   # copie dans %LOCALAPPDATA%\Programs\PaulWrite, menu Démarrer, « Open with PaulWrite », et PaulWrite apparaît dans Paramètres ▸ Applications par défaut
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Associate .log,.csv  # ajoute d'autres extensions (27 courantes sont déjà déclarées)
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -AddToPath  # `paulwrite fichier` depuis un terminal
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun  # affiche ce qui serait fait, ne change rien
 ```
@@ -93,7 +93,7 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+Z, Ctrl+Y (ou Ctrl+Maj+Z) | annuler, rétablir |
 | Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V | tout sélectionner, copier, couper, coller |
 | Ctrl+S, Ctrl+Maj+S, Ctrl+O | enregistrer, enregistrer sous, ouvrir (dans un nouvel onglet) |
-| Ctrl+N, Ctrl+W | nouvel onglet, fermer l'onglet |
+| Ctrl+N, Ctrl+Maj+N, Ctrl+W | nouvel onglet, **nouvelle fenêtre**, fermer l'onglet |
 | Ctrl+Tab, Ctrl+Maj+Tab, clic, clic milieu | onglet suivant, précédent, activer, fermer |
 | Ctrl+P | Goto Anything : ouvrir un fichier du projet (recherche floue) |
 | Ctrl+Maj+P | palette de commandes (toutes les commandes, avec leur raccourci) |

@@ -33,7 +33,7 @@ Mesuré : archive de 2,1 Mo, `paulwrite.exe` de 6,0 Mo (la compression par `lto 
 | Fichiers | `%LOCALAPPDATA%\Programs\PaulWrite` | `-InstallDir` |
 | Raccourci du menu Démarrer | profil de l'utilisateur | `-NoShortcut` pour l'omettre |
 | « Open with PaulWrite » (fichiers, dossiers, fond d'un dossier) | `HKCU\Software\Classes` | `-NoContextMenu` |
-| « Ouvrir avec » pour des extensions | `HKCU\Software\Classes\.ext\OpenWithProgids` | `-Associate .txt,.md` |
+| Application « PaulWrite » : liste « Ouvrir avec » **et Paramètres ▸ Applications ▸ Applications par défaut** pour 27 extensions courantes (`.txt .md .json .php .phtml .py .rs .html .css .js`…) | `HKCU\Software\Classes\Applications\paulwrite.exe`, `HKCU\Software\PaulWrite\Capabilities`, `RegisteredApplications` | `-NoFileTypes` pour l'omettre ; `-Associate .log,.csv` pour en ajouter |
 | `paulwrite` dans les terminaux | PATH de l'utilisateur | `-AddToPath` |
 | Entrée « Applications installées » | `HKCU\...\Uninstall\PaulWrite` | — |
 
@@ -49,7 +49,10 @@ sont les mêmes que ceux testés, seules les clés de registre changent.
 ### Limites
 
 - **Windows ne laisse pas un programme devenir l'éditeur par défaut d'un type de fichier** : après
-  `-Associate`, choisir « Ouvrir avec ▸ Choisir une autre application ▸ Toujours ».
+  l'installation, ouvrir Paramètres ▸ Applications ▸ Applications par défaut ▸ PaulWrite et choisir
+  les types de fichier (ou « Ouvrir avec ▸ Choisir une autre application ▸ Toujours » sur un fichier).
+  Sans l'installation, un `paulwrite.exe` simplement copié n'est pas déclaré à Windows : il peut
+  manquer dans la liste « Ouvrir avec ».
 - **L'exécutable n'est pas signé** : SmartScreen peut afficher « éditeur inconnu » au premier
   lancement (Informations complémentaires ▸ Exécuter quand même). Une signature de code demande un
   certificat payant ; non entrepris.

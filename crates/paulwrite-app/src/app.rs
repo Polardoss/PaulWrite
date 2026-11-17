@@ -2285,6 +2285,9 @@ impl App {
                     })
                     .ok();
             }
+            Effect::NewWindow => {
+                self.jobs.send(Job::NewWindow).ok();
+            }
             Effect::NewTab => {
                 let i = self.push_tab();
                 self.activate(i);

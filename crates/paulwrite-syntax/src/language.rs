@@ -12,6 +12,8 @@ pub enum Language {
     JavaScript,
     Html,
     Css,
+    /// PHP et modèles `.phtml` : le HTML qui entoure le code est coloré lui aussi.
+    Php,
 }
 
 impl Language {
@@ -26,11 +28,12 @@ impl Language {
             Language::JavaScript => "JavaScript",
             Language::Html => "HTML",
             Language::Css => "CSS",
+            Language::Php => "PHP",
         }
     }
 
     /// Tous les langages.
-    pub const ALL: [Language; 7] = [
+    pub const ALL: [Language; 8] = [
         Language::Rust,
         Language::Json,
         Language::Toml,
@@ -38,6 +41,7 @@ impl Language {
         Language::JavaScript,
         Language::Html,
         Language::Css,
+        Language::Php,
     ];
 
     /// Langage d'après l'extension du fichier (insensible à la casse).
@@ -52,6 +56,7 @@ impl Language {
             "js" | "mjs" | "cjs" | "jsx" => Language::JavaScript,
             "html" | "htm" => Language::Html,
             "css" => Language::Css,
+            "php" | "phtml" | "php3" | "php4" | "php5" | "php7" | "phps" => Language::Php,
             _ => return None,
         })
     }
@@ -67,6 +72,7 @@ impl Language {
             Language::JavaScript => "JavaScript",
             Language::Html => "HTML",
             Language::Css => "CSS",
+            Language::Php => "PHP",
         }
     }
 
@@ -81,6 +87,7 @@ impl Language {
             Language::JavaScript => "javascript",
             Language::Html => "html",
             Language::Css => "css",
+            Language::Php => "php",
         }
     }
 
@@ -93,6 +100,7 @@ impl Language {
             Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Language::Html => tree_sitter_html::LANGUAGE.into(),
             Language::Css => tree_sitter_css::LANGUAGE.into(),
+            Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
         }
     }
 
@@ -105,6 +113,7 @@ impl Language {
             Language::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
             Language::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
             Language::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
+            Language::Php => tree_sitter_php::HIGHLIGHTS_QUERY,
         }
     }
 }
@@ -120,6 +129,9 @@ mod tests {
         assert_eq!(l("A.JSON"), Some(Language::Json));
         assert_eq!(l("x.tar.py"), Some(Language::Python));
         assert_eq!(l("index.htm"), Some(Language::Html));
+        assert_eq!(l("page.phtml"), Some(Language::Php));
+        assert_eq!(l("Index.PHP"), Some(Language::Php));
+        assert_eq!(l("lib/util.php5"), Some(Language::Php));
         assert_eq!(l("notes.txt"), None);
         assert_eq!(l("Makefile"), None);
     }

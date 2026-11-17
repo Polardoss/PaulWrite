@@ -39,7 +39,7 @@ pub struct Config {
 }
 
 /// Serveurs de langage proposés par défaut (à installer soi-même ; utilisés si `lsp = true`).
-const DEFAULT_SERVERS: [(&str, &str); 7] = [
+const DEFAULT_SERVERS: [(&str, &str); 8] = [
     ("rust", "rust-analyzer"),
     ("python", "pylsp"),
     ("javascript", "typescript-language-server --stdio"),
@@ -47,6 +47,7 @@ const DEFAULT_SERVERS: [(&str, &str); 7] = [
     ("html", "vscode-html-language-server --stdio"),
     ("css", "vscode-css-language-server --stdio"),
     ("toml", "taplo lsp stdio"),
+    ("php", "intelephense --stdio"),
 ];
 
 impl Default for Config {

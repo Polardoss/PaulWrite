@@ -807,6 +807,7 @@ impl Editor {
             Command::SaveAs => return Some(Effect::SaveAs),
             Command::Open => return Some(Effect::Open),
             Command::NewFile => return Some(Effect::NewTab),
+            Command::NewWindow => return Some(Effect::NewWindow),
             Command::CloseTab => return Some(Effect::CloseTab),
             Command::NextTab => return Some(Effect::NextTab),
             Command::PrevTab => return Some(Effect::PrevTab),

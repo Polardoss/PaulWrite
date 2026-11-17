@@ -62,7 +62,8 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("s", false) => Some(Command::Save),
             ("s", true) => Some(Command::SaveAs),
             ("o", _) => Some(Command::Open),
-            ("n", _) => Some(Command::NewFile),
+            ("n", false) => Some(Command::NewFile),
+            ("n", true) => Some(Command::NewWindow),
             ("p", false) => Some(Command::GotoFile),
             ("p", true) => Some(Command::CommandPalette),
             ("g", _) => Some(Command::GotoLine),
@@ -310,6 +311,14 @@ mod tests {
         );
         assert_eq!(command_for(&ch("w"), c), Some(Command::CloseTab));
         assert_eq!(command_for(&ch("n"), c), Some(Command::NewFile));
+        assert_eq!(
+            command_for(&ch("n"), c | ModifiersState::SHIFT),
+            Some(Command::NewWindow)
+        );
+        assert_eq!(
+            shortcut_label(Command::NewWindow).as_deref(),
+            Some("Ctrl+Maj+N")
+        );
     }
 
     #[test]

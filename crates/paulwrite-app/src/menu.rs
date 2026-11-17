@@ -28,6 +28,7 @@ fn menus() -> Vec<Menu> {
             "&Fichier",
             vec![
                 Item(Command::NewFile, "New File", "Nouveau fichier"),
+                Item(Command::NewWindow, "New Window", "Nouvelle fen\u{ea}tre"),
                 Item(
                     Command::Open,
                     "Open File\u{2026}",

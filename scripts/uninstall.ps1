@@ -8,6 +8,7 @@ param(
     [switch]$DryRun,
     # Registry locations (changed only by the tests of this script).
     [string]$ClassesKey = "HKCU:\Software\Classes",
+    [string]$SoftwareKey = "HKCU:\Software",
     [string]$UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PaulWrite"
 )
 $ErrorActionPreference = "Stop"
@@ -25,8 +26,15 @@ if (Get-Process paulwrite -ErrorAction SilentlyContinue | Where-Object { $_.Path
 $lnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\PaulWrite.lnk"
 if (Test-Path $lnk) { Step "Removing $lnk"; if (-not $DryRun) { Remove-Item $lnk -Force } }
 
-foreach ($k in "*\shell\PaulWrite", "Directory\shell\PaulWrite", "Directory\Background\shell\PaulWrite", "PaulWrite.File") {
+foreach ($k in "*\shell\PaulWrite", "Directory\shell\PaulWrite", "Directory\Background\shell\PaulWrite", "PaulWrite.File", "Applications\paulwrite.exe") {
     Remove-Key (Join-Path $ClassesKey $k)
+}
+# registration in Settings > Default apps
+Remove-Key (Join-Path $SoftwareKey "PaulWrite")
+$reg = Join-Path $SoftwareKey "RegisteredApplications"
+if ((Test-Path -LiteralPath $reg) -and ($null -ne (Get-ItemProperty -LiteralPath $reg -Name "PaulWrite" -ErrorAction SilentlyContinue))) {
+    Step "Removing the PaulWrite entry of RegisteredApplications"
+    if (-not $DryRun) { Remove-ItemProperty -LiteralPath $reg -Name "PaulWrite" -Force }
 }
 # "Open with" entries added by -Associate
 if (Test-Path $ClassesKey) {
