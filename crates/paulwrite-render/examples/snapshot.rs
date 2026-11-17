@@ -56,6 +56,11 @@ impl RowSource for Demo {
             },
             number: i as u32 + 1,
             current: i == 1,
+            fold: match i {
+                3 => paulwrite_render::FoldMark::Closed,
+                5 => paulwrite_render::FoldMark::Open,
+                _ => paulwrite_render::FoldMark::None,
+            },
         }
     }
 }

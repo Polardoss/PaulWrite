@@ -468,6 +468,56 @@ impl SoftRenderer {
 
     // --- Gouttière ---------------------------------------------------------------------------
 
+    /// Affiche ou masque les flèches ▼ des régions repliables (la souris survole la gouttière).
+    /// Seules les rangées concernées sont redessinées à l'image suivante.
+    pub fn set_fold_hover(&mut self, on: bool) {
+        self.fold_hover = on;
+    }
+
+    /// L'abscisse `x` est dans la zone des flèches de repli (à droite des numéros de ligne).
+    #[must_use]
+    pub fn gutter_fold_hit(&self, x: f32) -> bool {
+        let g = self.metrics.gutter as f32;
+        let right = self.metrics.sidebar as f32 + g;
+        g > 0.0 && x < right && x >= right - (GUTTER_FOLD * self.scale).round()
+    }
+
+    /// Flèche de repli, dans la zone réservée à droite des numéros : ▶ si la région est repliée,
+    /// ▼ si elle est repliable (au survol seulement).
+    unsafe fn paint_fold_mark(&self, row: &Row<'_>, y: f32, lh: f32) {
+        let show = match row.fold {
+            FoldMark::None => false,
+            FoldMark::Open => self.fold_hover,
+            FoldMark::Closed => true,
+        };
+        if !show {
+            return;
+        }
+        let g = self.metrics.gutter as f32;
+        let zone = (GUTTER_FOLD * self.scale).round();
+        let cx = (self.metrics.sidebar as f32 + g - zone / 2.0).round();
+        let cy = (y + lh / 2.0).floor();
+        let half = (4.0 * self.scale).round().max(3.0);
+        let brush = if row.current {
+            BR_GUTTER_CUR_NUM
+        } else {
+            BR_GUTTER_NUM
+        };
+        if row.fold == FoldMark::Closed {
+            self.triangle(cx, cy, half, 1.0, brush);
+        } else {
+            // pointe vers le bas : une rangée de pixels par ligne, de plus en plus étroite
+            let top = cy - (half / 2.0).floor();
+            for r in 0..=(half as i32) {
+                let w = half - r as f32;
+                self.rt.FillRectangle(
+                    &d2d_rect(cx - w, top + r as f32, cx + w + 1.0, top + r as f32 + 1.0),
+                    &self.brushes[brush],
+                );
+            }
+        }
+    }
+
     /// Numéro de ligne (aligné à droite, avant l'espace des flèches de repli).
     pub(super) unsafe fn paint_gutter(&mut self, row: &Row<'_>, y: f32, lh: f32) -> Result<()> {
         let g = self.metrics.gutter as f32;
@@ -481,6 +531,7 @@ impl SoftRenderer {
                 &self.brushes[BR_GUTTER_CUR_BG],
             );
         }
+        self.paint_fold_mark(row, y, lh);
         if row.number == 0 {
             return Ok(());
         }

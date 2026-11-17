@@ -273,6 +273,18 @@ struct TabEntry {
     active: bool,
 }
 
+/// Flèche de repli affichée dans la gouttière d'une rangée.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FoldMark {
+    /// Pas de flèche.
+    #[default]
+    None,
+    /// Région repliable (▼) : la flèche n'apparaît que lorsque la souris survole la gouttière.
+    Open,
+    /// Région repliée (▶) : toujours visible.
+    Closed,
+}
+
 /// Une rangée à dessiner. Les positions sont des indices UTF-16 dans `text`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Row<'a> {
@@ -294,6 +306,8 @@ pub struct Row<'a> {
     pub number: u32,
     /// Ligne du curseur principal : sa gouttière est mise en évidence.
     pub current: bool,
+    /// Flèche de repli de la gouttière.
+    pub fold: FoldMark,
 }
 
 /// Source des rangées visibles (évite d'allouer un tableau par image).
@@ -345,7 +359,7 @@ struct Sig {
 }
 
 /// Empreinte des décorations d'une rangée.
-fn deco_hash(row: &Row<'_>) -> u64 {
+fn deco_hash(row: &Row<'_>, fold_hover: bool) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325_u64;
     let mut mix = |v: usize| {
         h ^= v as u64;
@@ -378,6 +392,12 @@ fn deco_hash(row: &Row<'_>) -> u64 {
     }
     mix(row.number as usize);
     mix(usize::from(row.current));
+    // la flèche ▼ ne se voit qu'au survol : seules ces rangées changent d'aspect
+    mix(match row.fold {
+        FoldMark::None => 0,
+        FoldMark::Open => 1 + usize::from(fold_hover),
+        FoldMark::Closed => 3,
+    });
     h
 }
 
@@ -441,6 +461,8 @@ pub struct SoftRenderer {
     /// fenêtre en plus des bandes dessinées (sinon le milieu de l'écran garde l'ancien contenu).
     shift_region: Option<Band>,
     valid: bool,
+    /// La souris survole la gouttière : les flèches ▼ des régions repliables sont affichées.
+    fold_hover: bool,
     // Barre d'onglets
     tabs: Vec<TabEntry>,
     tabs_clean: bool,
@@ -548,6 +570,7 @@ impl SoftRenderer {
                 bands: Vec::new(),
                 shift_region: None,
                 valid: false,
+                fold_hover: false,
                 tabs: Vec::new(),
                 tabs_clean: false,
                 status: chrome::Status::default(),
@@ -729,6 +752,16 @@ impl SoftRenderer {
         }
     }
 
+    /// Nombre de colonnes de texte qui tiennent dans une rangée (police à chasse fixe) : la
+    /// largeur de coupure du retour à la ligne. Une marge de deux colonnes évite que le texte
+    /// touche la minimap.
+    #[must_use]
+    pub fn text_cols(&self) -> usize {
+        let (_, right) = self.editor_x();
+        let free = right as f32 - self.metrics.pad_x - 2.0 * self.scale;
+        (free / self.metrics.advance.max(1.0)).floor().max(1.0) as usize
+    }
+
     /// Abscisses `[gauche, droite)` de la zone des rangées (entre le bord gauche et la zone de
     /// droite).
     fn editor_x(&self) -> (i32, i32) {
@@ -761,7 +794,7 @@ impl SoftRenderer {
             let row = src.row(r);
             self.cur.push(Some(Sig {
                 hash: hash_bytes(row.text.as_bytes()),
-                deco: deco_hash(&row),
+                deco: deco_hash(&row, self.fold_hover),
             }));
         }
         self.bands.clear();
@@ -1327,6 +1360,8 @@ mod tests {
         texts: Vec<String>,
         carets: Vec<Vec<usize>>,
         sels: Vec<Vec<(usize, usize)>>,
+        /// Flèches de repli : (rangée, marque).
+        folds: Vec<(usize, FoldMark)>,
     }
 
     impl Rows {
@@ -1338,6 +1373,7 @@ mod tests {
             let mut r = Self {
                 carets: vec![Vec::new(); texts.len()],
                 sels: vec![Vec::new(); texts.len()],
+                folds: Vec::new(),
                 texts,
             };
             r.set_caret(caret);
@@ -1377,6 +1413,11 @@ mod tests {
                 squiggles: &[],
                 number: number_of(&self.texts[i], i),
                 current: i == 2,
+                fold: self
+                    .folds
+                    .iter()
+                    .find(|(r, _)| *r == i)
+                    .map_or(FoldMark::None, |(_, m)| *m),
             }
         }
     }
@@ -1834,6 +1875,52 @@ mod tests {
         let digits =
             (0..lh).any(|dy| (0..g).any(|x| with.pixels()[(top + 3 * lh + dy) * 640 + x] != bg));
         assert!(digits, "numéro de ligne dessiné");
+    }
+
+    /// Pixels de la zone des flèches de repli d'une rangée qui diffèrent du fond.
+    fn fold_pixels(r: &SoftRenderer, row: usize) -> usize {
+        let m = r.metrics();
+        let (lh, top) = (m.line_height as usize, m.top as usize);
+        let right = (m.sidebar + m.gutter) as usize;
+        let left = right - 19;
+        let bg = r.pixels()[(top + row * lh + 1) * 640 + right + 2];
+        let cur = r.pixels()[(top + 2 * lh + 1) * 640 + 2];
+        (0..lh)
+            .flat_map(|dy| (left..right).map(move |x| (dy, x)))
+            .filter(|&(dy, x)| {
+                let p = r.pixels()[(top + row * lh + dy) * 640 + x];
+                p != bg && p != cur
+            })
+            .count()
+    }
+
+    #[test]
+    fn les_fleches_de_repli_n_apparaissent_qu_au_bon_moment() {
+        let mut r = renderer();
+        let n = r.metrics().rows_for(300);
+        let mut s = Rows::new(lines(0, n), None, None);
+        s.folds = vec![(4, FoldMark::Closed), (5, FoldMark::Open)];
+        r.draw(&s, 0).unwrap();
+        assert!(fold_pixels(&r, 4) > 8, "▶ toujours visible");
+        assert_eq!(fold_pixels(&r, 5), 0, "▼ cachée sans survol");
+        assert_eq!(fold_pixels(&r, 6), 0, "rien sans marque");
+        // le survol de la gouttière fait apparaître ▼ sans toucher aux autres rangées
+        r.set_fold_hover(true);
+        let bands = r.draw(&s, 0).unwrap().to_vec();
+        assert!(fold_pixels(&r, 5) > 8, "▼ visible au survol");
+        assert_eq!(bands.len(), 1, "une seule bande : {bands:?}");
+        let lh = r.metrics().line_height;
+        assert_eq!(bands[0].bottom - bands[0].top, lh, "la rangée 5 seulement");
+        // l'état incrémental est identique à un redessin complet
+        let mut full = renderer();
+        full.set_fold_hover(true);
+        full.draw(&s, 0).unwrap();
+        assert!(r.pixels() == full.pixels(), "incrémental = complet");
+        // la zone de clic correspond à la zone dessinée
+        let m = r.metrics();
+        assert!(r.gutter_fold_hit((m.sidebar + m.gutter) as f32 - 5.0));
+        assert!(!r.gutter_fold_hit(3.0));
+        assert!(!r.gutter_fold_hit((m.sidebar + m.gutter) as f32 + 5.0));
     }
 
     #[test]

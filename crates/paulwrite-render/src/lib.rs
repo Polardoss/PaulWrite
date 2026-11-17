@@ -20,8 +20,8 @@ mod soft;
 pub use png::write_png;
 
 pub use soft::{
-    Band, Chrome, Colors, Metrics, MinimapSource, Overlay, OverlayRow, OverlayRowKind, Row,
-    RowSource, Scroll, Sidebar, SidebarKind, SidebarRow, SoftRenderer, StripHit, TabButton,
+    Band, Chrome, Colors, FoldMark, Metrics, MinimapSource, Overlay, OverlayRow, OverlayRowKind,
+    Row, RowSource, Scroll, Sidebar, SidebarKind, SidebarRow, SoftRenderer, StripHit, TabButton,
     TabInfo, KIND_SLOTS,
 };
 
