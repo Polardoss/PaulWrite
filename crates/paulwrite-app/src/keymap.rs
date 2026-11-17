@@ -32,6 +32,8 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             NamedKey::ArrowRight => Some(motion(Motion::Right, Some(Motion::WordRight))),
             NamedKey::ArrowUp if ctrl && alt => Some(Command::AddCursorAbove),
             NamedKey::ArrowDown if ctrl && alt => Some(Command::AddCursorBelow),
+            NamedKey::ArrowUp if ctrl && shift => Some(Command::MoveLineUp),
+            NamedKey::ArrowDown if ctrl && shift => Some(Command::MoveLineDown),
             NamedKey::ArrowUp if ctrl && !shift => Some(Command::ScrollUp),
             NamedKey::ArrowDown if ctrl && !shift => Some(Command::ScrollDown),
             NamedKey::ArrowUp => Some(motion(Motion::Up, Some(Motion::ParagraphUp))),
@@ -46,6 +48,7 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             NamedKey::Enter => Some(Command::InsertNewline),
             NamedKey::Tab if ctrl && shift => Some(Command::PrevTab),
             NamedKey::Tab if ctrl => Some(Command::NextTab),
+            NamedKey::Tab if shift => Some(Command::Unindent),
             NamedKey::Tab if !shift => Some(Command::InsertTab),
             NamedKey::Backspace => Some(Command::DeleteBackward),
             NamedKey::Delete => Some(Command::DeleteForward),
@@ -62,6 +65,12 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("s", false) => Some(Command::Save),
             ("s", true) => Some(Command::SaveAs),
             ("o", _) => Some(Command::Open),
+            ("d", false) => Some(Command::SelectNextOccurrence),
+            ("d", true) => Some(Command::DuplicateLine),
+            ("k", true) => Some(Command::DeleteLine),
+            ("l", _) => Some(Command::SelectLine),
+            // Ctrl+/ ; sur un clavier AZERTY la barre oblique est Maj+« : »
+            ("/", _) | (":", true) => Some(Command::ToggleComment),
             ("n", false) => Some(Command::NewFile),
             ("n", true) => Some(Command::NewWindow),
             ("p", false) => Some(Command::GotoFile),
@@ -332,5 +341,54 @@ mod tests {
         ] {
             assert!(all.contains(&cmd.unwrap()));
         }
+    }
+
+    #[test]
+    fn raccourcis_d_edition() {
+        let c = ModifiersState::CONTROL;
+        let cs = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            command_for(&ch("d"), c),
+            Some(Command::SelectNextOccurrence)
+        );
+        assert_eq!(command_for(&ch("d"), cs), Some(Command::DuplicateLine));
+        assert_eq!(command_for(&ch("k"), cs), Some(Command::DeleteLine));
+        assert_eq!(command_for(&ch("l"), c), Some(Command::SelectLine));
+        assert_eq!(command_for(&ch("/"), c), Some(Command::ToggleComment));
+        assert_eq!(command_for(&ch(":"), cs), Some(Command::ToggleComment));
+        assert_eq!(
+            command_for(&named(NamedKey::ArrowUp), cs),
+            Some(Command::MoveLineUp)
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::ArrowDown), cs),
+            Some(Command::MoveLineDown)
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::Tab), ModifiersState::SHIFT),
+            Some(Command::Unindent)
+        );
+        // inchangés : Tab, Ctrl+Tab, Ctrl+Haut (défilement), Ctrl+K seul (début d'un enchaînement)
+        assert_eq!(
+            command_for(&named(NamedKey::Tab), ModifiersState::empty()),
+            Some(Command::InsertTab)
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::Tab), c),
+            Some(Command::NextTab)
+        );
+        assert_eq!(
+            command_for(&named(NamedKey::ArrowUp), c),
+            Some(Command::ScrollUp)
+        );
+        assert_eq!(command_for(&ch("k"), c), None);
+        assert_eq!(
+            shortcut_label(Command::DuplicateLine).as_deref(),
+            Some("Ctrl+Maj+D")
+        );
+        assert_eq!(
+            shortcut_label(Command::SelectNextOccurrence).as_deref(),
+            Some("Ctrl+D")
+        );
     }
 }

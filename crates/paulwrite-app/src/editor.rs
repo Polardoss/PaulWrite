@@ -11,6 +11,7 @@ use paulwrite_render::{FoldMark, MinimapSource, Row, RowSource, Scroll};
 use paulwrite_syntax::{kind, Span};
 
 use crate::command::{Command, Effect, LspAction};
+use crate::editing::{self, CommentStyle};
 use crate::fold::{self, Folds};
 use crate::i18n::Lang;
 use crate::palette::PaletteMode;
@@ -92,6 +93,10 @@ pub struct Editor {
     wrap: bool,
     /// Langue des textes de l'éditeur (barre d'état, nom d'un document sans fichier).
     lang: Lang,
+    /// Façon de commenter le langage du document (Ctrl+/).
+    comment: CommentStyle,
+    /// Paires automatiques de parenthèses et de guillemets.
+    autopair: bool,
     /// Les flèches ▼ des lignes repliables sont calculées (la souris survole la gouttière).
     fold_marks: bool,
     /// Premier caractère affiché de chaque ligne (sans retour à la ligne).
@@ -161,6 +166,8 @@ impl Editor {
             cols: 0,
             wrap: false,
             lang: Lang::En,
+            comment: CommentStyle::default(),
+            autopair: true,
             fold_marks: false,
             hscroll: 0,
             pending_scroll: 0,
@@ -192,9 +199,11 @@ impl Editor {
     /// Remplace le document (fichier chargé). La vue repart du haut.
     pub fn load(&mut self, doc: Document, path: Option<PathBuf>) {
         let (rows, cols, wrap, marks) = (self.rows, self.cols, self.wrap, self.fold_marks);
-        let lang = self.lang;
+        let (lang, comment, autopair) = (self.lang, self.comment, self.autopair);
         *self = Self::from_document(doc, path);
         self.lang = lang;
+        self.comment = comment;
+        self.autopair = autopair;
         self.rows = rows;
         self.cols = cols;
         self.wrap = wrap;
@@ -465,6 +474,16 @@ impl Editor {
     #[must_use]
     pub fn wrap(&self) -> bool {
         self.wrap
+    }
+
+    /// Façon de commenter le langage du document.
+    pub fn set_comment_style(&mut self, style: CommentStyle) {
+        self.comment = style;
+    }
+
+    /// Active ou coupe les paires automatiques de signes.
+    pub fn set_autopair(&mut self, on: bool) {
+        self.autopair = on;
     }
 
     /// Langue des textes de l'éditeur.
@@ -767,12 +786,53 @@ impl Editor {
             Command::ScrollUp => self.scroll_by(-1),
             Command::ScrollDown => self.scroll_by(1),
             Command::InsertNewline => {
-                self.doc.insert_newline(now_ms);
+                editing::newline_with_indent(&mut self.doc, now_ms);
                 self.ensure_caret_visible();
             }
-            Command::InsertTab => self.insert_text("    ", now_ms),
+            Command::InsertTab => {
+                editing::insert_tab(&mut self.doc, now_ms);
+                self.ensure_caret_visible();
+            }
             Command::DeleteBackward => {
-                self.doc.delete_backward(now_ms);
+                if !(self.autopair && editing::backspace_pair(&mut self.doc, now_ms)) {
+                    self.doc.delete_backward(now_ms);
+                }
+                self.ensure_caret_visible();
+            }
+            Command::DuplicateLine => {
+                editing::duplicate_lines(&mut self.doc, now_ms);
+                self.ensure_caret_visible();
+            }
+            Command::DeleteLine => {
+                editing::delete_lines(&mut self.doc, now_ms);
+                self.ensure_caret_visible();
+            }
+            Command::MoveLineUp => {
+                editing::move_lines(&mut self.doc, true, now_ms);
+                self.ensure_caret_visible();
+            }
+            Command::MoveLineDown => {
+                editing::move_lines(&mut self.doc, false, now_ms);
+                self.ensure_caret_visible();
+            }
+            Command::ToggleComment => {
+                editing::toggle_comment(&mut self.doc, self.comment, now_ms);
+                self.ensure_caret_visible();
+            }
+            Command::Indent => {
+                editing::indent_lines(&mut self.doc, now_ms);
+                self.ensure_caret_visible();
+            }
+            Command::Unindent => {
+                editing::unindent_lines(&mut self.doc, now_ms);
+                self.ensure_caret_visible();
+            }
+            Command::SelectLine => {
+                editing::select_lines(&mut self.doc);
+                self.ensure_caret_visible();
+            }
+            Command::SelectNextOccurrence => {
+                editing::select_next_occurrence(&mut self.doc);
                 self.ensure_caret_visible();
             }
             Command::DeleteForward => {
@@ -833,6 +893,14 @@ impl Editor {
     /// Insère du texte à chaque curseur (frappe, validation IME, collage).
     pub fn insert_text(&mut self, text: &str, now_ms: u64) {
         self.caret_on = true;
+        // un seul caractère tapé : paires automatiques (parenthèses, guillemets)
+        let mut chars = text.chars();
+        if let (true, Some(c), None) = (self.autopair, chars.next(), chars.next()) {
+            if editing::type_char(&mut self.doc, c, now_ms) {
+                self.ensure_caret_visible();
+                return;
+            }
+        }
         let text = normalize_newlines(text, self.doc.line_ending().as_str());
         if self.doc.insert_text(&text, now_ms) {
             self.ensure_caret_visible();
@@ -2602,5 +2670,105 @@ let x",
         assert_eq!(e.view().row(0).fold, FoldMark::Closed);
         assert_eq!(e.view().row(1).fold, FoldMark::None);
         assert!(!e.row_is_folded(1) && e.row_is_folded(2));
+    }
+
+    // --- Édition au clavier --------------------------------------------------------------------
+
+    fn run(e: &mut Editor, cmds: &[Command]) {
+        for (i, c) in cmds.iter().enumerate() {
+            e.execute(*c, 10_000 * i as u64);
+        }
+    }
+
+    fn contenu(e: &Editor) -> String {
+        e.document().buffer().to_string()
+    }
+
+    #[test]
+    fn entree_reprend_l_indentation_et_les_paires_se_ferment() {
+        let mut e = editor("");
+        e.insert_text("fn a", 0);
+        e.insert_text("(", 1);
+        assert_eq!(contenu(&e), "fn a()", "paire automatique");
+        e.insert_text(")", 2);
+        e.insert_text(" ", 3);
+        e.insert_text("{", 4);
+        assert_eq!(contenu(&e), "fn a() {}");
+        run(&mut e, &[Command::InsertNewline]);
+        // la fermeture passe sur sa ligne, le curseur est sur la ligne du milieu, indenté
+        assert_eq!(contenu(&e), "fn a() {\n    \n}");
+        assert_eq!(e.caret_line_col(), (2, 5));
+        e.insert_text("x", 5);
+        assert_eq!(contenu(&e), "fn a() {\n    x\n}");
+        // couper les paires automatiques
+        let mut e = editor("");
+        e.set_autopair(false);
+        e.insert_text("(", 0);
+        assert_eq!(contenu(&e), "(");
+    }
+
+    #[test]
+    fn le_retour_arriere_enleve_la_paire_vide() {
+        let mut e = editor("");
+        e.insert_text("[", 0);
+        assert_eq!(contenu(&e), "[]");
+        run(&mut e, &[Command::DeleteBackward]);
+        assert_eq!(contenu(&e), "");
+        // hors paire : suppression ordinaire d'un caractère
+        e.insert_text("ab", 10_000);
+        run(&mut e, &[Command::DeleteBackward]);
+        assert_eq!(contenu(&e), "a");
+    }
+
+    #[test]
+    fn commandes_de_lignes_et_de_commentaires() {
+        let mut e = editor("a\nb\nc\n");
+        e.set_comment_style(CommentStyle::HASH);
+        e.click(1, 0, false);
+        run(&mut e, &[Command::DuplicateLine]);
+        assert_eq!(contenu(&e), "a\nb\nb\nc\n");
+        run(&mut e, &[Command::MoveLineUp]);
+        assert_eq!(contenu(&e), "a\nb\nb\nc\n");
+        run(&mut e, &[Command::MoveLineDown, Command::MoveLineDown]);
+        assert_eq!(contenu(&e), "a\nb\nc\nb\n");
+        run(&mut e, &[Command::ToggleComment]);
+        assert_eq!(contenu(&e), "a\nb\nc\n# b\n");
+        run(&mut e, &[Command::ToggleComment, Command::DeleteLine]);
+        assert_eq!(contenu(&e), "a\nb\nc\n");
+        // tout s'annule pas à pas (sept opérations)
+        for _ in 0..7 {
+            e.execute(Command::Undo, 0);
+        }
+        assert_eq!(contenu(&e), "a\nb\nc\n");
+        // un langage sans commentaire : rien ne change
+        let mut e = editor("x\n");
+        e.set_comment_style(CommentStyle::default());
+        run(&mut e, &[Command::ToggleComment]);
+        assert_eq!(contenu(&e), "x\n");
+    }
+
+    #[test]
+    fn indentation_et_selection_d_occurrences() {
+        let mut e = editor("foo\nfoo\n");
+        run(
+            &mut e,
+            &[Command::SelectNextOccurrence, Command::SelectNextOccurrence],
+        );
+        assert_eq!(
+            e.selection_string(100),
+            "foo\nfoo",
+            "deux occurrences sélectionnées"
+        );
+        e.insert_text("bar", 0);
+        assert_eq!(contenu(&e), "bar\nbar\n", "frappe sur les deux curseurs");
+        // Maj+Tab désindente, Tab indente
+        let mut e = editor("a\nb\n");
+        run(
+            &mut e,
+            &[Command::SelectLine, Command::SelectLine, Command::InsertTab],
+        );
+        assert_eq!(contenu(&e), "    a\n    b\n");
+        run(&mut e, &[Command::Unindent]);
+        assert_eq!(contenu(&e), "a\nb\n");
     }
 }

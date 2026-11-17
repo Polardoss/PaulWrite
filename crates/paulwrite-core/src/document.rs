@@ -12,6 +12,9 @@ use crate::line_ending::LineEnding;
 use crate::motion::{self, Motion};
 use crate::selection::{Selection, SelectionSet};
 
+/// Un remplacement simultané : `(début, fin, texte)`, en offsets de caractères du texte d'avant.
+pub type Replacement = (usize, usize, String);
+
 /// Taille maximale (octets) d'un texte inséré pour être considéré comme une « frappe » groupable.
 const TYPING_MAX_BYTES: usize = 16;
 
@@ -253,6 +256,73 @@ impl Document {
                 (s.start(), s.end())
             }
         })
+    }
+
+    /// Applique des remplacements **simultanés** `(début, fin, texte)` en une seule transaction
+    /// d'historique, puis place `selections` (positions d'**après** l'édition). Les remplacements
+    /// doivent être triés et sans chevauchement, exprimés dans le texte d'avant ; ceux qui ne
+    /// changent rien sont ignorés. Rend `false` si rien n'a changé (les sélections ne sont alors
+    /// pas touchées).
+    ///
+    /// C'est le chemin des opérations par lignes (dupliquer, déplacer, commenter, indenter…) et
+    /// des frappes spéciales (paires de parenthèses, indentation automatique).
+    pub fn apply_replacements(
+        &mut self,
+        repl: &[Replacement],
+        selections: SelectionSet,
+        kind: EditKind,
+        now_ms: u64,
+    ) -> bool {
+        let len = self.buffer.len_chars();
+        let mut changes: Vec<Change> = Vec::with_capacity(repl.len());
+        let mut last_end = 0usize;
+        for (start, end, text) in repl {
+            let start = (*start).clamp(last_end, len);
+            let end = (*end).clamp(start, len);
+            if start == end && text.is_empty() {
+                continue;
+            }
+            changes.push(Change {
+                start,
+                removed: Fragment::from_slice(self.buffer.slice(start..end)),
+                inserted: Fragment::from_text(text),
+            });
+            last_end = end;
+        }
+        if changes.is_empty() {
+            return false;
+        }
+        let sel_before = self.selections.clone();
+        edit::apply(&mut self.buffer, &changes);
+        let max = self.buffer.len_chars();
+        let mut selections = selections;
+        selections.transform(|s| Selection::new(s.anchor.min(max), s.head.min(max)));
+        self.selections = selections;
+        let tx = Transaction {
+            changes,
+            sel_before,
+            sel_after: self.selections.clone(),
+        };
+        self.history.record(tx, kind, now_ms);
+        true
+    }
+
+    /// Position qu'aura, après `repl`, la position `pos` d'avant : décalée de l'effet de chaque
+    /// remplacement qui la précède ; dans un texte remplacé, elle va à la fin du texte inséré.
+    #[must_use]
+    pub fn map_position(repl: &[Replacement], pos: usize) -> usize {
+        let mut shift: isize = 0;
+        for (start, end, text) in repl {
+            let inserted = text.chars().count() as isize;
+            if pos >= *end {
+                shift += inserted - (*end - *start) as isize;
+            } else if pos > *start {
+                return (*start as isize + shift + inserted) as usize;
+            } else {
+                break;
+            }
+        }
+        (pos as isize + shift) as usize
     }
 
     /// Cœur du chemin d'édition : pour chaque sélection, remplace `range_of(sel)` par `text`.
@@ -509,5 +579,79 @@ mod tests {
         let mut d = doc("ab", &[0, 1]);
         d.move_selections(Motion::Left, false);
         assert_eq!(d.selections().len(), 1);
+    }
+
+    #[test]
+    fn remplacements_simultanes_en_une_transaction() {
+        let mut d = doc("abc\ndef\nghi", &[1]);
+        // deux remplacements disjoints, sélections explicites
+        let repl = vec![(0, 0, "// ".to_owned()), (4, 4, "// ".to_owned())];
+        let sels = SelectionSet::from_vec(
+            vec![
+                Selection::caret(Document::map_position(&repl, 1)),
+                Selection::caret(Document::map_position(&repl, 5)),
+            ],
+            0,
+        );
+        assert!(d.apply_replacements(&repl, sels, EditKind::Other, 0));
+        assert_eq!(text(&d), "// abc\n// def\nghi");
+        assert_eq!(heads(&d), vec![4, 11]);
+        assert_eq!(d.history().undo_depth(), 1);
+        assert!(d.undo());
+        assert_eq!(text(&d), "abc\ndef\nghi");
+        assert_eq!(
+            heads(&d),
+            vec![1],
+            "l'annulation rend les sélections d'avant"
+        );
+        assert!(d.redo());
+        assert_eq!(text(&d), "// abc\n// def\nghi");
+        // rien à faire : faux, texte et sélections intacts
+        let before = heads(&d);
+        assert!(!d.apply_replacements(
+            &[(2, 2, String::new())],
+            SelectionSet::single(Selection::caret(0)),
+            EditKind::Other,
+            1
+        ));
+        assert_eq!(heads(&d), before);
+    }
+
+    #[test]
+    fn position_apres_remplacements() {
+        let repl = vec![(2, 2, "XX".to_owned()), (5, 8, "Y".to_owned())];
+        assert_eq!(Document::map_position(&repl, 0), 0);
+        assert_eq!(
+            Document::map_position(&repl, 2),
+            4,
+            "à l'insertion : après le texte inséré"
+        );
+        assert_eq!(Document::map_position(&repl, 4), 6);
+        assert_eq!(
+            Document::map_position(&repl, 6),
+            8,
+            "dans un texte remplacé : à la fin du remplacement"
+        );
+        assert_eq!(Document::map_position(&repl, 8), 8 + 2 + 1 - 3);
+        assert_eq!(Document::map_position(&repl, 10), 10 + 2 + 1 - 3);
+    }
+
+    #[test]
+    fn remplacements_hors_bornes_et_chevauchement_sont_ramenes() {
+        let mut d = doc("abcdef", &[0]);
+        let repl = vec![
+            (1, 3, "X".to_owned()),
+            (2, 4, "Y".to_owned()),
+            (5, 99, "Z".to_owned()),
+        ];
+        assert!(d.apply_replacements(
+            &repl,
+            SelectionSet::single(Selection::caret(99)),
+            EditKind::Other,
+            0
+        ));
+        // le deuxième commence là où finit le premier ; le dernier est borné à la fin
+        assert_eq!(text(&d), "aXYeZ");
+        assert_eq!(heads(&d), vec![5], "sélection bornée à la fin du texte");
     }
 }

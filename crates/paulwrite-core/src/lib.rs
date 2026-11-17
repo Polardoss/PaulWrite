@@ -22,7 +22,7 @@ pub mod motion;
 pub mod selection;
 
 pub use buffer::{Buffer, TextChange, TextEdit};
-pub use document::Document;
+pub use document::{Document, Replacement};
 pub use edit::EditKind;
 pub use encoding::{Encoding, EncodingKind};
 pub use error::{Error, Result};

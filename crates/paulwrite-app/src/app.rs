@@ -35,6 +35,7 @@ use winit::window::{Cursor, CursorIcon, Icon, Window, WindowId};
 
 use crate::command::{Command, Effect, LspAction};
 use crate::config::Config;
+use crate::editing;
 use crate::editor::{Preedit, Squiggle};
 use crate::i18n::Lang;
 use crate::keymap;
@@ -605,8 +606,10 @@ impl App {
         let wrap = self.word_wrap && self.config.can_wrap(len);
         let marks = self.fold_hover;
         let lang = self.lang;
+        let style = editing::comment_style(self.tabs[self.active].language);
         let e = &mut self.tabs[self.active].editor;
         e.set_lang(lang);
+        e.set_comment_style(style);
         e.set_wrap(wrap);
         e.set_fold_marks(marks);
         e.set_viewport_cols(cols);

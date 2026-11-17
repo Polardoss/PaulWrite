@@ -3,6 +3,7 @@
 pub mod app;
 pub mod command;
 pub mod config;
+pub mod editing;
 pub mod editor;
 pub mod fold;
 pub mod i18n;

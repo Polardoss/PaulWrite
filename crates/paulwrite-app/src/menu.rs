@@ -65,6 +65,30 @@ fn menus() -> Vec<Menu> {
                 Sep,
                 Item(Command::DeleteForward, "Delete", "Supprimer"),
                 Sep,
+                Item(
+                    Command::DuplicateLine,
+                    "Duplicate Line",
+                    "Dupliquer la ligne",
+                ),
+                Item(Command::DeleteLine, "Delete Line", "Supprimer la ligne"),
+                Item(
+                    Command::MoveLineUp,
+                    "Move Line Up",
+                    "D\u{e9}placer la ligne vers le haut",
+                ),
+                Item(
+                    Command::MoveLineDown,
+                    "Move Line Down",
+                    "D\u{e9}placer la ligne vers le bas",
+                ),
+                Item(
+                    Command::ToggleComment,
+                    "Toggle Comment",
+                    "Commenter / d\u{e9}commenter",
+                ),
+                Item(Command::Indent, "Indent", "Indenter"),
+                Item(Command::Unindent, "Unindent", "D\u{e9}sindenter"),
+                Sep,
                 Item(Command::Fold, "Fold", "Replier"),
                 Item(Command::Unfold, "Unfold", "D\u{e9}plier"),
                 Item(Command::FoldAll, "Fold All", "Tout replier"),
@@ -76,6 +100,16 @@ fn menus() -> Vec<Menu> {
             "&S\u{e9}lection",
             vec![
                 Item(Command::SelectAll, "Select All", "Tout s\u{e9}lectionner"),
+                Item(
+                    Command::SelectLine,
+                    "Expand Selection to Line",
+                    "\u{c9}tendre la s\u{e9}lection \u{e0} la ligne",
+                ),
+                Item(
+                    Command::SelectNextOccurrence,
+                    "Select Next Occurrence",
+                    "S\u{e9}lectionner l'occurrence suivante",
+                ),
                 Item(
                     Command::CollapseSelections,
                     "Single Selection",
