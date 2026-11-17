@@ -62,6 +62,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo bench -p paulwrite-core                # données générées dans bench-data/ (gitignoré)
 .\scripts\bench-app.ps1                      # démarrage, frappe, défilement, coloration (binaire release)
+.\scripts\package.ps1                        # archive de distribution dans dist\ (docs/distribution.md)
 ```
 
 Environnement : Windows, toolchain `stable-x86_64-pc-windows-msvc` + VS 2022 Build Tools (C++).
