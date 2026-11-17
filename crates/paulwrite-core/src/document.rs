@@ -191,6 +191,19 @@ impl Document {
         self.history.break_group();
     }
 
+    /// Place la tête de la sélection unique à `head` (ou l'étend jusque-là) en mémorisant la
+    /// colonne visée `goal_col` : déplacements verticaux par rangées affichées (retour à la
+    /// ligne), où la colonne se compte dans la rangée et non dans la ligne.
+    pub fn move_head_to(&mut self, head: usize, extend: bool, goal_col: usize) {
+        let head = head.min(self.buffer.len_chars());
+        self.selections.transform(|s| Selection {
+            anchor: if extend { s.anchor } else { head },
+            head,
+            goal_col: Some(goal_col),
+        });
+        self.history.break_group();
+    }
+
     // --- Édition -----------------------------------------------------------------------------
 
     /// Remplace chaque sélection par `text` (frappe, collage). `now_ms` sert au groupement des
