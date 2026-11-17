@@ -248,6 +248,51 @@ montre les résultats **à jour** de cette frappe (le classement de nucleo est t
   clic testées, pas essayées à la main), comportement sur plusieurs écrans. Les mesures utilisent
   des frappes simulées.
 
+## Étape 5 — plugins Lua et serveurs de langage (LSP)
+
+Le brief ne fixe pas d'objectif propre à cette étape ; j'ai donc posé les miens **avant de mesurer** :
+la saisie ne doit pas ralentir quand un serveur de langage est actif (p99 < 10 ms), le démarrage reste
+sous 100 ms (les serveurs ne démarrent qu'à l'ouverture d'un document, après la première image), et
+l'interface ne bloque jamais sur un serveur lent (structurel : tout passe par des canaux ; pas de
+mesure possible sans serveur réel lent).
+
+Mesures dans l'application réelle (binaire `release`, fenêtre hors écran) :
+`paulwrite --bench-lsp 300 --bench-out rapport.txt` avec `PAULWRITE_LSP_SERVER` pointant vers
+`target\release\paulwrite-fake-lsp.exe` (section « Serveur de langage » de `.\scripts\bench-app.ps1`).
+Le fichier est un source Rust de 5 000 lignes, coloré, avec le serveur de test actif ; 300 frappes
+(une toutes les 20 ms), et une requête de survol toutes les 10 frappes.
+
+**Le faux serveur répond instantanément** : ces mesures isolent le coût côté éditeur (suivi des
+modifications, sérialisation, thread du client) et non celui d'un vrai serveur.
+
+| Scénario | Objectif | Mesuré | Verdict |
+|---|---|---|---|
+| Frappe → image copiée, serveur actif (3 séries de 300) | p99 < 10 ms (objectif de l'étape ; < 16 ms au brief) | p50 1,3 à 1,6 ms ; p99 **3,1 / 10,9 / 15,7 ms** ; maximum 3,5 / 26,3 / 23,6 ms | **Partiel** : < 10 ms dans 1 série sur 3 ; < 16 ms dans 3 sur 3, mais de justesse |
+| Même mesure **sans** serveur, coloration seule (3 séries) | — | p50 1,05 à 1,11 ms ; p99 **11,1 / 15,4 / 5,0 ms** | référence : mêmes valeurs aberrantes |
+| Même mesure sans serveur ni coloration (3 séries) | — | p50 2,1 à 2,7 ms ; p99 10,0 / 3,5 / 3,6 ms | référence |
+| Aller-retour d'une requête de survol (faux serveur local) | — | médiane 1,3 à 1,6 ms ; p99 3,1 à 3,5 ms (29 requêtes par série) | — |
+| Démarrage à froid, fenêtre visible (7 runs) | < 100 ms | médiane 75,5 ms (74 à 87) | OK |
+| Taille de l'exécutable (plugins Lua + LSP) | — | 5,74 Mo (5,0 Mo à l'étape 4) | — |
+
+### Remarques et limites (étape 5)
+
+- **Pas de régression démontrée, mais l'objectif de p99 < 10 ms n'est pas tenu à chaque série.** Les
+  séries *sans* serveur montrent les mêmes valeurs aberrantes (p99 de 11 à 15 ms avec la coloration),
+  et la série avec serveur la plus lente (15,7 ms) tombe dans cette plage : rien n'attribue ces
+  queues au LSP, mais je n'ai pas non plus isolé leur cause (concurrence avec le thread de coloration
+  sur une machine à 6 cœurs, ordonnancement Windows ? non établi). Trois séries par cas ne
+  permettent pas de chiffrer un écart plus fin que quelques millisecondes.
+- **Démarrage** : aucune différence attendue (les serveurs sont désactivés par défaut et lancés à la
+  demande) ; la médiane de 75,5 ms est dans la plage des étapes 3 et 4 (83 à 84 ms, autre session).
+- **Aucun vrai serveur essayé** (rust-analyzer & co. non installés ici) : les temps d'un vrai serveur
+  (indexation, complétion de plusieurs centaines d'éléments) ne sont pas mesurés. Le panneau de
+  complétion est borné à 5 000 éléments.
+- **Plugins Lua** : chargement de 5 plugins d'exemple en 5 ms, environ 0,5 Mo ajoutés à
+  l'exécutable (voir [`plugins.md`](plugins.md)). Limites de temps et de mémoire appliquées par
+  plugin, mais **ce n'est pas une frontière de sécurité**. Le coût d'un appel de plugin n'a pas
+  été mesuré dans le chemin de saisie : aucun plugin n'y est appelé par frappe.
+- Limites fonctionnelles du LSP : voir [`lsp.md`](lsp.md).
+
 ## Correction : défilement (bug de l'étape 2 trouvé à l'étape 4)
 
 **Bug** : après un défilement, le milieu de la fenêtre gardait l'ancien texte pendant que le haut et

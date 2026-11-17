@@ -44,9 +44,8 @@ Workspace Cargo (`crates/`) :
 | `paulwrite-search` | Liste de fichiers, recherche de texte (moteur de ripgrep) et fuzzy finder (nucleo), respectent `.gitignore`. |
 | `paulwrite-render` | Rendu du texte : Direct2D logiciel + DirectWrite par régions sales, presse-papiers, boîtes de dialogue. Choix mesuré : [`docs/rendering.md`](docs/rendering.md). |
 | `paulwrite-plugins` | Plugins Lua sur thread dédié : commandes et événements, instantané O(1) du texte, limites de temps et de mémoire. Voir [`docs/plugins.md`](docs/plugins.md). |
+| `paulwrite-lsp` | Client LSP (JSON-RPC sur stdio, un thread par serveur) : diagnostics, complétion, définition, survol. Désactivé par défaut. Voir [`docs/lsp.md`](docs/lsp.md). |
 | `paulwrite-app` | Fenêtre winit, commandes nommées, raccourcis, éditeur, worker de fichiers. Produit le binaire `paulwrite`. |
-
-Plus tard : `paulwrite-lsp`.
 
 [ropey]: https://crates.io/crates/ropey
 
@@ -83,6 +82,7 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+Maj+P | palette de commandes (toutes les commandes, avec leur raccourci) |
 | Ctrl+G | aller à la ligne |
 | Ctrl+Maj+F | rechercher du texte dans le projet |
+| Ctrl+Espace, F12, F1, Ctrl+Maj+M | serveur de langage (si activé) : complétion, définition, survol, diagnostics |
 | Ctrl+Alt+↑ / Ctrl+Alt+↓ | ajouter un curseur au-dessus / en dessous |
 | Échap | revenir à un seul curseur |
 | Ctrl+↑ / Ctrl+↓, molette | faire défiler sans bouger le curseur |
@@ -104,6 +104,8 @@ Réglages (facultatifs) dans `%APPDATA%\PaulWrite\config.toml` :
 ```toml
 highlight = true                # false : pas de coloration syntaxique
 highlight_max_bytes = 1048576   # au-delà de cette taille (octets), pas de coloration
+lsp = false                     # true : serveurs de langage (programmes externes à installer)
+lsp_rust = "rust-analyzer"      # commande d'un langage (voir docs/lsp.md)
 ```
 
 Chaque ligne correspond à une commande nommée (`cursor.left`, `edit.undo`, `file.save`, …) définie

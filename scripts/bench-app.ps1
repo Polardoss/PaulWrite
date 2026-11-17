@@ -60,4 +60,15 @@ if (Test-Path $Project) {
         ($o -split "`n" | Where-Object { $_ -match 'recherche dans le projet' }) -join "`n"
     }
 } else { "(panneau non mesure : projet de test absent : $Project)" }
+# Serveur de langage : frappes avec un serveur actif (serveur de test `paulwrite-fake-lsp`, qui repond
+# vite : on mesure donc le cout cote editeur) + aller-retour d'une requete de survol.
+#   cargo build --release -p paulwrite-lsp
+$fake = Join-Path $root "target\release\paulwrite-fake-lsp.exe"
+if (Test-Path $fake) {
+    $env:PAULWRITE_LSP_SERVER = $fake
+    $o = Run-Bench @("--bench-lsp", "$Typing")
+    Remove-Item Env:PAULWRITE_LSP_SERVER
+    "SERVEUR DE LANGAGE ($Typing frappes dans un fichier Rust, serveur actif) :"
+    ($o -split "`n" | Where-Object { $_ -match 'frappe|serveur de langage' }) -join "`n"
+} else { "(serveur de langage non mesure : absent : $fake)" }
 Remove-Item $tmp -ErrorAction SilentlyContinue
