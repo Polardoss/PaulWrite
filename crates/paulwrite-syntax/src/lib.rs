@@ -10,6 +10,7 @@
 
 mod highlight;
 mod language;
+mod sql;
 mod worker;
 
 pub use highlight::{kind_name, Highlighter, Span, KIND_COUNT};

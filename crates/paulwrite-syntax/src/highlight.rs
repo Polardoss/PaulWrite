@@ -7,7 +7,9 @@ use ropey::Rope;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{InputEdit, Node, Parser, Point, Query, QueryCursor, Range as TsRange, Tree};
 
-use crate::{kind, Kind, Language};
+use std::borrow::Cow;
+
+use crate::{kind, sql, Kind, Language};
 
 /// Nombre de catégories de couleur (indices `0..KIND_COUNT`, 0 = texte ordinaire).
 pub const KIND_COUNT: usize = 15;
@@ -94,6 +96,9 @@ pub struct Highlighter {
     embedded: Option<Embedded>,
     /// Plages dont la structure a changé au dernier `update` (`None` : inconnues).
     changed: Option<Vec<TsRange>>,
+    /// SQL : décalages des quotes échappées par `\` (voir `sql.rs`), remplacées par un octet neutre
+    /// dans le texte que lit l'analyseur.
+    sql_escapes: Vec<usize>,
     // tampons réutilisés
     captures: Vec<(usize, usize, usize, Kind)>,
     paint: Vec<Kind>,
@@ -621,6 +626,7 @@ impl Highlighter {
             )
             .then(Embedded::new),
             changed: None,
+            sql_escapes: Vec::new(),
             captures: Vec::new(),
             paint: Vec::new(),
         })
@@ -634,6 +640,13 @@ impl Highlighter {
     /// Met l'arbre à jour : applique les `edits` (dans l'ordre) à l'ancien arbre puis reparse
     /// incrémentalement `rope`. Sans arbre précédent, c'est un parse complet.
     pub fn update(&mut self, rope: &Rope, edits: &[TextEdit]) {
+        let len = rope.len_bytes();
+        // SQL : les quotes échappées par `\` sont cachées à l'analyseur (octet neutre, même longueur)
+        let escapes = if self.language == Language::Sql {
+            sql::escaped_quotes(rope)
+        } else {
+            Vec::new()
+        };
         if let Some(tree) = self.tree.as_mut() {
             for e in edits {
                 tree.edit(&InputEdit {
@@ -645,19 +658,58 @@ impl Highlighter {
                     new_end_position: to_point(e.new_end_point),
                 });
             }
+            // Un octet dont l'état « échappé » a changé sans que le texte ait été modifié à cet
+            // endroit (une quote ouvrante plus haut a tout inversé) : l'arbre le croirait inchangé.
+            // On le déclare modifié pour que tree-sitter le relise.
+            if self.language == Language::Sql {
+                let before = sql::shift_through(&self.sql_escapes, edits);
+                for o in sql::symmetric_difference(&before, &escapes) {
+                    let o = o.min(len);
+                    let row = rope.byte_to_line(o);
+                    let start = Point {
+                        row,
+                        column: o - rope.line_to_byte(row),
+                    };
+                    let end = Point {
+                        row,
+                        column: start.column + 1,
+                    };
+                    tree.edit(&InputEdit {
+                        start_byte: o,
+                        old_end_byte: o + 1,
+                        new_end_byte: o + 1,
+                        start_position: start,
+                        old_end_position: end,
+                        new_end_position: end,
+                    });
+                }
+            }
         }
-        let len = rope.len_bytes();
-        let mut provider = |byte: usize, _p: Point| -> &[u8] {
+        let mut provider = |byte: usize, _p: Point| -> Cow<'_, [u8]> {
             if byte >= len {
-                return &[];
+                return Cow::Borrowed(&[]);
             }
             let (chunk, start, _, _) = rope.chunk_at_byte(byte);
-            &chunk.as_bytes()[byte - start..]
+            let bytes = &chunk.as_bytes()[byte - start..];
+            let first = escapes.partition_point(|&o| o < byte);
+            if escapes.get(first).is_some_and(|&o| o < byte + bytes.len()) {
+                let mut copy = bytes.to_vec();
+                for &o in &escapes[first..] {
+                    if o >= byte + copy.len() {
+                        break;
+                    }
+                    copy[o - byte] = sql::NEUTRAL;
+                }
+                Cow::Owned(copy)
+            } else {
+                Cow::Borrowed(bytes)
+            }
         };
         let old = self.tree.clone();
         self.tree = self
             .parser
             .parse_with_options(&mut provider, self.tree.as_ref(), None);
+        self.sql_escapes = escapes;
         self.changed = match (&old, &self.tree) {
             (Some(o), Some(n)) => Some(o.changed_ranges(n).collect()),
             _ => None,
@@ -670,6 +722,7 @@ impl Highlighter {
     /// Oublie l'arbre (document remplacé) : le prochain `update` sera un parse complet.
     pub fn reset(&mut self) {
         self.tree = None;
+        self.sql_escapes.clear();
         self.parser.reset();
         if let Some(embedded) = self.embedded.as_mut() {
             embedded.reset();
@@ -1209,12 +1262,121 @@ mod tests {
             parse.as_secs_f64() * 1000.0,
             t.elapsed().as_secs_f64() * 1000.0
         );
+        // coût d'une frappe dans un gros fichier (analyse incrémentale + scan des quotes échappées)
+        for kb in [50usize, 200, 1000] {
+            let mut text = String::new();
+            while text.len() < kb * 1024 {
+                text.push_str(
+                    "SELECT u.id, 'it\'s' AS n FROM users u WHERE u.id = 42 AND u.name = 'x';
+",
+                );
+            }
+            let mut buf = Buffer::from_text(&text);
+            buf.track_edits(true);
+            let mut h = Highlighter::new(Language::Sql).unwrap();
+            h.update(buf.rope(), &[]);
+            let mut times = Vec::new();
+            for k in 0..20 {
+                let at = buf.len_chars() / 2;
+                buf.insert(at, if k % 2 == 0 { "x" } else { " " });
+                let edits = buf.take_edits();
+                let t = std::time::Instant::now();
+                h.update(buf.rope(), &edits);
+                let r = buf.len_bytes() / 2;
+                let _ = h.highlights(buf.rope(), r..r + 8000);
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            println!(
+                "SQL {kb} Ko : modification + fenetre : p50 {:.1} ms, max {:.1} ms",
+                times[times.len() / 2],
+                times[times.len() - 1]
+            );
+        }
         let t = std::time::Instant::now();
         let _ = Highlighter::new(Language::Rust).unwrap();
         println!(
             "Rust : creation {:.1} ms",
             t.elapsed().as_secs_f64() * 1000.0
         );
+    }
+
+    #[test]
+    fn sql_antislash_quote_reste_dans_la_chaine() {
+        let text = "SELECT 'it\\'s fine' AS a, 'b' AS c FROM t WHERE x = 1;\n-- fin\n";
+        let s = spans_of(Language::Sql, text);
+        assert!(has(&s, "'it\\'s fine'", "string"), "{s:?}");
+        assert!(has(&s, "'b'", "string"), "{s:?}");
+        assert!(has(&s, "FROM", "keyword"), "{s:?}");
+        assert!(has(&s, "1", "number"), "{s:?}");
+        assert!(has(&s, "-- fin", "comment"), "{s:?}");
+        // la quote doublée du standard marche toujours
+        let s = spans_of(Language::Sql, "SELECT 'it''s' AS a, 2;\n");
+        assert!(has(&s, "'it''s'", "string"), "{s:?}");
+        assert!(has(&s, "2", "number"), "{s:?}");
+    }
+
+    /// Après n'importe quelle suite de modifications, l'analyse incrémentale colore comme une
+    /// analyse neuve (le cas délicat : une quote tapée plus haut inverse l'état de tout ce qui suit).
+    #[test]
+    fn sql_incremental_vaut_analyse_neuve() {
+        let pool = [
+            "'",
+            "\\",
+            "\\'",
+            "''",
+            "\"",
+            "`",
+            "--",
+            "/*",
+            "*/",
+            "\n",
+            "SELECT ",
+            " FROM t",
+            " 42",
+            "x",
+            ", ",
+            ";",
+            " AND ",
+            "'a\\'b'",
+            "-- c'est\n",
+        ];
+        let mut seed: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut rnd = |n: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) as usize) % n.max(1)
+        };
+        let mut buf =
+            Buffer::from_text("SELECT 'a\\'b', 1 FROM t WHERE c = 'x';\n-- note\nSELECT 2;\n");
+        buf.track_edits(true);
+        let mut inc = Highlighter::new(Language::Sql).unwrap();
+        inc.update(buf.rope(), &[]);
+        let mut fresh = Highlighter::new(Language::Sql).unwrap();
+        for step in 0..250 {
+            for _ in 0..=rnd(2) {
+                let len = buf.len_chars();
+                if rnd(3) == 0 && len > 0 {
+                    let a = rnd(len);
+                    buf.delete(a..(a + 1 + rnd(6)).min(len));
+                } else {
+                    let at = rnd(len + 1);
+                    buf.insert(at, pool[rnd(pool.len())]);
+                }
+            }
+            let edits = buf.take_edits();
+            inc.update(buf.rope(), &edits);
+            fresh.reset();
+            fresh.update(buf.rope(), &[]);
+            let end = buf.len_bytes();
+            assert_eq!(
+                inc.highlights(buf.rope(), 0..end),
+                fresh.highlights(buf.rope(), 0..end),
+                "pas {step}, texte : {:?}",
+                buf.rope().to_string()
+            );
+        }
     }
 
     #[test]

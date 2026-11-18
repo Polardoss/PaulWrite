@@ -117,6 +117,15 @@ Au-delà de `highlight_max_bytes` (1 Mo), pas de couleurs.
   est visible en **83 ms (médiane) avec comme sans SQL**. Le coût est à l'ouverture d'un `.sql`
   (sur le worker, sans bloquer l'interface) : préparation de la grammaire 45 ms (20 ms pour Rust) puis
   analyse 18 ms pour 20 Ko. Commentaires `--`.
+  **`'` dans une chaîne** : la grammaire suit le standard (quote doublée `''`) ; MySQL et MariaDB
+  écrivent `'it's'`, et la grammaire fermait alors la chaîne au `'` et colorait tout le reste de
+  travers. Un scanner (`sql.rs`) repère les quotes qui suivent un `\` dans une chaîne `'…'` ou
+  `"…"` (en ignorant commentaires et `` `…` ``) et l'analyseur lit à leur place un octet neutre de
+  même longueur : aucune position ne bouge. Contrepartie : en SQL standard ou PostgreSQL, une chaîne
+  qui finit par un antislash (`'C:\dir'`) est lue comme en MySQL. Limite mesurée de la grammaire
+  (et non du scanner, dont le coût est négligeable) : elle relit presque tout le fichier à chaque
+  modification, soit **55 / 220 / 1090 ms** pour 50 / 200 / 1000 Ko, sur le worker (l'interface n'est
+  pas touchée ; un script SQL de quelques Ko se recolore sans délai perceptible).
 - Exécutable : 7,5 → 23 Mo (dont 15 pour SQL). Démarrage inchangé (voir ci-dessus).
 
 ## Retour à la ligne et repli (étape 6)
