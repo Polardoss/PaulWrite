@@ -836,7 +836,7 @@ impl Editor {
                 self.ensure_caret_visible();
             }
             Command::ToggleComment => {
-                editing::toggle_comment(&mut self.doc, self.comment, now_ms);
+                editing::toggle_comment_auto(&mut self.doc, self.comment, now_ms);
                 self.ensure_caret_visible();
             }
             Command::ToggleBlockComment => {

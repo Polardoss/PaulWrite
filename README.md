@@ -109,7 +109,7 @@ ecent`) |
 | Alt+C / Alt+W / Alt+R (dans la recherche) | respecter la casse, mot entier, expression régulière |
 | Ctrl+D, Ctrl+L | sélectionner le mot puis l'occurrence suivante (multi-curseurs), sélectionner la ligne |
 | Ctrl+Maj+D, Ctrl+Maj+K, Ctrl+Maj+↑/↓ | dupliquer, supprimer, déplacer la ou les lignes |
-| Ctrl+/ ou Ctrl+: (clavier AZERTY) | commenter / décommenter la ou les lignes (`//`, `#`, `--`, `<!-- -->` selon le langage) |
+| Ctrl+/ ou Ctrl+: (clavier AZERTY) | commenter / décommenter : **une ligne** → `//` (ou `#`, `--`) ; **plusieurs lignes sélectionnées** → un seul `/* … */` (ou `<!-- -->`) autour des lignes, retiré au deuxième appui ; des lignes déjà commentées une à une sont décommentées une à une |
 | Ctrl+Maj+/ ou Ctrl+Maj+: | **commentaire de bloc** `/* … */` autour de la sélection (ou de la ligne) ; retiré si déjà là |
 | Tab / Maj+Tab | indenter / désindenter la sélection |
 | (en tapant) | parenthèses, crochets, accolades et guillemets se ferment seuls ; Entrée garde l'indentation |

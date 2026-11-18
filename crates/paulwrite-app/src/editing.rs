@@ -349,11 +349,60 @@ pub fn toggle_comment(doc: &mut Document, style: CommentStyle, now_ms: u64) -> b
     doc.apply_replacements(&repl, sels, EditKind::Other, now_ms)
 }
 
+/// Commenter ou décommenter comme le fait Ctrl+/ : une ligne (ou une sélection d'une ligne) reçoit
+/// le commentaire de ligne (`//`) ; une sélection sur **plusieurs lignes** reçoit un seul
+/// commentaire de bloc (`/* … */`) autour des lignes entières, et le retire si elle est déjà
+/// commentée ainsi. Des lignes déjà commentées une à une (`// a`, `// b`) sont décommentées une à
+/// une. Sans commentaire de bloc dans le langage (`#`, TOML…), toujours une ligne à la fois.
+pub fn toggle_comment_auto(doc: &mut Document, style: CommentStyle, now_ms: u64) -> bool {
+    if style.block.is_some() && selects_several_lines(doc) && !all_lines_commented(doc, style) {
+        return block_comment(doc, style, true, now_ms);
+    }
+    toggle_comment(doc, style, now_ms)
+}
+
+/// Une sélection au moins couvre plusieurs lignes.
+fn selects_several_lines(doc: &Document) -> bool {
+    blocks(doc).iter().any(|(a, b)| b > a)
+}
+
+/// Toutes les lignes non vides touchées sont déjà commentées **une à une** (par le commentaire de
+/// ligne, ou, sans commentaire de ligne, par un commentaire de bloc par ligne).
+fn all_lines_commented(doc: &Document, style: CommentStyle) -> bool {
+    let buf = doc.buffer();
+    let mut any = false;
+    for (a, b) in blocks(doc) {
+        for l in a..=b {
+            let text = line_string(buf, l);
+            let t = text.trim();
+            if t.is_empty() {
+                continue;
+            }
+            any = true;
+            let done = match (style.line, style.block) {
+                (Some(p), _) => t.starts_with(p),
+                (None, Some((o, c))) => t.starts_with(o) && t.ends_with(c),
+                (None, None) => false,
+            };
+            if !done {
+                return false;
+            }
+        }
+    }
+    any
+}
+
 /// Commentaire de bloc (`/* … */`, `<!-- … -->`) autour de chaque sélection ; sans sélection, autour
 /// du texte de la ligne du curseur. Si la sélection est déjà commentée (délimiteurs dedans, ou juste
 /// autour), on les retire. Un langage sans commentaire de bloc (`#`, TOML…) retombe sur le
 /// commentaire de ligne.
 pub fn toggle_block_comment(doc: &mut Document, style: CommentStyle, now_ms: u64) -> bool {
+    block_comment(doc, style, false, now_ms)
+}
+
+/// [`toggle_block_comment`] ; avec `whole_lines`, une sélection sur plusieurs lignes est étendue
+/// aux lignes entières (du premier caractère de la première ligne à la fin de la dernière).
+fn block_comment(doc: &mut Document, style: CommentStyle, whole_lines: bool, now_ms: u64) -> bool {
     let Some((open, close)) = style.block else {
         return toggle_comment(doc, style, now_ms);
     };
@@ -380,6 +429,16 @@ pub fn toggle_block_comment(doc: &mut Document, style: CommentStyle, now_ms: u64
             let start = buf.line_start(line);
             a = start + indent_chars(&text);
             b = start + text.trim_end().chars().count();
+        } else if whole_lines {
+            let first = buf.char_to_line(a);
+            let mut last = buf.char_to_line(b);
+            if last > first && b == buf.line_start(last) {
+                last -= 1;
+            }
+            if last > first {
+                a = buf.line_start(first) + indent_chars(&line_string(buf, first));
+                b = buf.line_start(last) + line_string(buf, last).trim_end().chars().count();
+            }
         }
         let inner = slice(a, b);
         let t = inner.trim();
@@ -899,6 +958,50 @@ mod tests {
         let mut d = doc("a();\nb();\n", &[(0, 9)]);
         toggle_block_comment(&mut d, CommentStyle::SLASHES, 0);
         assert_eq!(text(&d), "/* a();\nb(); */\n");
+    }
+
+    #[test]
+    fn une_ligne_en_ligne_plusieurs_lignes_en_bloc() {
+        let s = CommentStyle::SLASHES;
+        // une seule ligne (même sélectionnée) : commentaire de ligne
+        let mut d = doc("a();\nb();\n", &[(1, 3)]);
+        assert!(toggle_comment_auto(&mut d, s, 0));
+        assert_eq!(text(&d), "// a();\nb();\n");
+        assert!(toggle_comment_auto(&mut d, s, 1));
+        assert_eq!(text(&d), "a();\nb();\n");
+        // plusieurs lignes : un seul bloc autour des lignes entières, même si la sélection
+        // commence et finit au milieu des lignes
+        let mut d = doc("a();\n    b();\nc();\n", &[(2, 12)]);
+        assert!(toggle_comment_auto(&mut d, s, 0));
+        assert_eq!(text(&d), "/* a();\n    b(); */\nc();\n");
+        // le même raccourci le retire
+        assert!(toggle_comment_auto(&mut d, s, 1));
+        assert_eq!(text(&d), "a();\n    b();\nc();\n");
+        // une sélection qui finit en début de ligne n'embarque pas cette ligne
+        let mut d = doc("a();\nb();\nc();\n", &[(0, 10)]);
+        toggle_comment_auto(&mut d, s, 0);
+        assert_eq!(text(&d), "/* a();\nb(); */\nc();\n");
+        // des lignes déjà commentées une à une sont décommentées une à une
+        let mut d = doc("// a();\n// b();\n", &[(0, 15)]);
+        toggle_comment_auto(&mut d, s, 0);
+        assert_eq!(text(&d), "a();\nb();\n");
+        // sans commentaire de bloc (Python) : toujours une ligne à la fois
+        let mut d = doc("a\nb\n", &[(0, 3)]);
+        toggle_comment_auto(&mut d, CommentStyle::HASH, 0);
+        assert_eq!(text(&d), "# a\n# b\n");
+        // HTML : un seul <!-- --> pour plusieurs lignes, retiré ensuite ; ligne seule : par ligne
+        let mut d = doc("<p>a</p>\n<p>b</p>\n", &[(0, 17)]);
+        toggle_comment_auto(&mut d, CommentStyle::HTML, 0);
+        assert_eq!(text(&d), "<!-- <p>a</p>\n<p>b</p> -->\n");
+        toggle_comment_auto(&mut d, CommentStyle::HTML, 1);
+        assert_eq!(text(&d), "<p>a</p>\n<p>b</p>\n");
+        let mut d = doc("<p>a</p>\n", &[(0, 0)]);
+        toggle_comment_auto(&mut d, CommentStyle::HTML, 0);
+        assert_eq!(text(&d), "<!-- <p>a</p> -->\n");
+        // plusieurs lignes déjà commentées une à une en HTML : décommentées une à une
+        let mut d = doc("<!-- a -->\n<!-- b -->\n", &[(0, 21)]);
+        toggle_comment_auto(&mut d, CommentStyle::HTML, 0);
+        assert_eq!(text(&d), "a\nb\n");
     }
 
     #[test]
