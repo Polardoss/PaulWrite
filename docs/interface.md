@@ -186,6 +186,20 @@ ecent` ; les fichiers disparus sont écartés à
   conservés, écriture atomique). Les fichiers **ouverts et modifiés** dans l'éditeur ne sont pas
   touchés (comptés à part) ; les autres fichiers ouverts sont relus aussitôt (détection des
   modifications hors de l'éditeur). Le remplacement se fait sur le disque : Ctrl+Z ne l'annule pas.
+- **État Git** (lecture seule) : si le dossier ouvert (ou, sans dossier, celui du fichier courant) est
+  dans un dépôt Git, la barre latérale marque chaque fichier (`M` modifié, `A` ajouté, `D` supprimé,
+  `R` renommé, `U` non suivi, `!` conflit ; couleurs de la palette : orange, vert, rouge, bleu), un
+  point signale les dossiers qui contiennent des changements, les fichiers ignorés (`.gitignore`) sont
+  grisés, le libellé des onglets prend la couleur de l'état, et la barre d'état affiche
+  `branche ↑avance ↓retard · N modifications`. On interroge le programme `git`
+  (`git status --porcelain=v2 --branch -z --ignored`, `--no-optional-locks` pour ne jamais gêner un
+  autre outil Git) : aucune dépendance ajoutée. Tout se passe sur **un thread dédié** : les demandes
+  qui s'accumulent sont fusionnées, deux exécutions sont espacées d'au moins 300 ms, une exécution est
+  abandonnée au bout de 30 s (l'ancien état reste affiché). L'état est rafraîchi à l'ouverture du
+  dossier, au retour sur la fenêtre, après un enregistrement et quand le disque change (y compris
+  `index` et `HEAD` de `.git` : commit, changement de branche, mais pas ses entrailles). Rien n'est
+  demandé sans dossier ni fichier, ni dans les modes de mesure. Mesuré : démarrage 82,8 ms contre
+  83,0 ms, frappe p99 6,7 ms contre 6,6 ms (15 mesures, dans le bruit).
 
 ## Limites connues
 

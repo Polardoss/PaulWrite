@@ -3,8 +3,8 @@
 //! Usage : `cargo run -p paulwrite-render --example snapshot -- sortie.png [échelle]`
 
 use paulwrite_render::{
-    Chrome, Colors, MinimapSource, Overlay, OverlayRow, OverlayRowKind, Row, RowSource, Scroll,
-    SoftRenderer, TabInfo,
+    Chrome, Colors, GitMark, MinimapSource, Overlay, OverlayRow, OverlayRowKind, Row, RowSource,
+    Scroll, SoftRenderer, TabInfo,
 };
 
 /// Couleurs de la deuxième rangée de la démo : « let » mot-clé, la chaîne, le point-virgule.
@@ -107,16 +107,19 @@ fn main() {
             label: "main.rs",
             modified: true,
             active: true,
+            git: GitMark::None,
         },
         TabInfo {
             label: "README.md",
             modified: false,
             active: false,
+            git: GitMark::None,
         },
         TabInfo {
             label: "un_fichier_au_nom_vraiment_tres_long.txt",
             modified: false,
             active: false,
+            git: GitMark::None,
         },
     ]);
     let doc = Doc(demo

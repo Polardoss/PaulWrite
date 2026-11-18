@@ -51,7 +51,8 @@ const FONT_PX: f32 = 15.0;
 
 mod chrome;
 pub use chrome::{
-    Chrome, FileIcon, MinimapSource, Scroll, Sidebar, SidebarKind, SidebarRow, StripHit, TabButton,
+    Chrome, FileIcon, GitMark, MinimapSource, Scroll, Sidebar, SidebarKind, SidebarRow, StripHit,
+    TabButton,
 };
 
 /// Pinceaux : 0 texte, 1 fond, 2 sélection, 3 curseur, puis `3 + catégorie` (1..`KIND_SLOTS`) ;
@@ -228,6 +229,8 @@ pub struct TabInfo<'a> {
     /// Contenu modifié : une pastille remplace la croix de fermeture.
     pub modified: bool,
     pub active: bool,
+    /// État Git du fichier : le libellé prend la couleur de l'état (modifié, ajouté…).
+    pub git: GitMark,
 }
 
 /// Nature d'une rangée du panneau flottant.
@@ -287,6 +290,7 @@ struct TabEntry {
     label: String,
     modified: bool,
     active: bool,
+    git: GitMark,
 }
 
 /// Flèche de repli affichée dans la gouttière d'une rangée.
@@ -1852,6 +1856,7 @@ mod tests {
             label,
             modified,
             active,
+            git: GitMark::None,
         }
     }
 
@@ -2119,6 +2124,7 @@ mod tests {
 
     fn sidebar(selected: usize, n: usize) -> Sidebar {
         let mut rows = vec![SidebarRow {
+            git: GitMark::None,
             label: "Folders".into(),
             depth: 0,
             kind: SidebarKind::Header,
@@ -2127,6 +2133,14 @@ mod tests {
         }];
         for i in 0..n {
             rows.push(SidebarRow {
+                git: match i % 6 {
+                    0 => GitMark::Modified,
+                    1 => GitMark::Dirty,
+                    2 => GitMark::Untracked,
+                    3 => GitMark::Ignored,
+                    4 => GitMark::Deleted,
+                    _ => GitMark::None,
+                },
                 label: format!("fichier_{i}.rs"),
                 depth: i % 3,
                 kind: match i % 3 {
@@ -2222,11 +2236,13 @@ mod tests {
                 label: "a.rs",
                 modified: true,
                 active: true,
+                git: GitMark::None,
             },
             TabInfo {
                 label: "b.rs",
                 modified: false,
                 active: false,
+                git: GitMark::None,
             },
         ]);
         let visible = r.metrics().rows_for(size.1);
@@ -2357,6 +2373,7 @@ mod tests {
             label,
             modified: false,
             active,
+            git: GitMark::None,
         };
         r.set_tabs(&[tab("a.rs", true), tab("b.rs", false)]);
         r.set_sidebar(Some(&sidebar(0, 5)));

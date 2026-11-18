@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 
 use crate::i18n::Lang;
 
-use paulwrite_render::{FileIcon, Sidebar, SidebarKind, SidebarRow};
+use std::sync::Arc;
+
+use paulwrite_render::{FileIcon, GitMark, Sidebar, SidebarKind, SidebarRow};
+
+use crate::git::GitStatus;
 
 /// Un élément d'un dossier.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +102,8 @@ pub struct SidebarTree {
     cache: Option<(usize, usize, Sidebar)>,
     /// Langue du titre de la colonne.
     lang: Lang,
+    /// État Git du dépôt (barre colorée, lettres, points).
+    git: Option<Arc<GitStatus>>,
 }
 
 impl SidebarTree {
@@ -118,7 +124,23 @@ impl SidebarTree {
             flat_dirty: true,
             cache: None,
             lang: Lang::En,
+            git: None,
         }
+    }
+
+    /// Nouvel état Git (`None` : pas de dépôt) ; les lignes sont redessinées.
+    pub fn set_git(&mut self, git: Option<Arc<GitStatus>>) {
+        if self.git != git {
+            self.git = git;
+            self.cache = None;
+        }
+    }
+
+    /// La marque Git d'un fichier ou d'un dossier.
+    fn git_mark(&self, path: &Path, is_dir: bool) -> GitMark {
+        self.git
+            .as_deref()
+            .map_or(GitMark::None, |git| git.mark_of(path, is_dir))
     }
 
     /// Change la langue du titre (« Folders » / « Dossiers »).
@@ -305,6 +327,7 @@ impl SidebarTree {
         let selected = |path: &Path| self.selected.as_deref() == Some(path);
         match &self.flat[at] {
             Node::Header => SidebarRow {
+                git: GitMark::None,
                 label: self.lang.pick("Folders", "Dossiers").to_owned(),
                 depth: 0,
                 kind: SidebarKind::Header,
@@ -312,6 +335,7 @@ impl SidebarTree {
                 icon: FileIcon::Plain,
             },
             Node::Root { open } => SidebarRow {
+                git: self.git_mark(&self.root, true),
                 label: self
                     .root
                     .file_name()
@@ -336,6 +360,7 @@ impl SidebarTree {
                 let dir_path = &self.dirs[*dir as usize];
                 let name = &self.listed[dir_path][*index as usize].name;
                 SidebarRow {
+                    git: self.git_mark(&dir_path.join(name), *is_dir),
                     label: name.clone(),
                     depth: *depth as usize,
                     kind: match (is_dir, open) {

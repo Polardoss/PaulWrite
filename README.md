@@ -95,6 +95,7 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+S, Ctrl+Maj+S, Ctrl+O | enregistrer, enregistrer sous, ouvrir (dans un nouvel onglet) |
 | Ctrl+N, Ctrl+Maj+N, Ctrl+W | nouvel onglet, **nouvelle fenêtre**, fermer l'onglet |
 | Ctrl+molette, Ctrl+`+` / Ctrl+`-` / Ctrl+`0` | taille du texte : agrandir, réduire, par défaut (retenue dans `config.toml`) |
+| (dossier dans un dépôt Git) | **état Git en lecture seule** : lettre et couleur à droite de chaque fichier de la barre latérale (`M` modifié orange, `A` ajouté et `U` non suivi en vert, `D` supprimé et `!` conflit en rouge, `R` renommé), point sur les dossiers qui contiennent des changements, fichiers ignorés grisés, onglets colorés, et la branche avec `↑` `↓` et le nombre de modifications dans la barre d'état |
 | Ctrl+Maj+T | **rouvrir l'onglet fermé** (jusqu'à 20, avec leur curseur et leur défilement) |
 | File ▸ Open Recent | les 30 derniers fichiers ouverts, d'une session à l'autre (`%APPDATA%\PaulWrite
 ecent`) |

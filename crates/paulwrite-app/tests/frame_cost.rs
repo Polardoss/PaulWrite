@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use paulwrite_app::editor::Editor;
 use paulwrite_core::Document;
-use paulwrite_render::{Chrome, Colors, SoftRenderer, TabInfo};
+use paulwrite_render::{Chrome, Colors, GitMark, SoftRenderer, TabInfo};
 
 fn text(lines: usize) -> String {
     let words = [
@@ -50,6 +50,7 @@ fn cout_d_une_image_de_frappe() {
         label: "bench.rs",
         modified: false,
         active: true,
+        git: GitMark::None,
     }]);
     let rows = r.metrics().rows_for(size.1);
     let mut e = Editor::from_document(Document::from_text(&text(5000)), None);
@@ -237,6 +238,7 @@ fn cout_de_la_minimap_coloree() {
         label: "x.rs",
         modified: false,
         active: true,
+        git: GitMark::None,
     }]);
     let rows = rd.metrics().rows_for(size.1);
     let mut e = Editor::from_document(Document::from_text(&src), None);

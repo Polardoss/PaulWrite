@@ -102,9 +102,59 @@ impl FileIcon {
     }
 }
 
+/// Pinceau d'un état Git : couleurs déjà dans la palette (nombre : orange, chaîne : vert, fonction :
+/// bleu, erreur : rouge), gris pour un fichier ignoré.
+fn git_brush(mark: GitMark) -> Option<usize> {
+    // le pinceau de la catégorie de coloration `k` est à l'indice `3 + k`
+    Some(match mark {
+        GitMark::None => return None,
+        GitMark::Modified | GitMark::Dirty => 3 + 3,
+        GitMark::Added | GitMark::Untracked => 3 + 2,
+        GitMark::Renamed => 3 + 5,
+        GitMark::Deleted | GitMark::Conflict => BR_SQUIGGLE,
+        GitMark::Ignored => BR_SIDEBAR_DIM,
+    })
+}
+
+/// Ce que Git dit d'un fichier ou d'un dossier de la barre latérale.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GitMark {
+    /// Rien à signaler (ou pas de dépôt).
+    #[default]
+    None,
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflict,
+    /// Ignoré par `.gitignore` : nom grisé.
+    Ignored,
+    /// Dossier qui contient au moins un changement : un point.
+    Dirty,
+}
+
+impl GitMark {
+    /// Lettre affichée à droite de la ligne (`None` : pas de lettre).
+    #[must_use]
+    pub fn letter(self) -> Option<&'static str> {
+        match self {
+            GitMark::Modified => Some("M"),
+            GitMark::Added => Some("A"),
+            GitMark::Deleted => Some("D"),
+            GitMark::Renamed => Some("R"),
+            GitMark::Untracked => Some("U"),
+            GitMark::Conflict => Some("!"),
+            GitMark::None | GitMark::Ignored | GitMark::Dirty => None,
+        }
+    }
+}
+
 /// Une ligne de la barre latérale.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarRow {
+    /// État Git du fichier ou du dossier.
+    pub git: GitMark,
     pub label: String,
     /// Niveau d'imbrication (0 : dossier racine).
     pub depth: usize,
@@ -295,6 +345,7 @@ impl SoftRenderer {
                 label: t.label.to_owned(),
                 modified: t.modified,
                 active: t.active,
+                git: t.git,
             })
             .collect();
         if entries != self.tabs {
@@ -419,7 +470,14 @@ impl SoftRenderer {
                 );
             }
             let hover = self.hover_tab.filter(|&(h, _)| h == i);
-            let brush = if tab.active || hover.is_some() {
+            // couleur de l'état Git (modifié, ajouté…), sinon celle de l'onglet
+            let git_tint = match tab.git {
+                GitMark::Ignored | GitMark::Dirty | GitMark::None => None,
+                mark => git_brush(mark),
+            };
+            let brush = if let Some(b) = git_tint {
+                b
+            } else if tab.active || hover.is_some() {
                 BR_TAB_TEXT_ACTIVE
             } else {
                 BR_TAB_TEXT
@@ -1067,12 +1125,34 @@ impl SoftRenderer {
                 BR_SIDEBAR_BG
             };
             self.paint_icon(row, icon_x, cy, icon_bg);
+            // couleur du nom selon Git (sauf ligne choisie ou survolée : blanc)
+            let tint = git_brush(row.git);
             let brush = if row.selected || hot {
                 BR_SIDEBAR_TEXT_SEL
+            } else if let (Some(b), false) = (tint, row.git == GitMark::Dirty) {
+                b
             } else {
                 BR_SIDEBAR_TEXT
             };
-            let clip = d2d_rect(0.0, t, w - 10.0 * s, bt);
+            // lettre (fichier) ou point (dossier) à droite, dans la couleur de l'état
+            let marked = row.git.letter().is_some() || row.git == GitMark::Dirty;
+            if let (true, Some(b)) = (marked, tint) {
+                if let Some(letter) = row.git.letter() {
+                    self.ui_text(letter, UiFont::Small, w - (22.0 * s).round(), (t, bt), b)?;
+                } else {
+                    let r = (3.0 * s).round();
+                    self.rt.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: d2d_rect(w - 20.0 * s - r, cy - r, w - 20.0 * s + r, cy + r),
+                            radiusX: r,
+                            radiusY: r,
+                        },
+                        &self.brushes[b],
+                    );
+                }
+            }
+            let right = if marked { 26.0 * s } else { 10.0 * s };
+            let clip = d2d_rect(0.0, t, w - right, bt);
             self.rt
                 .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
             self.ui_text(

@@ -17,7 +17,8 @@ use paulwrite_lsp as lsp;
 use paulwrite_plugins as plugins;
 use paulwrite_render::watch::{self, DirWatcher};
 use paulwrite_render::{
-    platform, since_process_start, Chrome, Colors, SoftRenderer, StripHit, TabButton, TabInfo,
+    platform, since_process_start, Chrome, Colors, GitMark, SoftRenderer, StripHit, TabButton,
+    TabInfo,
 };
 use paulwrite_search::{
     self as search, FindOptions, FuzzyFinder, IndexOptions, SearchOptions, TextQuery,
@@ -39,6 +40,7 @@ use crate::command::{Command, Effect, LspAction};
 use crate::config::Config;
 use crate::editing;
 use crate::editor::{Preedit, Squiggle};
+use crate::git::{self, GitStatus};
 use crate::i18n::Lang;
 use crate::keymap;
 use crate::menu;
@@ -68,6 +70,7 @@ macro_rules! ed {
 
 mod find;
 mod project;
+mod repo;
 
 use find::FindState;
 pub use find::FoundEvent;
@@ -107,6 +110,8 @@ pub enum UserEvent {
     Menu(u32),
     /// Résultat d'une recherche dans le document courant (Ctrl+F).
     Found(FoundEvent),
+    /// État Git d'un dossier (thread `git`).
+    Git(git::GitResult),
 }
 
 /// Pont entre le crochet de messages de la boucle d'événements (créé avant elle) et l'application.
@@ -384,6 +389,12 @@ struct App {
     reload_asked: bool,
     /// Diagnostic des frappes (`PAULWRITE_KEYLOG`).
     keylog: bool,
+    /// Demandes d'état Git (thread dédié), dernier état reçu, dossier demandé et texte de la barre
+    /// d'état.
+    git_tx: Sender<PathBuf>,
+    git: Option<Arc<GitStatus>>,
+    git_dir: Option<PathBuf>,
+    git_label: String,
     /// Remplacement dans le projet en attente de confirmation (puis d'application).
     project_params: Option<project_replace::Params>,
     /// Taille du texte (pixels) et largeur d'une tabulation (colonnes) : réglages `font_size` et
@@ -491,6 +502,7 @@ impl App {
         opts: Options,
         jobs: Sender<Job>,
         syntax_tx: Sender<syntax::Request>,
+        git_tx: Sender<PathBuf>,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
         let word_wrap = !opts.no_wrap;
@@ -534,6 +546,10 @@ impl App {
             quit_queue: Vec::new(),
             reload_asked: false,
             keylog: std::env::var_os("PAULWRITE_KEYLOG").is_some(),
+            git_tx,
+            git: None,
+            git_dir: None,
+            git_label: String::new(),
             project_params: None,
             font_px: crate::config::DEFAULT_FONT_SIZE,
             tab_size: editing::DEFAULT_TAB_WIDTH,
@@ -702,6 +718,10 @@ impl App {
                 label,
                 modified: t.shown_modified,
                 active: i == self.active,
+                git: match (self.git.as_deref(), t.editor.path()) {
+                    (Some(g), Some(path)) => g.mark_of(path, false),
+                    _ => GitMark::None,
+                },
             })
             .collect();
         if let Some(r) = self.renderer.as_mut() {
@@ -1457,6 +1477,9 @@ impl App {
         self.dirty_dirs.clear();
         self.sidebar_open = true;
         self.project_root = Some(path);
+        // l'état Git de l'ancien dossier n'a plus de sens
+        self.set_git(None);
+        self.request_git();
         self.request_redraw();
     }
 
@@ -1862,6 +1885,7 @@ impl App {
                 self.menu_commands = table;
             }
         }
+        self.refresh_git_label();
         self.tabs_dirty = true;
         self.overlay_dirty = true;
         self.request_redraw();
@@ -2522,10 +2546,16 @@ impl App {
             format!("Tab Size: {}", self.tab_size),
             format!("Tabulation : {}", self.tab_size),
         );
+        let without_git = [tab_size.as_str(), language];
+        let with_git = [self.git_label.as_str(), tab_size.as_str(), language];
         r.set_chrome(&Chrome {
             line_digits: tab.editor.line_digits(),
             status_left: &self.status_buf,
-            status_right: &[tab_size.as_str(), language],
+            status_right: if self.git_label.is_empty() {
+                &without_git
+            } else {
+                &with_git
+            },
             scroll: Some(tab.editor.scroll()),
         });
         // La minimap suit le défilement tout de suite, mais le texte tapé avec retard.
@@ -2732,6 +2762,8 @@ impl App {
                 self.project_root = None;
                 self.sidebar = None;
                 self.sidebar_open = false;
+                self.set_git(None);
+                self.request_git();
                 self.request_redraw();
             }
             Effect::ToggleSidebar => self.toggle_sidebar(),
@@ -3511,10 +3543,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             UserEvent::Found(ev) => self.on_found(ev),
+            UserEvent::Git(result) => self.on_git(result),
             UserEvent::DirChanged(dir) => {
                 // Seuls comptent les dossiers déjà lus ; les entrailles de `.git` changent sans cesse.
                 let git = dir.components().any(|c| c.as_os_str() == ".git");
                 let known = self.sidebar.as_ref().is_some_and(|t| t.is_listed(&dir));
+                // un changement hors de `.git`, ou directement dans `.git` (index, HEAD : commit,
+                // changement de branche) : l'état Git est à refaire ; pas ses entrailles
+                if !git || dir.file_name().is_some_and(|n| n == ".git") {
+                    self.request_git();
+                }
                 if known && !git {
                     self.dirty_dirs.insert(dir);
                     self.refresh_due = Some(Instant::now() + DIR_REFRESH_DELAY);
@@ -3778,6 +3816,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.tabs[i].disk_stamp = stamp;
                                 }
                                 self.tabs_dirty = true;
+                                self.request_git();
                                 self.plugin_event("save", Some(i));
                                 self.lsp_save(i);
                             }
@@ -3834,7 +3873,10 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => self.request_quit(el),
             WindowEvent::RedrawRequested => self.redraw(el),
-            WindowEvent::Focused(true) => self.check_files(),
+            WindowEvent::Focused(true) => {
+                self.check_files();
+                self.request_git();
+            }
             WindowEvent::Resized(_) => {
                 self.sync_viewport();
                 self.request_redraw();
@@ -4232,7 +4274,11 @@ pub fn run(opts: Options) -> Result<(), String> {
     let syntax_tx = syntax::spawn(move |resp| {
         let _ = syntax_proxy.send_event(UserEvent::Syntax(resp));
     });
-    let mut app = App::new(opts, jobs, syntax_tx, proxy);
+    let git_proxy = proxy.clone();
+    let git_tx = git::spawn(move |result| {
+        let _ = git_proxy.send_event(UserEvent::Git(result));
+    });
+    let mut app = App::new(opts, jobs, syntax_tx, git_tx, proxy);
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
