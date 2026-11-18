@@ -83,6 +83,8 @@ pub enum Command {
     FindPrevious,
     /// Rechercher et remplacer dans le document (panneau).
     Replace,
+    /// Remplacer dans tous les fichiers du projet (panneau, aperçu, confirmation).
+    ReplaceInProject,
     /// Duplique la ou les lignes du curseur.
     DuplicateLine,
     /// Supprime la ou les lignes du curseur.
@@ -196,6 +198,7 @@ impl Command {
             Command::FindNext => "find.next",
             Command::FindPrevious => "find.previous",
             Command::Replace => "find.replace",
+            Command::ReplaceInProject => "find.replace_in_project",
             Command::DuplicateLine => "edit.duplicate_line",
             Command::DeleteLine => "edit.delete_line",
             Command::MoveLineUp => "edit.move_line_up",
@@ -278,6 +281,7 @@ impl Command {
             Command::FindNext,
             Command::FindPrevious,
             Command::Replace,
+            Command::ReplaceInProject,
             Command::DuplicateLine,
             Command::DeleteLine,
             Command::MoveLineUp,
@@ -355,6 +359,7 @@ impl Command {
             Command::FindNext => "Recherche : occurrence suivante",
             Command::FindPrevious => "Recherche : occurrence précédente",
             Command::Replace => "Recherche : remplacer dans le document",
+            Command::ReplaceInProject => "Recherche : remplacer dans le projet",
             Command::DuplicateLine => "Édition : dupliquer la ligne",
             Command::DeleteLine => "Édition : supprimer la ligne",
             Command::MoveLineUp => "Édition : déplacer la ligne vers le haut",
@@ -440,6 +445,7 @@ impl Command {
             Command::FindNext => "Find: next match",
             Command::FindPrevious => "Find: previous match",
             Command::Replace => "Find: replace in document",
+            Command::ReplaceInProject => "Find: replace in project",
             Command::DuplicateLine => "Edit: duplicate line",
             Command::DeleteLine => "Edit: delete line",
             Command::MoveLineUp => "Edit: move line up",

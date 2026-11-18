@@ -787,6 +787,9 @@ impl Editor {
             Command::Extend(m) => self.move_by(m, true),
             Command::Find => return Some(Effect::OpenPalette(PaletteMode::Find)),
             Command::Replace => return Some(Effect::OpenPalette(PaletteMode::Replace)),
+            Command::ReplaceInProject => {
+                return Some(Effect::OpenPalette(PaletteMode::ProjectReplace))
+            }
             Command::FindNext => return Some(Effect::FindStep(true)),
             Command::FindPrevious => return Some(Effect::FindStep(false)),
             Command::Fold => self.fold_at_caret(),

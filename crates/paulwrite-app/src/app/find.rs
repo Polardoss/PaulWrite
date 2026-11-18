@@ -311,6 +311,10 @@ impl App {
             'r' => self.find_opts.regex = !self.find_opts.regex,
             _ => return,
         }
+        if self.project_panel_open() {
+            self.project_refresh_note();
+            return;
+        }
         self.start_find(Some(Jump::From(self.find_origin)));
     }
 

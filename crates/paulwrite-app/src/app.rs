@@ -44,6 +44,7 @@ use crate::keymap;
 use crate::menu;
 use crate::metrics::Samples;
 use crate::palette::{parse_goto, Item, Outcome, Palette, PaletteKey, PaletteMode, Target};
+use crate::project_replace;
 use crate::session::{self, Session, TabState};
 use crate::sidebar::{Click, SidebarTree};
 use crate::tab::{Tab, SYNTAX_MARGIN_LINES};
@@ -66,6 +67,7 @@ macro_rules! ed {
 }
 
 mod find;
+mod project;
 
 use find::FindState;
 pub use find::FoundEvent;
@@ -380,6 +382,8 @@ struct App {
     quit_queue: Vec<TabId>,
     /// Une question « recharger le fichier modifié sur le disque ? » est posée.
     reload_asked: bool,
+    /// Remplacement dans le projet en attente de confirmation (puis d'application).
+    project_params: Option<project_replace::Params>,
     /// Taille du texte (pixels) et largeur d'une tabulation (colonnes) : réglages `font_size` et
     /// `tab_size`, Ctrl+molette ajuste la taille.
     font_px: u32,
@@ -527,6 +531,7 @@ impl App {
             after_save: None,
             quit_queue: Vec::new(),
             reload_asked: false,
+            project_params: None,
             font_px: crate::config::DEFAULT_FONT_SIZE,
             tab_size: editing::DEFAULT_TAB_WIDTH,
             closed: Vec::new(),
@@ -1950,7 +1955,10 @@ impl App {
                 st.finder = Some(finder);
             }
             // Ces panneaux sont ouverts par les réponses du serveur de langage, pas par un raccourci.
-            PaletteMode::Find | PaletteMode::Replace | PaletteMode::ReplaceWith => {}
+            PaletteMode::Find
+            | PaletteMode::Replace
+            | PaletteMode::ReplaceWith
+            | PaletteMode::ProjectReplace => {}
             PaletteMode::GotoLine
             | PaletteMode::Completion
             | PaletteMode::Diagnostics
@@ -1969,6 +1977,9 @@ impl App {
                 ));
             }
         }
+        if mode == PaletteMode::ProjectReplace {
+            self.project_prepare(&mut st);
+        }
         let finding = matches!(mode, PaletteMode::Find | PaletteMode::Replace);
         if finding {
             self.find_prepare(&mut st);
@@ -1978,6 +1989,9 @@ impl App {
         self.note_settled(settled);
         if finding {
             self.find_opened();
+        }
+        if mode == PaletteMode::ProjectReplace {
+            self.project_refresh_note();
         }
         self.overlay_dirty = true;
         self.request_redraw();
@@ -2092,6 +2106,7 @@ impl App {
             | PaletteMode::Find
             | PaletteMode::Replace
             | PaletteMode::ReplaceWith
+            | PaletteMode::ProjectReplace
             | PaletteMode::Hover => true,
         };
         self.overlay_dirty = true;
@@ -2128,6 +2143,7 @@ impl App {
             | PaletteMode::Find
             | PaletteMode::Replace
             | PaletteMode::ReplaceWith
+            | PaletteMode::ProjectReplace
             | PaletteMode::Hover => {}
         }
         self.overlay_dirty = true;
@@ -2257,6 +2273,11 @@ impl App {
 
     /// Transmet une touche au panneau et en tire les conséquences.
     fn palette_apply(&mut self, key: &PaletteKey, el: &ActiveEventLoop) {
+        if self.project_panel_open() {
+            self.project_key(key);
+            self.request_redraw();
+            return;
+        }
         if self.find_panel_open() {
             self.find_key(key);
             self.request_redraw();
@@ -2297,6 +2318,7 @@ impl App {
                 Command::SearchProject => Some(PaletteMode::Search),
                 Command::Find => Some(PaletteMode::Find),
                 Command::Replace => Some(PaletteMode::Replace),
+                Command::ReplaceInProject => Some(PaletteMode::ProjectReplace),
                 Command::FindNext | Command::FindPrevious if self.find_panel_open() => {
                     self.find_step(cmd == Command::FindNext);
                     self.touch(at);
@@ -2319,7 +2341,10 @@ impl App {
             }
         }
         // Alt+C / Alt+W / Alt+R : casse, mot entier, expression régulière (recherche)
-        if self.find_panel_open() && self.mods.alt_key() && !self.mods.control_key() {
+        if (self.find_panel_open() || self.project_panel_open())
+            && self.mods.alt_key()
+            && !self.mods.control_key()
+        {
             if let Key::Character(c) = &plain {
                 if let Some(letter) = c.chars().next().map(|l| l.to_ascii_lowercase()) {
                     if matches!(letter, 'c' | 'w' | 'r') {
@@ -2782,6 +2807,7 @@ impl App {
                 Ok("find") => self.open_palette(PaletteMode::Find),
                 Ok("replace") => self.open_palette(PaletteMode::Replace),
                 Ok("recent") => self.open_recent_list(),
+                Ok("projectreplace") => self.open_palette(PaletteMode::ProjectReplace),
                 _ => {}
             }
             // `PAULWRITE_SCREENSHOT_REOPEN=1` : ferme l'onglet actif (après avoir déplacé le curseur)
@@ -3591,6 +3617,8 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 Done::Session(None) => {}
+                Done::ProjectReplaced(report) => self.on_project_report(report),
+                Done::ProjectConfirmed(yes) => self.on_project_confirmed(yes),
                 Done::Recent(list) => {
                     // ceux déjà ouverts depuis le lancement restent en tête
                     let mine = std::mem::take(&mut self.recent);

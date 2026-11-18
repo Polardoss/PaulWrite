@@ -105,6 +105,7 @@ ecent`) |
 | Ctrl+Maj+F | rechercher du texte dans le projet |
 | Ctrl+F, F3 / Maj+F3 | rechercher dans le document (occurrences surlignées, compteur « 3 sur 12 »), suivante / précédente |
 | Ctrl+H, puis Tab | rechercher et remplacer : Entrée remplace l'occurrence, Ctrl+Alt+Entrée remplace tout (un seul Annuler) |
+| Ctrl+Maj+H | **remplacer dans tout le projet** : chercher, Tab, remplacer par, Entrée ; un aperçu compte les occurrences et demande confirmation avant d'écrire sur le disque |
 | Alt+C / Alt+W / Alt+R (dans la recherche) | respecter la casse, mot entier, expression régulière |
 | Ctrl+D, Ctrl+L | sélectionner le mot puis l'occurrence suivante (multi-curseurs), sélectionner la ligne |
 | Ctrl+Maj+D, Ctrl+Maj+K, Ctrl+Maj+↑/↓ | dupliquer, supprimer, déplacer la ou les lignes |

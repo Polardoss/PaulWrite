@@ -34,6 +34,8 @@ pub enum PaletteMode {
     Tabs,
     /// Fichiers ouverts récemment (liste fixe).
     Recent,
+    /// Remplacer dans tout le projet (deux champs : chercher, remplacer par).
+    ProjectReplace,
     /// Rechercher dans le document courant.
     Find,
     /// Rechercher et remplacer dans le document courant (deux champs).
@@ -72,6 +74,9 @@ impl PaletteMode {
             PaletteMode::Tabs => lang.pick("Open files", "Onglets ouverts"),
             PaletteMode::Recent => lang.pick("Recent files", "Fichiers r\u{e9}cents"),
             PaletteMode::Find | PaletteMode::Replace => lang.pick("Find: ", "Chercher : "),
+            PaletteMode::ProjectReplace => {
+                lang.pick("Find in project: ", "Chercher dans le projet : ")
+            }
             PaletteMode::ReplaceWith => lang.pick("Replace: ", "Remplacer : "),
         }
     }

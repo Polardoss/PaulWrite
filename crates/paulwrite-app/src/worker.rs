@@ -15,6 +15,7 @@ use crate::i18n::Lang;
 use ropey::Rope;
 
 use crate::config::Config;
+use crate::project_replace;
 use crate::session::Session;
 use crate::sidebar::{is_hidden_dir, sort_entries, Entry};
 
@@ -82,6 +83,14 @@ pub enum Job {
     NewWindow,
     /// Ajoute un fichier en tête de la liste des fichiers récents.
     AddRecent(PathBuf),
+    /// Remplacer dans tout le projet : aperçu (`apply == false`) ou remplacement ; la réponse est
+    /// [`Done::ProjectReplaced`].
+    ProjectReplace {
+        params: Box<project_replace::Params>,
+        apply: bool,
+    },
+    /// « Remplacer N occurrences dans M fichiers ? » (Oui / Non) ; réponse : [`Done::ProjectConfirmed`].
+    ConfirmProject { owner: isize, text: String },
     /// Enregistre la session (onglets, dossier) ; `ack` est signalé une fois le fichier écrit
     /// (à la fermeture, l'application l'attend un court instant avant de quitter).
     SaveSession {
@@ -129,6 +138,8 @@ impl std::fmt::Debug for Job {
             Job::NewWindow => write!(f, "NewWindow"),
             Job::SaveSession { .. } => write!(f, "SaveSession"),
             Job::AddRecent(p) => write!(f, "AddRecent({p:?})"),
+            Job::ProjectReplace { apply, .. } => write!(f, "ProjectReplace(apply={apply})"),
+            Job::ConfirmProject { .. } => write!(f, "ConfirmProject"),
             Job::CheckFiles { files } => write!(f, "CheckFiles({})", files.len()),
             Job::ConfirmReload { tab, .. } => write!(f, "ConfirmReload({tab})"),
             Job::Save { tab, path, .. } => write!(f, "Save({tab}, {path:?})"),
@@ -145,6 +156,10 @@ pub enum Done {
     Session(Option<Session>),
     /// Fichiers ouverts récemment (le plus récent d'abord) ; envoyé juste après la session.
     Recent(Vec<PathBuf>),
+    /// Bilan d'un aperçu ou d'un remplacement dans le projet.
+    ProjectReplaced(project_replace::Report),
+    /// Réponse à [`Job::ConfirmProject`] : `true` pour Oui.
+    ProjectConfirmed(bool),
     /// Réponse de l'utilisateur à [`Job::ConfirmSave`].
     SaveConfirmed {
         for_: ConfirmFor,
@@ -217,6 +232,8 @@ impl std::fmt::Debug for Done {
             Done::Directory { tab, path } => write!(f, "Directory({tab}, {path:?})"),
             Done::FilesChanged(v) => write!(f, "FilesChanged({})", v.len()),
             Done::Recent(v) => write!(f, "Recent({})", v.len()),
+            Done::ProjectReplaced(r) => write!(f, "ProjectReplaced({}/{})", r.files, r.occurrences),
+            Done::ProjectConfirmed(y) => write!(f, "ProjectConfirmed({y})"),
             Done::ReloadConfirmed { tab, reload, .. } => {
                 write!(f, "ReloadConfirmed({tab}, {reload})")
             }
@@ -425,6 +442,17 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                             reload,
                             stamp,
                         });
+                    }
+                    Job::ProjectReplace { params, apply } => {
+                        let cancel = std::sync::atomic::AtomicBool::new(false);
+                        notify(Done::ProjectReplaced(project_replace::run(
+                            &params, apply, &cancel,
+                        )));
+                    }
+                    Job::ConfirmProject { owner, text } => {
+                        notify(Done::ProjectConfirmed(platform::confirm_yes_no(
+                            owner, &text,
+                        )));
                     }
                     Job::AddRecent(path) => {
                         if let Err(e) = crate::session::add_recent(&path) {

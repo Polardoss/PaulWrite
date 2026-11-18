@@ -167,6 +167,11 @@ fn menus() -> Vec<Menu> {
                     "Find in Project\u{2026}",
                     "Rechercher dans le projet\u{2026}",
                 ),
+                Item(
+                    Command::ReplaceInProject,
+                    "Replace in Project\u{2026}",
+                    "Remplacer dans le projet\u{2026}",
+                ),
             ],
         ),
         (

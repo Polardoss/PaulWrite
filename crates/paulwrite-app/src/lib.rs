@@ -11,6 +11,7 @@ pub mod keymap;
 pub mod menu;
 pub mod metrics;
 pub mod palette;
+pub mod project_replace;
 pub mod session;
 pub mod sidebar;
 pub mod spans;

@@ -68,7 +68,8 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("s", true) => Some(Command::SaveAs),
             ("o", _) => Some(Command::Open),
             ("f", false) => Some(Command::Find),
-            ("h", _) => Some(Command::Replace),
+            ("h", true) => Some(Command::ReplaceInProject),
+            ("h", false) => Some(Command::Replace),
             ("d", false) => Some(Command::SelectNextOccurrence),
             ("d", true) => Some(Command::DuplicateLine),
             ("k", true) => Some(Command::DeleteLine),
@@ -291,6 +292,15 @@ mod tests {
             shortcut_label(Command::LspDefinition).as_deref(),
             Some("F12")
         );
+    }
+
+    #[test]
+    fn remplacer_dans_le_projet() {
+        let c = ModifiersState::CONTROL;
+        let cs = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let h = Key::Character("h".into());
+        assert_eq!(command_for(&h, c), Some(Command::Replace));
+        assert_eq!(command_for(&h, cs), Some(Command::ReplaceInProject));
     }
 
     #[test]

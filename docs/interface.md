@@ -177,6 +177,15 @@ ecent` ; les fichiers disparus sont écartés à
   d'affichage, le retour à la ligne, la touche Tab (espaces jusqu'au taquet suivant) et Maj+Tab.
   Rien n'est refait au démarrage tant que ces réglages sont ceux par défaut (démarrage mesuré à
   77 ms, médiane).
+- **Remplacer dans le projet** (Ctrl+Maj+H) : panneau à deux champs (Entrée dans le premier passe au
+  second ; Alt+C / W / R : casse, mot entier, expression régulière avec `$1`). Entrée dans le second
+  lance, **sur le worker**, un aperçu qui compte les occurrences et les fichiers sans rien écrire ;
+  une boîte demande confirmation avec ces chiffres, puis le remplacement est appliqué. Même
+  moteur et mêmes fichiers que la recherche dans le projet (`.gitignore` respecté), fichiers de plus
+  de 5 Mo et binaires ignorés ; lecture et écriture comme l'éditeur (encodage, BOM et fins de ligne
+  conservés, écriture atomique). Les fichiers **ouverts et modifiés** dans l'éditeur ne sont pas
+  touchés (comptés à part) ; les autres fichiers ouverts sont relus aussitôt (détection des
+  modifications hors de l'éditeur). Le remplacement se fait sur le disque : Ctrl+Z ne l'annule pas.
 
 ## Limites connues
 
