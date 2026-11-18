@@ -178,6 +178,68 @@ impl Session {
     }
 }
 
+/// Nombre de fichiers récents gardés.
+pub const MAX_RECENT: usize = 30;
+
+/// Emplacement de la liste des fichiers récents (`%APPDATA%\PaulWrite\recent`, un chemin par ligne,
+/// le plus récent d'abord).
+#[must_use]
+pub fn recent_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("PaulWrite").join("recent"))
+}
+
+/// Analyse le fichier des récents (lignes vides ignorées).
+#[must_use]
+pub fn parse_recent(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// La liste `list` avec `path` en tête (sans doublon), tronquée à [`MAX_RECENT`].
+#[must_use]
+pub fn recent_with(list: &[PathBuf], path: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(list.len() + 1);
+    out.push(path.to_path_buf());
+    out.extend(list.iter().filter(|p| p.as_path() != path).cloned());
+    out.truncate(MAX_RECENT);
+    out
+}
+
+/// Lit les fichiers récents qui existent encore. **Bloquant** : à appeler depuis un worker.
+#[must_use]
+pub fn load_recent() -> Vec<PathBuf> {
+    let Some(text) = recent_path().and_then(|p| std::fs::read_to_string(p).ok()) else {
+        return Vec::new();
+    };
+    parse_recent(&text)
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Ajoute `path` en tête des fichiers récents. **Bloquant** : à appeler depuis un worker.
+///
+/// # Errors
+/// Dossier ou fichier non inscriptible.
+pub fn add_recent(path: &Path) -> std::io::Result<()> {
+    let Some(file) = recent_path() else {
+        return Ok(());
+    };
+    let current = std::fs::read_to_string(&file)
+        .map(|t| parse_recent(&t))
+        .unwrap_or_default();
+    let list = recent_with(&current, path);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let text: String = list.iter().map(|p| format!("{}\n", p.display())).collect();
+    let tmp = file.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +265,25 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn fichiers_recents() {
+        let p = |s: &str| PathBuf::from(s);
+        let list = vec![p("a.rs"), p("b.rs"), p("c.rs")];
+        // un fichier déjà présent remonte en tête, sans doublon
+        assert_eq!(
+            recent_with(&list, &p("c.rs")),
+            [p("c.rs"), p("a.rs"), p("b.rs")]
+        );
+        assert_eq!(recent_with(&list, &p("z.rs")).len(), 4);
+        // la liste est tronquée
+        let long: Vec<PathBuf> = (0..MAX_RECENT).map(|i| p(&format!("f{i}"))).collect();
+        let out = recent_with(&long, &p("nouveau"));
+        assert_eq!(out.len(), MAX_RECENT);
+        assert_eq!(out[0], p("nouveau"));
+        assert!(!out.contains(&p(&format!("f{}", MAX_RECENT - 1))));
+        assert_eq!(parse_recent("a\n\n  \nb\n"), [p("a"), p("b")]);
     }
 
     #[test]

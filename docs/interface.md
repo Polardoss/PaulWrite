@@ -163,6 +163,12 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   d'annulation repart de zéro) ; un fichier changé **et** modifié ici donne une question
   (« recharger et perdre vos modifications ? ») ; répondre non garde votre version sans reposer la
   question pour ce changement. Un fichier supprimé est ignoré.
+- **Rouvrir l'onglet fermé** (Ctrl+Maj+T) : les 20 derniers onglets fermés qui avaient un vrai
+  fichier sont gardés en mémoire avec leur curseur et leur première ligne visible ; ceux qui sont
+  déjà rouverts sont sautés. **Fichiers récents** (menu File ▸ Open Recent, ou la palette) : les 30
+  derniers fichiers ouverts à la main (pas ceux d'une reprise de session ni d'un rechargement),
+  gardés par le worker dans `%APPDATA%\PaulWriteecent` ; les fichiers disparus sont écartés à
+  la lecture.
 
 ## Limites connues
 

@@ -882,6 +882,8 @@ impl Editor {
             Command::Open => return Some(Effect::Open),
             Command::NewFile => return Some(Effect::NewTab),
             Command::NewWindow => return Some(Effect::NewWindow),
+            Command::ReopenClosedTab => return Some(Effect::ReopenClosed),
+            Command::OpenRecent => return Some(Effect::OpenRecent),
             Command::CloseTab => return Some(Effect::CloseTab),
             Command::NextTab => return Some(Effect::NextTab),
             Command::PrevTab => return Some(Effect::PrevTab),

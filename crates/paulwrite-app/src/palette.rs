@@ -32,6 +32,8 @@ pub enum PaletteMode {
     Hover,
     /// Onglets ouverts (liste fixe : on choisit avec les flèches).
     Tabs,
+    /// Fichiers ouverts récemment (liste fixe).
+    Recent,
     /// Rechercher dans le document courant.
     Find,
     /// Rechercher et remplacer dans le document courant (deux champs).
@@ -50,6 +52,7 @@ impl PaletteMode {
                 | PaletteMode::Locations
                 | PaletteMode::Hover
                 | PaletteMode::Tabs
+                | PaletteMode::Recent
         )
     }
 }
@@ -67,6 +70,7 @@ impl PaletteMode {
             PaletteMode::Locations => lang.pick("Definitions", "Définitions"),
             PaletteMode::Hover => lang.pick("Hover", "Survol"),
             PaletteMode::Tabs => lang.pick("Open files", "Onglets ouverts"),
+            PaletteMode::Recent => lang.pick("Recent files", "Fichiers r\u{e9}cents"),
             PaletteMode::Find | PaletteMode::Replace => lang.pick("Find: ", "Chercher : "),
             PaletteMode::ReplaceWith => lang.pick("Replace: ", "Remplacer : "),
         }
@@ -89,6 +93,8 @@ pub enum Target {
     /// Insérer ce texte à la place des `usize` caractères d'identifiant qui précèdent le curseur
     /// (complétion).
     Completion(String, usize),
+    /// Ouvrir ce fichier (chemin absolu : fichiers récents).
+    Path(std::path::PathBuf),
     /// Rien à faire (ligne d'information, par exemple le texte d'un survol).
     Nothing,
     /// Activer cet onglet (indice dans la liste des onglets).

@@ -80,6 +80,8 @@ pub enum Job {
     },
     /// Lance une nouvelle fenêtre : un nouveau processus `paulwrite`, sans document.
     NewWindow,
+    /// Ajoute un fichier en tête de la liste des fichiers récents.
+    AddRecent(PathBuf),
     /// Enregistre la session (onglets, dossier) ; `ack` est signalé une fois le fichier écrit
     /// (à la fermeture, l'application l'attend un court instant avant de quitter).
     SaveSession {
@@ -126,6 +128,7 @@ impl std::fmt::Debug for Job {
             Job::SaveSetting { key, .. } => write!(f, "SaveSetting({key})"),
             Job::NewWindow => write!(f, "NewWindow"),
             Job::SaveSession { .. } => write!(f, "SaveSession"),
+            Job::AddRecent(p) => write!(f, "AddRecent({p:?})"),
             Job::CheckFiles { files } => write!(f, "CheckFiles({})", files.len()),
             Job::ConfirmReload { tab, .. } => write!(f, "ConfirmReload({tab})"),
             Job::Save { tab, path, .. } => write!(f, "Save({tab}, {path:?})"),
@@ -140,6 +143,8 @@ pub enum Done {
     /// Session de la dernière fermeture (déjà débarrassée des fichiers disparus) ; envoyée juste
     /// après la configuration, `None` s'il n'y a rien à rétablir.
     Session(Option<Session>),
+    /// Fichiers ouverts récemment (le plus récent d'abord) ; envoyé juste après la session.
+    Recent(Vec<PathBuf>),
     /// Réponse de l'utilisateur à [`Job::ConfirmSave`].
     SaveConfirmed {
         for_: ConfirmFor,
@@ -211,6 +216,7 @@ impl std::fmt::Debug for Done {
             }
             Done::Directory { tab, path } => write!(f, "Directory({tab}, {path:?})"),
             Done::FilesChanged(v) => write!(f, "FilesChanged({})", v.len()),
+            Done::Recent(v) => write!(f, "Recent({})", v.len()),
             Done::ReloadConfirmed { tab, reload, .. } => {
                 write!(f, "ReloadConfirmed({tab}, {reload})")
             }
@@ -307,6 +313,7 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
             let restore = config.restore_session;
             notify(Done::Config(config));
             notify(Done::Session(if restore { Session::load() } else { None }));
+            notify(Done::Recent(crate::session::load_recent()));
             for job in rx {
                 match job {
                     Job::ConfirmSave {
@@ -416,6 +423,11 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                             reload,
                             stamp,
                         });
+                    }
+                    Job::AddRecent(path) => {
+                        if let Err(e) = crate::session::add_recent(&path) {
+                            eprintln!("fichiers r\u{e9}cents non enregistr\u{e9}s : {e}");
+                        }
                     }
                     Job::SaveSession { session, ack } => {
                         if let Err(e) = session.save() {

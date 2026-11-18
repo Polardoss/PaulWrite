@@ -30,6 +30,16 @@ fn menus() -> Vec<Menu> {
                 Item(Command::NewFile, "New File", "Nouveau fichier"),
                 Item(Command::NewWindow, "New Window", "Nouvelle fen\u{ea}tre"),
                 Item(
+                    Command::ReopenClosedTab,
+                    "Reopen Closed File",
+                    "Rouvrir le fichier ferm\u{e9}",
+                ),
+                Item(
+                    Command::OpenRecent,
+                    "Open Recent\u{2026}",
+                    "Ouvrir r\u{e9}cent\u{2026}",
+                ),
+                Item(
                     Command::Open,
                     "Open File\u{2026}",
                     "Ouvrir un fichier\u{2026}",

@@ -94,6 +94,8 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V | tout sélectionner, copier, couper, coller |
 | Ctrl+S, Ctrl+Maj+S, Ctrl+O | enregistrer, enregistrer sous, ouvrir (dans un nouvel onglet) |
 | Ctrl+N, Ctrl+Maj+N, Ctrl+W | nouvel onglet, **nouvelle fenêtre**, fermer l'onglet |
+| Ctrl+Maj+T | **rouvrir l'onglet fermé** (jusqu'à 20, avec leur curseur et leur défilement) |
+| File ▸ Open Recent | les 30 derniers fichiers ouverts, d'une session à l'autre (`%APPDATA%\PaulWriteecent`) |
 | Ctrl+Tab, Ctrl+Maj+Tab, clic, clic milieu | onglet suivant, précédent, activer, fermer |
 | Ctrl+P | Goto Anything : ouvrir un fichier du projet (recherche floue) |
 | Ctrl+Maj+P | palette de commandes (toutes les commandes, avec leur raccourci) |

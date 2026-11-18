@@ -44,7 +44,7 @@ use crate::keymap;
 use crate::menu;
 use crate::metrics::Samples;
 use crate::palette::{parse_goto, Item, Outcome, Palette, PaletteKey, PaletteMode, Target};
-use crate::session::{Session, TabState};
+use crate::session::{self, Session, TabState};
 use crate::sidebar::{Click, SidebarTree};
 use crate::tab::{Tab, SYNTAX_MARGIN_LINES};
 use crate::worker::{self, ConfirmFor, Done, Job, Stamp, TabId};
@@ -380,6 +380,10 @@ struct App {
     quit_queue: Vec<TabId>,
     /// Une question « recharger le fichier modifié sur le disque ? » est posée.
     reload_asked: bool,
+    /// Onglets fermés (le plus récent en dernier), pour « Rouvrir l'onglet fermé ».
+    closed: Vec<TabState>,
+    /// Fichiers ouverts récemment, le plus récent d'abord.
+    recent: Vec<PathBuf>,
     /// Cette fenêtre reprend la session précédente et l'enregistre en se fermant (pas pour une
     /// nouvelle fenêtre, ni quand des fichiers sont donnés sur la ligne de commande).
     session_enabled: bool,
@@ -519,6 +523,8 @@ impl App {
             after_save: None,
             quit_queue: Vec::new(),
             reload_asked: false,
+            closed: Vec::new(),
+            recent: Vec::new(),
             confirming: false,
             project_root: None,
             wake_pending: Arc::new(AtomicBool::new(false)),
@@ -813,6 +819,22 @@ impl App {
 
     /// Ferme l'onglet sans rien demander. Il en reste toujours au moins un.
     fn close_now(&mut self, index: usize) {
+        // On se souvient de l'onglet (seulement un vrai fichier lu ou enregistré).
+        if let Some(t) = self.tabs.get(index) {
+            if let (Some(path), true) = (t.editor.path(), t.disk_stamp.is_some()) {
+                let (line, col) = t.editor.caret_line_col();
+                let closed = TabState {
+                    path: path.to_path_buf(),
+                    line,
+                    col,
+                    first: t.editor.first_line(),
+                };
+                self.closed.push(closed);
+                if self.closed.len() > 20 {
+                    self.closed.remove(0);
+                }
+            }
+        }
         self.plugin_event("close", Some(index));
         self.lsp_close_tab(index);
         let tab = self.tabs.remove(index);
@@ -899,6 +921,63 @@ impl App {
                     .ok();
             }
         }
+    }
+
+    // --- Onglets fermés et fichiers récents ----------------------------------------------------
+
+    /// Rouvre le dernier onglet fermé qui n'est pas déjà ouvert, au même endroit.
+    fn reopen_closed(&mut self) {
+        while let Some(t) = self.closed.pop() {
+            if self
+                .tabs
+                .iter()
+                .any(|x| x.editor.path() == Some(t.path.as_path()))
+            {
+                continue;
+            }
+            self.open_path_at(t.path.clone(), None);
+            if let Some(tab) = self
+                .tabs
+                .iter_mut()
+                .find(|x| x.editor.path() == Some(t.path.as_path()))
+            {
+                tab.pending_restore = Some((t.line, t.col, t.first));
+            }
+            return;
+        }
+    }
+
+    /// Note qu'un fichier vient d'être ouvert : en tête de la liste, et enregistré par le worker.
+    fn note_recent(&mut self, path: &std::path::Path) {
+        self.recent = session::recent_with(&self.recent, path);
+        self.jobs.send(Job::AddRecent(path.to_path_buf())).ok();
+    }
+
+    /// Liste des fichiers récents.
+    fn open_recent_list(&mut self) {
+        let items: Vec<Item> = self
+            .recent
+            .iter()
+            .map(|p| Item {
+                label: p.file_name().map_or_else(
+                    || p.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                ),
+                detail: p
+                    .parent()
+                    .map_or_else(String::new, |d| d.display().to_string()),
+                highlights: Vec::new(),
+                target: Target::Path(p.clone()),
+            })
+            .collect();
+        if items.is_empty() {
+            self.show_error(self.lang.pick(
+                "No recent files yet.".to_owned(),
+                "Aucun fichier r\u{e9}cent pour l'instant.".to_owned(),
+            ));
+            return;
+        }
+        self.open_list_palette(PaletteMode::Recent, items, String::new());
     }
 
     // --- Fichiers modifiés hors de l'éditeur ---------------------------------------------------
@@ -1831,6 +1910,7 @@ impl App {
             | PaletteMode::Diagnostics
             | PaletteMode::Locations
             | PaletteMode::Tabs
+            | PaletteMode::Recent
             | PaletteMode::Hover => {}
             PaletteMode::Search => {
                 st.palette.set_note(format!(
@@ -1962,6 +2042,7 @@ impl App {
             | PaletteMode::Diagnostics
             | PaletteMode::Locations
             | PaletteMode::Tabs
+            | PaletteMode::Recent
             | PaletteMode::Find
             | PaletteMode::Replace
             | PaletteMode::ReplaceWith
@@ -1997,6 +2078,7 @@ impl App {
             PaletteMode::Diagnostics
             | PaletteMode::Locations
             | PaletteMode::Tabs
+            | PaletteMode::Recent
             | PaletteMode::Find
             | PaletteMode::Replace
             | PaletteMode::ReplaceWith
@@ -2123,6 +2205,7 @@ impl App {
             }
             Target::Nothing => {}
             Target::Tab(i) => self.activate(i),
+            Target::Path(path) => self.open_path(path),
         }
     }
 
@@ -2547,6 +2630,8 @@ impl App {
                     })
                     .ok();
             }
+            Effect::ReopenClosed => self.reopen_closed(),
+            Effect::OpenRecent => self.open_recent_list(),
             Effect::NewWindow => {
                 self.jobs.send(Job::NewWindow).ok();
             }
@@ -2646,7 +2731,16 @@ impl App {
                 Ok("commands") => self.open_palette(PaletteMode::Commands),
                 Ok("find") => self.open_palette(PaletteMode::Find),
                 Ok("replace") => self.open_palette(PaletteMode::Replace),
+                Ok("recent") => self.open_recent_list(),
                 _ => {}
+            }
+            // `PAULWRITE_SCREENSHOT_REOPEN=1` : ferme l'onglet actif (après avoir déplacé le curseur)
+            // puis le rouvre.
+            if std::env::var_os("PAULWRITE_SCREENSHOT_REOPEN").is_some() && self.tabs.len() > 1 {
+                ed!(self).goto(3, 2);
+                let i = self.active;
+                self.close_now(i);
+                self.reopen_closed();
             }
             // `PAULWRITE_SCREENSHOT_RELOAD=1` : le fichier ouvert est réécrit « par un autre programme »
             // puis on simule le retour sur la fenêtre (vérification des fichiers modifiés).
@@ -3439,6 +3533,14 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 Done::Session(None) => {}
+                Done::Recent(list) => {
+                    // ceux déjà ouverts depuis le lancement restent en tête
+                    let mine = std::mem::take(&mut self.recent);
+                    let rest: Vec<PathBuf> =
+                        list.into_iter().filter(|p| !mine.contains(p)).collect();
+                    self.recent = mine.into_iter().chain(rest).collect();
+                    self.recent.truncate(session::MAX_RECENT);
+                }
                 Done::FilesChanged(changed) => self.files_changed(changed),
                 Done::ReloadConfirmed { tab, reload, stamp } => {
                     self.reload_asked = false;
@@ -3525,6 +3627,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.tabs[i].disk_stamp = stamp;
                     match result {
                         Ok(doc) => {
+                            // un fichier ouvert par l'utilisateur (pas une reprise ni un rechargement)
+                            if self.tabs[i].pending_restore.is_none() && !self.is_bench() {
+                                self.note_recent(&path);
+                            }
                             self.tabs[i].editor.load(doc, Some(path));
                             self.file_loaded = true;
                             self.tabs[i].shown_modified = false;

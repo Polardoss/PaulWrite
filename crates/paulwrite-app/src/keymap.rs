@@ -77,6 +77,7 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("/", _) | (":", true) => Some(Command::ToggleComment),
             ("n", false) => Some(Command::NewFile),
             ("n", true) => Some(Command::NewWindow),
+            ("t", true) => Some(Command::ReopenClosedTab),
             ("p", false) => Some(Command::GotoFile),
             ("p", true) => Some(Command::CommandPalette),
             ("g", _) => Some(Command::GotoLine),

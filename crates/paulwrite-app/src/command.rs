@@ -40,6 +40,10 @@ pub enum Command {
     NewFile,
     /// Nouvelle fenêtre PaulWrite (un nouveau processus, vide).
     NewWindow,
+    /// Rouvre le dernier onglet fermé (avec son curseur et sa vue).
+    ReopenClosedTab,
+    /// Liste des fichiers ouverts récemment.
+    OpenRecent,
     /// Ferme l'onglet courant.
     CloseTab,
     NextTab,
@@ -165,6 +169,8 @@ impl Command {
             Command::Open => "file.open",
             Command::NewFile => "file.new",
             Command::NewWindow => "file.new_window",
+            Command::ReopenClosedTab => "tab.reopen_closed",
+            Command::OpenRecent => "file.open_recent",
             Command::CloseTab => "tab.close",
             Command::NextTab => "tab.next",
             Command::PrevTab => "tab.prev",
@@ -242,6 +248,8 @@ impl Command {
             Command::Open,
             Command::NewFile,
             Command::NewWindow,
+            Command::ReopenClosedTab,
+            Command::OpenRecent,
             Command::CloseTab,
             Command::NextTab,
             Command::PrevTab,
@@ -314,6 +322,8 @@ impl Command {
             Command::Open => "Fichier : ouvrir",
             Command::NewFile => "Fichier : nouveau",
             Command::NewWindow => "Fichier : nouvelle fenêtre",
+            Command::ReopenClosedTab => "Onglet : rouvrir l'onglet fermé",
+            Command::OpenRecent => "Fichier : ouvrir un fichier récent",
             Command::CloseTab => "Onglet : fermer",
             Command::NextTab => "Onglet : suivant",
             Command::PrevTab => "Onglet : précédent",
@@ -394,6 +404,8 @@ impl Command {
             Command::Open => "File: open",
             Command::NewFile => "File: new",
             Command::NewWindow => "File: new window",
+            Command::ReopenClosedTab => "Tab: reopen closed tab",
+            Command::OpenRecent => "File: open recent file",
             Command::CloseTab => "Tab: close",
             Command::NextTab => "Tab: next",
             Command::PrevTab => "Tab: previous",
@@ -543,6 +555,10 @@ pub enum Effect {
     NewTab,
     /// Lancer une nouvelle fenêtre.
     NewWindow,
+    /// Rouvrir le dernier onglet fermé.
+    ReopenClosed,
+    /// Afficher la liste des fichiers récents.
+    OpenRecent,
     CloseTab,
     NextTab,
     PrevTab,
