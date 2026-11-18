@@ -21,6 +21,24 @@ use crate::sidebar::{is_hidden_dir, sort_entries, Entry};
 /// Identifiant d'onglet (stable pendant la vie de l'onglet).
 pub type TabId = u64;
 
+/// Empreinte d'un fichier sur le disque (date de modification et taille) : sert à voir qu'il a
+/// été modifié par un autre programme depuis qu'on l'a lu ou enregistré.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+/// Empreinte actuelle du fichier ; `None` s'il n'existe plus ou n'est pas lisible.
+#[must_use]
+pub fn stamp_of(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(Stamp {
+        modified: meta.modified().ok(),
+        len: meta.len(),
+    })
+}
+
 /// Ce que l'application fera de la réponse à « Enregistrer les modifications ? ».
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfirmFor {
@@ -71,6 +89,20 @@ pub enum Job {
     /// Enregistre un réglage dans `config.toml` (clé et valeur texte) ; le fichier est créé au
     /// besoin, le reste de son contenu est conservé.
     SaveSetting { key: &'static str, value: String },
+    /// Compare l'empreinte des fichiers ouverts à celle du disque (au retour sur la fenêtre) ;
+    /// la réponse, [`Done::FilesChanged`], ne liste que ceux qui ont changé.
+    CheckFiles {
+        files: Vec<(TabId, PathBuf, Option<Stamp>)>,
+    },
+    /// « Le fichier a changé sur le disque : le recharger et perdre vos modifications ? » ; la
+    /// réponse revient en [`Done::ReloadConfirmed`].
+    ConfirmReload {
+        owner: isize,
+        tab: TabId,
+        name: String,
+        stamp: Stamp,
+        lang: Lang,
+    },
     /// Écriture atomique ; `rope` est un clone O(1) du contenu au moment de la demande.
     Save {
         tab: TabId,
@@ -94,6 +126,8 @@ impl std::fmt::Debug for Job {
             Job::SaveSetting { key, .. } => write!(f, "SaveSetting({key})"),
             Job::NewWindow => write!(f, "NewWindow"),
             Job::SaveSession { .. } => write!(f, "SaveSession"),
+            Job::CheckFiles { files } => write!(f, "CheckFiles({})", files.len()),
+            Job::ConfirmReload { tab, .. } => write!(f, "ConfirmReload({tab})"),
             Job::Save { tab, path, .. } => write!(f, "Save({tab}, {path:?})"),
         }
     }
@@ -115,6 +149,17 @@ pub enum Done {
         tab: TabId,
         path: PathBuf,
         result: Result<Document, String>,
+        /// Empreinte du fichier **avant** sa lecture (s'il change pendant la lecture, la
+        /// prochaine vérification le verra).
+        stamp: Option<Stamp>,
+    },
+    /// Fichiers ouverts dont le contenu a changé sur le disque, avec leur nouvelle empreinte.
+    FilesChanged(Vec<(TabId, Stamp)>),
+    /// Réponse à [`Job::ConfirmReload`] : `reload` si l'utilisateur accepte de recharger.
+    ReloadConfirmed {
+        tab: TabId,
+        reload: bool,
+        stamp: Stamp,
     },
     /// Le chemin demandé est un dossier : il devient la racine du projet.
     Directory {
@@ -131,6 +176,8 @@ pub enum Done {
         path: PathBuf,
         revision: u64,
         result: Result<(), String>,
+        /// Empreinte du fichier juste après son enregistrement.
+        stamp: Option<Stamp>,
     },
     OpenPicked(Option<PathBuf>),
     FolderPicked(Option<PathBuf>),
@@ -157,10 +204,16 @@ impl std::fmt::Debug for Done {
             Done::SaveConfirmed { for_, choice } => {
                 write!(f, "SaveConfirmed({for_:?}, {choice:?})")
             }
-            Done::Loaded { tab, path, result } => {
+            Done::Loaded {
+                tab, path, result, ..
+            } => {
                 write!(f, "Loaded({tab}, {path:?}, ok={})", result.is_ok())
             }
             Done::Directory { tab, path } => write!(f, "Directory({tab}, {path:?})"),
+            Done::FilesChanged(v) => write!(f, "FilesChanged({})", v.len()),
+            Done::ReloadConfirmed { tab, reload, .. } => {
+                write!(f, "ReloadConfirmed({tab}, {reload})")
+            }
             Done::Progress { done, total, .. } => write!(f, "Progress({done}/{total})"),
             Done::Saved {
                 tab, path, result, ..
@@ -283,8 +336,14 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                         if path.is_dir() {
                             notify(Done::Directory { tab, path });
                         } else {
+                            let stamp = stamp_of(&path);
                             let result = load(tab, &path, &notify);
-                            notify(Done::Loaded { tab, path, result });
+                            notify(Done::Loaded {
+                                tab,
+                                path,
+                                result,
+                                stamp,
+                            });
                         }
                     }
                     Job::PickOpen { owner, lang } => {
@@ -322,6 +381,42 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                             eprintln!("nouvelle fen\u{ea}tre impossible : {e}");
                         }
                     }
+                    Job::CheckFiles { files } => {
+                        let changed: Vec<(TabId, Stamp)> = files
+                            .into_iter()
+                            .filter_map(|(tab, path, known)| {
+                                let now = stamp_of(&path)?;
+                                (known != Some(now)).then_some((tab, now))
+                            })
+                            .collect();
+                        if !changed.is_empty() {
+                            notify(Done::FilesChanged(changed));
+                        }
+                    }
+                    Job::ConfirmReload {
+                        owner,
+                        tab,
+                        name,
+                        stamp,
+                        lang,
+                    } => {
+                        let reload = platform::confirm_yes_no(
+                            owner,
+                            &lang.pick(
+                                format!(
+                                    "\u{ab} {name} \u{bb} was changed on disk by another program.\n\nReload it and lose your changes?"
+                                ),
+                                format!(
+                                    "\u{ab} {name} \u{bb} a \u{e9}t\u{e9} modifi\u{e9} sur le disque par un autre programme.\n\nLe recharger et perdre vos modifications ?"
+                                ),
+                            ),
+                        );
+                        notify(Done::ReloadConfirmed {
+                            tab,
+                            reload,
+                            stamp,
+                        });
+                    }
                     Job::SaveSession { session, ack } => {
                         if let Err(e) = session.save() {
                             eprintln!("session non enregistree : {e}");
@@ -344,11 +439,13 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
                     } => {
                         let result =
                             io::save_file(&path, &rope, encoding).map_err(|e| e.to_string());
+                        let stamp = stamp_of(&path);
                         notify(Done::Saved {
                             tab,
                             path,
                             revision,
                             result,
+                            stamp,
                         });
                     }
                 }
@@ -362,6 +459,43 @@ pub fn spawn(notify: impl Fn(Done) + Send + 'static) -> Sender<Job> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn un_fichier_modifie_ailleurs_est_signale() {
+        let dir = std::env::temp_dir().join(format!("paulwrite-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "un").unwrap();
+        std::fs::write(&b, "un").unwrap();
+        let (known_a, known_b) = (stamp_of(&a), stamp_of(&b));
+        assert!(known_a.is_some() && known_b.is_some());
+        assert_eq!(stamp_of(&dir.join("absent.txt")), None);
+        // b est modifié par un autre programme (taille différente)
+        std::fs::write(&b, "deux, plus long").unwrap();
+
+        let (out_tx, out_rx) = mpsc::channel();
+        let out_tx = std::sync::Mutex::new(out_tx);
+        let jobs = spawn(move |d| {
+            let _ = out_tx.lock().unwrap().send(d);
+        });
+        // a inchangé : rien ; b modifié : signalé ; un fichier supprimé : ignoré
+        jobs.send(Job::CheckFiles {
+            files: vec![
+                (1, a.clone(), known_a),
+                (2, b.clone(), known_b),
+                (3, dir.join("absent.txt"), known_a),
+            ],
+        })
+        .unwrap();
+        loop {
+            if let Done::FilesChanged(v) = out_rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                assert_eq!(v.iter().map(|x| x.0).collect::<Vec<_>>(), [2]);
+                assert_eq!(Some(v[0].1), stamp_of(&b));
+                break;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn ouvrir_enregistrer_et_relire() {

@@ -30,6 +30,11 @@ pub struct Tab {
     /// Curseur et vue à rétablir dès que le fichier est chargé (reprise de session) : ligne et
     /// colonne à partir de 1, première ligne visible.
     pub pending_restore: Option<(usize, usize, usize)>,
+    /// Empreinte du fichier sur le disque quand on l'a lu ou enregistré (détecte les
+    /// modifications faites par un autre programme).
+    pub disk_stamp: Option<crate::worker::Stamp>,
+    /// Le fichier est en cours de rechargement (changé sur le disque) : pas de nouvelle vérification.
+    pub reloading: bool,
     /// Chemin sous lequel le document est ouvert dans un serveur de langage (`None` : pas suivi).
     pub lsp_path: Option<std::path::PathBuf>,
     /// Version du document envoyée au serveur de langage (augmente à chaque modification).
@@ -51,6 +56,8 @@ impl Tab {
             shown_modified: false,
             pending_goto: None,
             pending_restore: None,
+            disk_stamp: None,
+            reloading: false,
             lsp_path: None,
             lsp_version: 0,
             diagnostics: Vec::new(),

@@ -47,7 +47,7 @@ use crate::palette::{parse_goto, Item, Outcome, Palette, PaletteKey, PaletteMode
 use crate::session::{Session, TabState};
 use crate::sidebar::{Click, SidebarTree};
 use crate::tab::{Tab, SYNTAX_MARGIN_LINES};
-use crate::worker::{self, ConfirmFor, Done, Job, TabId};
+use crate::worker::{self, ConfirmFor, Done, Job, Stamp, TabId};
 
 const BLINK: Duration = Duration::from_millis(530);
 /// Délai minimal entre deux reconstructions de la minimap pendant la frappe : elle se met à jour
@@ -378,6 +378,8 @@ struct App {
     title: String,
     after_save: Option<AfterSave>,
     quit_queue: Vec<TabId>,
+    /// Une question « recharger le fichier modifié sur le disque ? » est posée.
+    reload_asked: bool,
     /// Cette fenêtre reprend la session précédente et l'enregistre en se fermant (pas pour une
     /// nouvelle fenêtre, ni quand des fichiers sont donnés sur la ligne de commande).
     session_enabled: bool,
@@ -516,6 +518,7 @@ impl App {
             title: String::new(),
             after_save: None,
             quit_queue: Vec::new(),
+            reload_asked: false,
             confirming: false,
             project_root: None,
             wake_pending: Arc::new(AtomicBool::new(false)),
@@ -892,6 +895,69 @@ impl App {
                         rope: doc.buffer().rope().clone(),
                         encoding: doc.encoding(),
                         revision: doc.buffer().revision(),
+                    })
+                    .ok();
+            }
+        }
+    }
+
+    // --- Fichiers modifiés hors de l'éditeur ---------------------------------------------------
+
+    /// Au retour sur la fenêtre : le worker compare l'empreinte des fichiers ouverts à celle du
+    /// disque (un `stat` par fichier, jamais sur le thread UI).
+    fn check_files(&mut self) {
+        if self.is_bench()
+            || (self.opts.screenshot.is_some()
+                && std::env::var_os("PAULWRITE_SCREENSHOT_RELOAD").is_none())
+        {
+            return;
+        }
+        let files: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|t| t.loading.is_none() && !t.reloading && t.disk_stamp.is_some())
+            .filter_map(|t| Some((t.id, t.editor.path()?.to_path_buf(), t.disk_stamp)))
+            .collect();
+        if !files.is_empty() {
+            self.jobs.send(Job::CheckFiles { files }).ok();
+        }
+    }
+
+    /// Relit le fichier de l'onglet depuis le disque ; le curseur et la vue sont rétablis.
+    fn reload_tab(&mut self, index: usize) {
+        let tab = &mut self.tabs[index];
+        let Some(path) = tab.editor.path().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        let (line, col) = tab.editor.caret_line_col();
+        tab.pending_restore = Some((line, col, tab.editor.first_line()));
+        tab.reloading = true;
+        let id = tab.id;
+        self.jobs.send(Job::Open { tab: id, path }).ok();
+    }
+
+    /// Des fichiers ouverts ont changé sur le disque : ceux sans modification de votre part sont
+    /// rechargés sans bruit, pour les autres on demande (une question à la fois).
+    fn files_changed(&mut self, changed: Vec<(TabId, Stamp)>) {
+        for (id, stamp) in changed {
+            let Some(i) = self.tab_index(id) else {
+                continue;
+            };
+            let tab = &self.tabs[i];
+            if tab.loading.is_some() || tab.reloading {
+                continue;
+            }
+            if !tab.editor.is_modified() {
+                self.reload_tab(i);
+            } else if !self.reload_asked && !self.confirming {
+                self.reload_asked = true;
+                self.jobs
+                    .send(Job::ConfirmReload {
+                        owner: self.hwnd,
+                        tab: id,
+                        name: tab.editor.display_name(),
+                        stamp,
+                        lang: self.lang,
                     })
                     .ok();
             }
@@ -2582,6 +2648,23 @@ impl App {
                 Ok("replace") => self.open_palette(PaletteMode::Replace),
                 _ => {}
             }
+            // `PAULWRITE_SCREENSHOT_RELOAD=1` : le fichier ouvert est réécrit « par un autre programme »
+            // puis on simule le retour sur la fenêtre (vérification des fichiers modifiés).
+            if std::env::var_os("PAULWRITE_SCREENSHOT_RELOAD").is_some() {
+                if let Some(path) = self.tabs[self.active]
+                    .editor
+                    .path()
+                    .map(std::path::Path::to_path_buf)
+                {
+                    let _ = std::fs::write(
+                        &path,
+                        "texte modifie par un autre programme
+second ligne
+",
+                    );
+                }
+                self.check_files();
+            }
             // `PAULWRITE_SCREENSHOT_TYPE=texte` : saisi dans le panneau ouvert (recherche).
             if let Ok(text) = std::env::var("PAULWRITE_SCREENSHOT_TYPE") {
                 if self.palette.is_some() {
@@ -3356,6 +3439,18 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 Done::Session(None) => {}
+                Done::FilesChanged(changed) => self.files_changed(changed),
+                Done::ReloadConfirmed { tab, reload, stamp } => {
+                    self.reload_asked = false;
+                    if let Some(i) = self.tab_index(tab) {
+                        if reload {
+                            self.reload_tab(i);
+                        } else {
+                            // on garde votre version : on ne redemande pas pour ce changement
+                            self.tabs[i].disk_stamp = Some(stamp);
+                        }
+                    }
+                }
                 Done::FolderPicked(Some(path)) => self.set_project_root(path),
                 Done::FolderPicked(None) => {}
                 Done::DirListed { path, entries } => {
@@ -3416,11 +3511,18 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 }
-                Done::Loaded { tab, path, result } => {
+                Done::Loaded {
+                    tab,
+                    path,
+                    result,
+                    stamp,
+                } => {
                     let Some(i) = self.tab_index(tab) else {
                         return; // onglet fermé pendant la lecture
                     };
                     self.tabs[i].loading = None;
+                    self.tabs[i].reloading = false;
+                    self.tabs[i].disk_stamp = stamp;
                     match result {
                         Ok(doc) => {
                             self.tabs[i].editor.load(doc, Some(path));
@@ -3470,6 +3572,7 @@ impl ApplicationHandler<UserEvent> for App {
                     path,
                     revision,
                     result,
+                    stamp,
                 } => {
                     let index = self.tab_index(tab);
                     match result {
@@ -3477,6 +3580,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(i) = index {
                                 if self.tabs[i].editor.path() == Some(path.as_path()) {
                                     self.tabs[i].editor.mark_saved(revision);
+                                    self.tabs[i].disk_stamp = stamp;
                                 }
                                 self.tabs_dirty = true;
                                 self.plugin_event("save", Some(i));
@@ -3535,6 +3639,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => self.request_quit(el),
             WindowEvent::RedrawRequested => self.redraw(el),
+            WindowEvent::Focused(true) => self.check_files(),
             WindowEvent::Resized(_) => {
                 self.sync_viewport();
                 self.request_redraw();

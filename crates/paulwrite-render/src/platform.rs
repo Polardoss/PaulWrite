@@ -24,8 +24,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateMenu, CreatePopupMenu, DestroyMenu, DrawMenuBar, GetMenu, MessageBoxW,
-    SetMenu, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MSG, WM_COMMAND,
+    SetMenu, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
+    MB_YESNOCANCEL, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, WM_COMMAND,
 };
 
 /// Texte du presse-papiers (s'il y en a).
@@ -116,6 +116,22 @@ pub fn confirm_save(owner: isize, prompt: &str) -> SaveChoice {
     } else {
         SaveChoice::Cancel
     }
+}
+
+/// Pose une question à deux réponses (Oui / Non) ; `true` pour Oui.
+#[must_use]
+pub fn confirm_yes_no(owner: isize, prompt: &str) -> bool {
+    let text: Vec<u16> = prompt.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `text` est terminé par 0 et vit pendant l'appel (bloquant).
+    let r = unsafe {
+        MessageBoxW(
+            Some(HWND(owner as *mut _)),
+            PCWSTR(text.as_ptr()),
+            w!("PaulWrite"),
+            MB_YESNO | MB_ICONWARNING,
+        )
+    };
+    r == IDYES
 }
 
 /// Affiche un message d'erreur (boîte modale, bouton OK).

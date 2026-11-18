@@ -156,6 +156,13 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   (l'onglet actif est lu en premier, les fichiers disparus sont ignorés sans message). Pas de reprise
   ni d'enregistrement quand des fichiers sont donnés en argument, pour une « nouvelle fenêtre »
   (`--new-window`) ou avec `restore_session = false`. Le texte non enregistré n'est pas conservé.
+- **Fichiers modifiés hors de l'éditeur** : chaque onglet garde l'empreinte du fichier (date et
+  taille) relevée par le worker à la lecture et à l'enregistrement. Au retour sur la fenêtre, le
+  worker compare ces empreintes au disque (un `stat` par fichier ouvert, jamais sur le thread UI) ;
+  un fichier changé et sans modification de votre part est relu, curseur et vue conservés (l'historique
+  d'annulation repart de zéro) ; un fichier changé **et** modifié ici donne une question
+  (« recharger et perdre vos modifications ? ») ; répondre non garde votre version sans reposer la
+  question pour ce changement. Un fichier supprimé est ignoré.
 
 ## Limites connues
 
