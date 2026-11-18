@@ -102,6 +102,15 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
     }
 }
 
+/// Commande d'une frappe : d'abord d'après la touche **sans** modificateur (la même touche donne le
+/// même raccourci quelle que soit la casse), puis d'après le caractère réellement produit
+/// (`logical`, Maj compris). Le second cas rattrape les claviers où le caractère voulu s'obtient
+/// avec Maj : sur un clavier AZERTY, `/` est Maj+`:`.
+#[must_use]
+pub fn command_for_event(plain: &Key, logical: &Key, mods: ModifiersState) -> Option<Command> {
+    command_for(plain, mods).or_else(|| command_for(logical, mods))
+}
+
 /// Raccourci clavier d'une commande, d'après la table [`command_for`] elle-même (jamais
 /// désynchronisé) : `Ctrl+Maj+S`, `Ctrl+←`… `None` si la commande n'a pas de raccourci.
 #[must_use]
@@ -301,6 +310,27 @@ mod tests {
         let h = Key::Character("h".into());
         assert_eq!(command_for(&h, c), Some(Command::Replace));
         assert_eq!(command_for(&h, cs), Some(Command::ReplaceInProject));
+    }
+
+    #[test]
+    fn le_caractere_produit_rattrape_la_touche() {
+        let ctrl = ModifiersState::CONTROL;
+        let ch = |c: &str| Key::Character(c.into());
+        // une touche que la table ne connaît pas, mais qui produit « / » : commenter
+        assert_eq!(
+            command_for_event(&ch("\u{e9}"), &ch("/"), ctrl),
+            Some(Command::ToggleComment)
+        );
+        // la touche seule garde la priorité
+        assert_eq!(
+            command_for_event(&ch("s"), &ch("S"), ctrl),
+            Some(Command::Save)
+        );
+        // sans Ctrl : rien
+        assert_eq!(
+            command_for_event(&ch("x"), &ch("/"), ModifiersState::empty()),
+            None
+        );
     }
 
     #[test]

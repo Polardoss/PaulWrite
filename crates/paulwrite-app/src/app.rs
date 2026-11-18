@@ -382,6 +382,8 @@ struct App {
     quit_queue: Vec<TabId>,
     /// Une question « recharger le fichier modifié sur le disque ? » est posée.
     reload_asked: bool,
+    /// Diagnostic des frappes (`PAULWRITE_KEYLOG`).
+    keylog: bool,
     /// Remplacement dans le projet en attente de confirmation (puis d'application).
     project_params: Option<project_replace::Params>,
     /// Taille du texte (pixels) et largeur d'une tabulation (colonnes) : réglages `font_size` et
@@ -531,6 +533,7 @@ impl App {
             after_save: None,
             quit_queue: Vec::new(),
             reload_asked: false,
+            keylog: std::env::var_os("PAULWRITE_KEYLOG").is_some(),
             project_params: None,
             font_px: crate::config::DEFAULT_FONT_SIZE,
             tab_size: editing::DEFAULT_TAB_WIDTH,
@@ -3859,6 +3862,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let at = Instant::now();
                 let plain = event.key_without_modifiers();
+                // `PAULWRITE_KEYLOG=1` : écrit chaque frappe sur la sortie d'erreur (diagnostic d'un
+                // raccourci qui ne réagit pas ; lancer `paulwrite` depuis un terminal).
+                if self.keylog {
+                    eprintln!(
+                        "touche : sans modificateur {:?} | produite {:?} | physique {:?} | modificateurs {:?}",
+                        plain, event.logical_key, event.physical_key, self.mods
+                    );
+                }
                 // Raccourci à deux temps : Ctrl+K puis Ctrl+B (barre latérale), comme Sublime Text.
                 let is_letter =
                     |k: &str| matches!(&plain, Key::Character(s) if s.eq_ignore_ascii_case(k));
@@ -3872,7 +3883,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.chord_k = true;
                     return;
                 }
-                if let Some(cmd) = keymap::command_for(&plain, self.mods) {
+                if let Some(cmd) = keymap::command_for_event(&plain, &event.logical_key, self.mods)
+                {
                     self.execute(cmd, el);
                 } else if !(self.mods.control_key() && !self.mods.alt_key()) {
                     if let Some(text) = &event.text {
