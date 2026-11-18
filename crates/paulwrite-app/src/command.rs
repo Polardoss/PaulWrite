@@ -109,6 +109,10 @@ pub enum Command {
     UnfoldAll,
     /// Active ou désactive le retour à la ligne automatique.
     ToggleWordWrap,
+    /// Agrandit / réduit / rétablit la taille du texte.
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     /// Choisit la langue de l'interface (enregistrée dans `config.toml`).
     SetLanguage(Lang),
     Quit,
@@ -206,6 +210,9 @@ impl Command {
             Command::FoldAll => "fold.fold_all",
             Command::UnfoldAll => "fold.unfold_all",
             Command::ToggleWordWrap => "view.toggle_word_wrap",
+            Command::ZoomIn => "view.zoom_in",
+            Command::ZoomOut => "view.zoom_out",
+            Command::ZoomReset => "view.zoom_reset",
             Command::SetLanguage(Lang::En) => "preferences.language_en",
             Command::SetLanguage(Lang::Fr) => "preferences.language_fr",
             Command::Quit => "app.quit",
@@ -285,6 +292,9 @@ impl Command {
             Command::FoldAll,
             Command::UnfoldAll,
             Command::ToggleWordWrap,
+            Command::ZoomIn,
+            Command::ZoomOut,
+            Command::ZoomReset,
             Command::SetLanguage(Lang::En),
             Command::SetLanguage(Lang::Fr),
             Command::Quit,
@@ -359,6 +369,9 @@ impl Command {
             Command::FoldAll => "Repli : tout replier",
             Command::UnfoldAll => "Repli : tout déplier",
             Command::ToggleWordWrap => "Affichage : retour à la ligne automatique",
+            Command::ZoomIn => "Affichage : agrandir le texte",
+            Command::ZoomOut => "Affichage : réduire le texte",
+            Command::ZoomReset => "Affichage : taille du texte par défaut",
             Command::SetLanguage(Lang::En) => "Préférences : langue English",
             Command::SetLanguage(Lang::Fr) => "Préférences : langue Français",
             Command::Quit => "Application : quitter",
@@ -441,6 +454,9 @@ impl Command {
             Command::FoldAll => "Fold: fold all",
             Command::UnfoldAll => "Fold: unfold all",
             Command::ToggleWordWrap => "View: word wrap",
+            Command::ZoomIn => "View: zoom in",
+            Command::ZoomOut => "View: zoom out",
+            Command::ZoomReset => "View: reset zoom",
             Command::SetLanguage(Lang::En) => "Preferences: language English",
             Command::SetLanguage(Lang::Fr) => "Preferences: language Français",
             Command::Quit => "Application: quit",
@@ -577,6 +593,8 @@ pub enum Effect {
     FindStep(bool),
     /// Bascule le retour à la ligne automatique (réglage commun à tous les onglets).
     ToggleWordWrap,
+    /// Taille du texte : `+1`, `-1`, ou retour à la valeur par défaut (`0`).
+    Zoom(i32),
     /// Change la langue de l'interface.
     SetLanguage(Lang),
     Quit,

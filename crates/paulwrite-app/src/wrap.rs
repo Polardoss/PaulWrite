@@ -1,11 +1,8 @@
 //! Retour à la ligne automatique : découpe d'une ligne en segments (rangées affichées).
 //!
 //! La police est à chasse fixe : la largeur se compte en colonnes. Une tabulation avance au
-//! prochain multiple de 4 colonnes, **à partir du début du segment** (le moteur de rendu pose
+//! prochain multiple de la largeur de tabulation (4 par défaut), **à partir du début du segment** (le moteur de rendu pose
 //! chaque rangée comme un texte autonome, ses taquets de tabulation partent donc de son début).
-
-/// Largeur d'une tabulation, en colonnes.
-const TAB: usize = 4;
 
 /// Largeur en colonnes de `text` posé au début d'une rangée.
 #[must_use]
@@ -19,7 +16,8 @@ pub fn visual_width<I: IntoIterator<Item = char>>(text: I) -> usize {
 
 fn advance(col: usize, c: char) -> usize {
     if c == '\t' {
-        (col / TAB + 1) * TAB
+        let tab = crate::editing::tab_width();
+        (col / tab + 1) * tab
     } else {
         col + 1
     }

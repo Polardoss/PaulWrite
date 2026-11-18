@@ -11,7 +11,22 @@ use paulwrite_core::{Buffer, Document, EditKind, Replacement, Selection, Selecti
 /// Une indentation.
 pub const INDENT: &str = "    ";
 /// Largeur d'une tabulation, en colonnes.
-pub const TAB_WIDTH: usize = 4;
+pub const DEFAULT_TAB_WIDTH: usize = 4;
+
+/// Largeur d'une tabulation en colonnes (réglage `tab_size`) : lue par l'indentation et par le
+/// retour à la ligne, fixée par l'application quand la configuration arrive.
+static TAB_WIDTH: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_TAB_WIDTH);
+
+#[must_use]
+pub fn tab_width() -> usize {
+    TAB_WIDTH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Fixe la largeur d'une tabulation (bornée à 1..=16).
+pub fn set_tab_width(columns: usize) {
+    TAB_WIDTH.store(columns.clamp(1, 16), std::sync::atomic::Ordering::Relaxed);
+}
 /// Nombre de caractères parcourus au plus pour chercher l'occurrence suivante (Ctrl+D).
 const FIND_WINDOW: usize = 2_000_000;
 
@@ -352,7 +367,7 @@ pub fn indent_lines(doc: &mut Document, now_ms: u64) -> bool {
     doc.apply_replacements(&repl, sels, EditKind::Other, now_ms)
 }
 
-/// Désindenter les lignes touchées : une tabulation, ou jusqu'à [`TAB_WIDTH`] espaces.
+/// Désindenter les lignes touchées : une tabulation, ou jusqu'à [`tab_width`] espaces.
 pub fn unindent_lines(doc: &mut Document, now_ms: u64) -> bool {
     let buf = doc.buffer();
     let mut repl: Vec<Replacement> = Vec::new();
@@ -363,7 +378,7 @@ pub fn unindent_lines(doc: &mut Document, now_ms: u64) -> bool {
                 1
             } else {
                 text.chars()
-                    .take(TAB_WIDTH)
+                    .take(tab_width())
                     .take_while(|c| *c == ' ')
                     .count()
             };
@@ -394,7 +409,8 @@ pub fn insert_tab(doc: &mut Document, now_ms: u64) -> bool {
     for s in doc.selections() {
         let (start, end) = (s.start(), s.end());
         let col = start - buf.line_start(buf.char_to_line(start));
-        let width = TAB_WIDTH - col % TAB_WIDTH;
+        let tab = tab_width();
+        let width = tab - col % tab;
         repl.push((start, end, " ".repeat(width)));
         carets.push((start as isize + shift) as usize + width);
         shift += width as isize - (end - start) as isize;

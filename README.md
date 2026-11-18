@@ -94,8 +94,10 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V | tout sélectionner, copier, couper, coller |
 | Ctrl+S, Ctrl+Maj+S, Ctrl+O | enregistrer, enregistrer sous, ouvrir (dans un nouvel onglet) |
 | Ctrl+N, Ctrl+Maj+N, Ctrl+W | nouvel onglet, **nouvelle fenêtre**, fermer l'onglet |
+| Ctrl+molette, Ctrl+`+` / Ctrl+`-` / Ctrl+`0` | taille du texte : agrandir, réduire, par défaut (retenue dans `config.toml`) |
 | Ctrl+Maj+T | **rouvrir l'onglet fermé** (jusqu'à 20, avec leur curseur et leur défilement) |
-| File ▸ Open Recent | les 30 derniers fichiers ouverts, d'une session à l'autre (`%APPDATA%\PaulWriteecent`) |
+| File ▸ Open Recent | les 30 derniers fichiers ouverts, d'une session à l'autre (`%APPDATA%\PaulWrite
+ecent`) |
 | Ctrl+Tab, Ctrl+Maj+Tab, clic, clic milieu | onglet suivant, précédent, activer, fermer |
 | Ctrl+P | Goto Anything : ouvrir un fichier du projet (recherche floue) |
 | Ctrl+Maj+P | palette de commandes (toutes les commandes, avec leur raccourci) |
@@ -146,6 +148,8 @@ highlight = true                # false : pas de coloration syntaxique
 highlight_max_bytes = 1048576   # au-delà de cette taille (octets), pas de coloration
 language = "auto"               # "en", "fr" ou "auto" (langue de Windows)
 restore_session = true         # false : toujours démarrer vide (pas de reprise de session)
+font_size = 15                  # taille du texte en pixels (8 à 48)
+tab_size = 4                    # largeur d'une tabulation en colonnes (1 à 16)
 word_wrap = true                # false : pas de retour à la ligne automatique
 word_wrap_max_bytes = 16777216  # au-delà de cette taille (octets), pas de retour à la ligne
 lsp = false                     # true : serveurs de langage (programmes externes à installer)

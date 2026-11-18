@@ -460,6 +460,9 @@ pub struct SoftRenderer {
     colors: Colors,
     size: (u32, u32),
     scale: f32,
+    /// Taille de la police du texte (pixels logiques) et largeur d'une tabulation (colonnes).
+    font_px: f32,
+    tab_size: f32,
     metrics: Metrics,
     // GDI
     mem_dc: HDC,
@@ -558,7 +561,7 @@ impl SoftRenderer {
             };
             let rt = factory.CreateDCRenderTarget(&props)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let (format, metrics) = make_format(&dwrite, scale)?;
+            let (format, metrics) = make_format(&dwrite, scale, FONT_PX, 4.0)?;
             let ui = make_ui_formats(&dwrite, scale)?;
 
             let mut brushes = Vec::with_capacity(BR_SQUIGGLE + 3);
@@ -585,6 +588,8 @@ impl SoftRenderer {
                 colors,
                 size,
                 scale,
+                font_px: FONT_PX,
+                tab_size: 4.0,
                 metrics,
                 mem_dc,
                 dib,
@@ -691,7 +696,8 @@ impl SoftRenderer {
             return Ok(());
         }
         // SAFETY: création d'objets DirectWrite sur la fabrique possédée.
-        let (format, metrics) = unsafe { make_format(&self.dwrite, scale)? };
+        let (format, metrics) =
+            unsafe { make_format(&self.dwrite, scale, self.font_px, self.tab_size)? };
         self.ui = unsafe { make_ui_formats(&self.dwrite, scale)? };
         self.format = format;
         self.metrics = metrics;
@@ -701,6 +707,31 @@ impl SoftRenderer {
         self.ui_layouts.clear();
         self.minimap = chrome::MinimapState::default();
         self.tabs_clean = false;
+        self.valid = false;
+        Ok(())
+    }
+
+    /// Change la taille de la police du texte (pixels logiques) et la largeur d'une tabulation
+    /// (colonnes). Les polices de l'interface ne changent pas.
+    ///
+    /// # Errors
+    /// Échec de création de la police.
+    pub fn set_text_style(&mut self, font_px: f32, tab_size: f32) -> Result<()> {
+        if (font_px - self.font_px).abs() < f32::EPSILON
+            && (tab_size - self.tab_size).abs() < f32::EPSILON
+        {
+            return Ok(());
+        }
+        // SAFETY: création d'objets DirectWrite sur la fabrique possédée.
+        let (format, metrics) =
+            unsafe { make_format(&self.dwrite, self.scale, font_px, tab_size)? };
+        self.format = format;
+        self.metrics = metrics;
+        self.font_px = font_px;
+        self.tab_size = tab_size;
+        self.refresh_metrics();
+        self.layouts.clear();
+        self.minimap = chrome::MinimapState::default();
         self.valid = false;
         Ok(())
     }
@@ -1351,14 +1382,19 @@ impl SoftRenderer {
 }
 
 /// Crée la police à chasse fixe à l'échelle donnée et mesure un caractère.
-unsafe fn make_format(dwrite: &IDWriteFactory, scale: f32) -> Result<(IDWriteTextFormat, Metrics)> {
+unsafe fn make_format(
+    dwrite: &IDWriteFactory,
+    scale: f32,
+    font_px: f32,
+    tab_size: f32,
+) -> Result<(IDWriteTextFormat, Metrics)> {
     let format = dwrite.CreateTextFormat(
         w!("Consolas"),
         None,
         DWRITE_FONT_WEIGHT_REGULAR,
         DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL,
-        FONT_PX * scale,
+        font_px * scale,
         w!("en-us"),
     )?;
     format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
@@ -1367,7 +1403,7 @@ unsafe fn make_format(dwrite: &IDWriteFactory, scale: f32) -> Result<(IDWriteTex
     let mut m = DWRITE_TEXT_METRICS::default();
     layout.GetMetrics(&mut m)?;
     let advance = m.width;
-    format.SetIncrementalTabStop(advance * 4.0)?;
+    format.SetIncrementalTabStop(advance * tab_size)?;
     Ok((
         format,
         Metrics {

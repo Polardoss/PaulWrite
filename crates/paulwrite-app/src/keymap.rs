@@ -75,6 +75,10 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("l", _) => Some(Command::SelectLine),
             // Ctrl+/ ; sur un clavier AZERTY la barre oblique est Maj+« : »
             ("/", _) | (":", true) => Some(Command::ToggleComment),
+            // zoom : Ctrl+= ou Ctrl++ (AZERTY : « = » ou Maj+« = »), Ctrl+-, Ctrl+0 (AZERTY : « à »)
+            ("=" | "+", _) => Some(Command::ZoomIn),
+            ("-", _) => Some(Command::ZoomOut),
+            ("0" | "\u{e0}", _) => Some(Command::ZoomReset),
             ("n", false) => Some(Command::NewFile),
             ("n", true) => Some(Command::NewWindow),
             ("t", true) => Some(Command::ReopenClosedTab),
@@ -287,6 +291,19 @@ mod tests {
             shortcut_label(Command::LspDefinition).as_deref(),
             Some("F12")
         );
+    }
+
+    #[test]
+    fn raccourcis_du_zoom() {
+        let ctrl = ModifiersState::CONTROL;
+        let ch = |c: &str| Key::Character(c.into());
+        for k in ["=", "+"] {
+            assert_eq!(command_for(&ch(k), ctrl), Some(Command::ZoomIn), "{k}");
+        }
+        assert_eq!(command_for(&ch("-"), ctrl), Some(Command::ZoomOut));
+        assert_eq!(command_for(&ch("0"), ctrl), Some(Command::ZoomReset));
+        // sans Ctrl, ce sont des caractères comme les autres
+        assert_eq!(command_for(&ch("-"), ModifiersState::empty()), None);
     }
 
     #[test]

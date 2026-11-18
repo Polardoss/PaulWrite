@@ -18,11 +18,20 @@ pub const DEFAULT_HIGHLIGHT_MAX_BYTES: usize = 1024 * 1024;
 /// lignes ne sont pas coupées (voir `docs/benchmarks.md`).
 pub const DEFAULT_WRAP_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+/// Taille de police par défaut, minimale et maximale (pixels logiques).
+pub const DEFAULT_FONT_SIZE: u32 = 15;
+pub const MIN_FONT_SIZE: u32 = 8;
+pub const MAX_FONT_SIZE: u32 = 48;
+
 /// Réglages de l'application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Langue de l'interface : `language = "en"` ou `"fr"` ; absente ou `"auto"` : celle de Windows.
     pub language: Option<Lang>,
+    /// Taille de la police du texte, en pixels (`font_size`, 8 à 48 ; Ctrl+molette l'ajuste).
+    pub font_size: u32,
+    /// Largeur d'une tabulation, en colonnes (`tab_size`, 1 à 16).
+    pub tab_size: usize,
     /// Rouvrir les onglets, le dossier et la position du curseur au lancement
     /// (`restore_session = false` pour toujours démarrer vide).
     pub restore_session: bool,
@@ -57,6 +66,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             language: None,
+            font_size: DEFAULT_FONT_SIZE,
+            tab_size: crate::editing::DEFAULT_TAB_WIDTH,
             restore_session: true,
             word_wrap: true,
             word_wrap_max_bytes: DEFAULT_WRAP_MAX_BYTES,
@@ -92,6 +103,16 @@ impl Config {
                     }
                 }
                 "language" => c.language = Lang::from_code(value),
+                "font_size" => {
+                    if let Ok(n) = value.parse::<u32>() {
+                        c.font_size = n.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                    }
+                }
+                "tab_size" => {
+                    if let Ok(n) = value.parse::<usize>() {
+                        c.tab_size = n.clamp(1, 16);
+                    }
+                }
                 "restore_session" => {
                     if let Ok(b) = value.parse::<bool>() {
                         c.restore_session = b;
@@ -216,6 +237,46 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn police_et_tabulation() {
+        let c = Config::parse(
+            "font_size = 20
+tab_size = 8
+",
+        );
+        assert_eq!((c.font_size, c.tab_size), (20, 8));
+        // valeurs hors bornes ramenées dedans, valeurs invalides ignorées
+        let c = Config::parse(
+            "font_size = 500
+tab_size = 0
+",
+        );
+        assert_eq!((c.font_size, c.tab_size), (MAX_FONT_SIZE, 1));
+        let c = Config::parse(
+            "font_size = 2
+tab_size = 99
+",
+        );
+        assert_eq!((c.font_size, c.tab_size), (MIN_FONT_SIZE, 16));
+        let c = Config::parse(
+            "font_size = grand
+tab_size = -3
+",
+        );
+        assert_eq!(
+            (c.font_size, c.tab_size),
+            (DEFAULT_FONT_SIZE, crate::editing::DEFAULT_TAB_WIDTH)
+        );
+        // le réglage enregistré par le zoom est relu tel quel
+        let text = Config::with_setting(
+            "# rien
+",
+            "font_size",
+            "18",
+        );
+        assert_eq!(Config::parse(&text).font_size, 18);
+    }
 
     #[test]
     fn valeurs_par_defaut() {

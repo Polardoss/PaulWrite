@@ -180,6 +180,10 @@ fn menus() -> Vec<Menu> {
                     "Retour \u{e0} la ligne",
                 ),
                 Sep,
+                Item(Command::ZoomIn, "Zoom In", "Agrandir le texte"),
+                Item(Command::ZoomOut, "Zoom Out", "R\u{e9}duire le texte"),
+                Item(Command::ZoomReset, "Reset Zoom", "Taille par d\u{e9}faut"),
+                Sep,
                 Item(Command::NextTab, "Next File", "Fichier suivant"),
                 Item(
                     Command::PrevTab,

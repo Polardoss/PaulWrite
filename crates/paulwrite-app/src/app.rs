@@ -380,6 +380,10 @@ struct App {
     quit_queue: Vec<TabId>,
     /// Une question « recharger le fichier modifié sur le disque ? » est posée.
     reload_asked: bool,
+    /// Taille du texte (pixels) et largeur d'une tabulation (colonnes) : réglages `font_size` et
+    /// `tab_size`, Ctrl+molette ajuste la taille.
+    font_px: u32,
+    tab_size: usize,
     /// Onglets fermés (le plus récent en dernier), pour « Rouvrir l'onglet fermé ».
     closed: Vec<TabState>,
     /// Fichiers ouverts récemment, le plus récent d'abord.
@@ -523,6 +527,8 @@ impl App {
             after_save: None,
             quit_queue: Vec::new(),
             reload_asked: false,
+            font_px: crate::config::DEFAULT_FONT_SIZE,
+            tab_size: editing::DEFAULT_TAB_WIDTH,
             closed: Vec::new(),
             recent: Vec::new(),
             confirming: false,
@@ -920,6 +926,46 @@ impl App {
                     })
                     .ok();
             }
+        }
+    }
+
+    // --- Taille du texte et tabulation ---------------------------------------------------------
+
+    /// Applique `font_px` et `tab_size` : nouvelle police, nouvelle géométrie.
+    fn apply_text_style(&mut self) {
+        editing::set_tab_width(self.tab_size);
+        if let Some(r) = self.renderer.as_mut() {
+            if let Err(e) = r.set_text_style(self.font_px as f32, self.tab_size as f32) {
+                eprintln!("taille du texte : {e}");
+            }
+        }
+        self.ime_area = None;
+        self.tabs_dirty = true;
+        self.sync_viewport();
+        self.request_redraw();
+    }
+
+    /// Change la taille du texte de `delta` pixels (`0` : taille par défaut) et la retient dans
+    /// `config.toml` (par le worker).
+    fn zoom(&mut self, delta: i32) {
+        use crate::config::{DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE};
+        let target = if delta == 0 {
+            DEFAULT_FONT_SIZE
+        } else {
+            (self.font_px as i32 + delta).clamp(MIN_FONT_SIZE as i32, MAX_FONT_SIZE as i32) as u32
+        };
+        if target == self.font_px {
+            return;
+        }
+        self.font_px = target;
+        self.apply_text_style();
+        if !self.is_bench() && self.opts.screenshot.is_none() {
+            self.jobs
+                .send(Job::SaveSetting {
+                    key: "font_size",
+                    value: target.to_string(),
+                })
+                .ok();
         }
     }
 
@@ -2444,11 +2490,14 @@ impl App {
             .map_or(self.lang.pick("Plain Text", "Texte brut"), |l| {
                 l.display_name()
             });
-        let tab_size = self.lang.pick("Tab Size: 4", "Tabulation : 4");
+        let tab_size = self.lang.pick(
+            format!("Tab Size: {}", self.tab_size),
+            format!("Tabulation : {}", self.tab_size),
+        );
         r.set_chrome(&Chrome {
             line_digits: tab.editor.line_digits(),
             status_left: &self.status_buf,
-            status_right: &[tab_size, language],
+            status_right: &[tab_size.as_str(), language],
             scroll: Some(tab.editor.scroll()),
         });
         // La minimap suit le défilement tout de suite, mais le texte tapé avec retard.
@@ -2630,6 +2679,7 @@ impl App {
                     })
                     .ok();
             }
+            Effect::Zoom(d) => self.zoom(d),
             Effect::ReopenClosed => self.reopen_closed(),
             Effect::OpenRecent => self.open_recent_list(),
             Effect::NewWindow => {
@@ -3522,8 +3572,16 @@ impl ApplicationHandler<UserEvent> for App {
                     if !self.is_bench() {
                         self.word_wrap = c.word_wrap && !self.opts.no_wrap;
                         self.lang = c.lang();
+                        // le style (police, tabulation) n'est refait que s'il change : rien à payer
+                        // au démarrage avec les réglages par défaut
+                        let restyle = c.font_size != self.font_px || c.tab_size != self.tab_size;
+                        self.font_px = c.font_size;
+                        self.tab_size = c.tab_size;
                         self.config = c;
                         self.apply_lang();
+                        if restyle {
+                            self.apply_text_style();
+                        }
                     }
                 }
                 Done::Session(Some(session)) => {
@@ -3832,6 +3890,17 @@ impl ApplicationHandler<UserEvent> for App {
                     st.palette.scroll(lines.round() as isize);
                     self.overlay_dirty = true;
                     self.request_redraw();
+                    return;
+                }
+                // Ctrl+molette : taille du texte
+                if self.mods.control_key() {
+                    let y = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / 20.0,
+                    };
+                    if y.abs() >= 0.5 {
+                        self.zoom(if y > 0.0 { 1 } else { -1 });
+                    }
                     return;
                 }
                 let on_sidebar = self

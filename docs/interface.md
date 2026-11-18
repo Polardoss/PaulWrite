@@ -167,8 +167,16 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   fichier sont gardés en mémoire avec leur curseur et leur première ligne visible ; ceux qui sont
   déjà rouverts sont sautés. **Fichiers récents** (menu File ▸ Open Recent, ou la palette) : les 30
   derniers fichiers ouverts à la main (pas ceux d'une reprise de session ni d'un rechargement),
-  gardés par le worker dans `%APPDATA%\PaulWriteecent` ; les fichiers disparus sont écartés à
+  gardés par le worker dans `%APPDATA%\PaulWrite
+ecent` ; les fichiers disparus sont écartés à
   la lecture.
+- **Taille du texte et tabulation** : `font_size` (15 px par défaut, 8 à 48) et `tab_size` (4 par
+  défaut, 1 à 16) dans `config.toml`. Ctrl+molette ou Ctrl+`+` / `-` / `0` changent la taille en
+  direct (le worker l'enregistre) : le moteur de rendu recrée la police du texte et recalcule la
+  géométrie, sans toucher aux polices de l'interface. La tabulation règle à la fois les taquets
+  d'affichage, le retour à la ligne, la touche Tab (espaces jusqu'au taquet suivant) et Maj+Tab.
+  Rien n'est refait au démarrage tant que ces réglages sont ceux par défaut (démarrage mesuré à
+  77 ms, médiane).
 
 ## Limites connues
 

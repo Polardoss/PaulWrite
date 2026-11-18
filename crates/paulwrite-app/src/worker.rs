@@ -267,6 +267,8 @@ const CONFIG_TEMPLATE: &str =
 # lsp = false                     # true : serveurs de langage (programmes externes)\n\
 # lsp_rust = \"rust-analyzer\"\n\
 # language = \"auto\"              # \"en\", \"fr\" ou \"auto\" (langue de Windows)\n\
+# font_size = 15                  # taille du texte en pixels (8 \u{e0} 48)\n\
+# tab_size = 4                    # largeur d'une tabulation en colonnes (1 \u{e0} 16)\n\
 # restore_session = true          # false : toujours d\u{e9}marrer vide (pas de reprise)\n\
 # word_wrap = true                # false : pas de retour \u{e0} la ligne automatique\n";
 
