@@ -93,8 +93,28 @@ plages (nœuds `text`) et une seconde analyse HTML, limitée à elles, les color
 analyse réutilise son arbre d'une modification à l'autre. Mesuré (worker, fichier de 50 Ko / 200 Ko /
 1 Mo) : modification + fenêtre colorée en **6 / 25 / 125 ms** (l'analyse complète fait 20 / 93 /
 853 ms ; la première version, qui refaisait tout le HTML à chaque fois, coûtait 12 / 68 / 863 ms).
-Limites : le JavaScript d'une balise `<script>` et le CSS d'une balise `<style>` ne sont pas colorés
-(vrai aussi pour un fichier `.html`) ; au-delà de `highlight_max_bytes` (1 Mo), pas de couleurs.
+Au-delà de `highlight_max_bytes` (1 Mo), pas de couleurs.
+
+## JavaScript, CSS et autres langages (étape 6)
+
+- **`<script>` et `<style>`** : dans un fichier HTML ou PHP, le JavaScript et le CSS sont colorés par
+  leurs propres grammaires. Même mécanisme que pour le HTML d'un fichier PHP : une « couche » est une
+  seconde analyse tree-sitter limitée à des plages de la couche du dessus (HTML → JavaScript et CSS ;
+  PHP → HTML → JavaScript et CSS). Une couche n'est créée que s'il y a quelque chose à colorer et
+  réutilise son arbre d'une modification à l'autre. La liste des `<script>`/`<style>` est tenue à
+  jour d'après les modifications et `changed_ranges` de tree-sitter : seules les zones modifiées sont
+  relues. Un parcours complet à chaque frappe coûtait 30 à 40 % de plus (mesuré) ; un test
+  aléatoire vérifie que la liste incrémentale vaut toujours celle d'un scan complet.
+  Mesuré (worker, fichier HTML de 50 / 200 / 1000 Ko, un `<style>` et un `<script>` toutes les deux
+  lignes, ce qui est extrême) : modification + fenêtre colorée en **4 / 13 / 85 ms**.
+- **Nouveaux langages** : Markdown (`.md`, `.markdown` : titres, listes, code, et en seconde couche
+  emphase, liens et code en ligne), YAML (`.yaml`, `.yml`), XML (`.xml`, `.xsd`, `.xsl`, `.svg`,
+  `.csproj`, `.xaml`, `.rss`…) et scripts shell (`.sh`, `.bash`, `.zsh`). Commentaires :
+  `#` pour YAML et shell, `<!-- -->` pour XML et Markdown.
+- **Non retenu : SQL.** La seule grammaire disponible (`tree-sitter-sequel`) ajoute **15 Mo** à
+  l'exécutable (les quatre autres grammaires : 2,3 Mo en tout) : refusé au nom de la règle n°7.
+  Options : colorateur de mots-clés écrit à la main, ou grammaire en option de compilation.
+- Exécutable : 7,5 → 9,8 Mo. Démarrage inchangé (médiane ≈ 90 ms avant et après).
 
 ## Retour à la ligne et repli (étape 6)
 

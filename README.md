@@ -5,7 +5,7 @@ La vitesse est le critère n°1, avant les fonctionnalités. Pas d'Electron, pas
 framework UI lourd.
 
 > État : en construction. Étapes 0 à 4 en place : l'éditeur ouvre, édite et enregistre des fichiers
-> dans des onglets, avec coloration syntaxique (Rust, JSON, TOML, Python, JavaScript, HTML, CSS, PHP et modèles `.phtml`),
+> dans des onglets, avec coloration syntaxique (Rust, JSON, TOML, Python, JavaScript, HTML, CSS, PHP et modèles `.phtml`, Markdown, YAML, XML, shell ; JavaScript et CSS à l'intérieur de `<script>` et `<style>`),
 > Goto Anything, palette de commandes et recherche dans le projet.
 
 ## Objectifs de performance
@@ -40,7 +40,7 @@ Workspace Cargo (`crates/`) :
 | Crate | Rôle |
 |---|---|
 | `paulwrite-core` | Buffer ([ropey]), sélections et curseurs multiples, undo/redo transactionnel, encodages, I/O. Aucune dépendance UI. |
-| `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié (8 langages ; le HTML des fichiers PHP est coloré aussi). |
+| `paulwrite-syntax` | Coloration incrémentale tree-sitter sur thread dédié (12 langages ; le HTML des fichiers PHP, le JavaScript et le CSS des pages HTML sont colorés aussi). |
 | `paulwrite-search` | Liste de fichiers, recherche de texte (moteur de ripgrep) et fuzzy finder (nucleo), respectent `.gitignore`. |
 | `paulwrite-render` | Rendu : Direct2D logiciel + DirectWrite par régions sales (texte, gouttière, onglets, minimap, barre d'état, barre latérale, panneau), presse-papiers, boîtes de dialogue, barre de menus. Choix mesuré : [`docs/rendering.md`](docs/rendering.md) ; apparence : [`docs/interface.md`](docs/interface.md). |
 | `paulwrite-plugins` | Plugins Lua sur thread dédié : commandes et événements, instantané O(1) du texte, limites de temps et de mémoire. Voir [`docs/plugins.md`](docs/plugins.md). |

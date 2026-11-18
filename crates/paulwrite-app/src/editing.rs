@@ -48,8 +48,8 @@ pub fn comment_style(language: Option<paulwrite_syntax::Language>) -> CommentSty
     use paulwrite_syntax::Language as L;
     match language {
         Some(L::Rust | L::JavaScript | L::Php) => CommentStyle::SLASHES,
-        Some(L::Python | L::Toml) | None => CommentStyle::HASH,
-        Some(L::Html) => CommentStyle::HTML,
+        Some(L::Python | L::Toml | L::Yaml | L::Shell) | None => CommentStyle::HASH,
+        Some(L::Html | L::Xml | L::Markdown) => CommentStyle::HTML,
         Some(L::Css) => CommentStyle::CSS,
         Some(L::Json) => CommentStyle::default(),
     }

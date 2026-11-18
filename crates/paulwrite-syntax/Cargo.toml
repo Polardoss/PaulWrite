@@ -24,6 +24,11 @@ tree-sitter-python = "0.25"
 tree-sitter-javascript = "0.25"
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
+# Markdown (blocs : titres, listes, code), YAML, XML et shell.
+tree-sitter-md = "0.5"
+tree-sitter-yaml = "0.7"
+tree-sitter-xml = "0.7"
+tree-sitter-bash = "0.25"
 # PHP et modèles .phtml (les parties HTML sont colorées par la grammaire HTML : voir highlight.rs).
 tree-sitter-php = "0.25"
 

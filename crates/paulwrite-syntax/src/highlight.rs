@@ -53,8 +53,14 @@ fn kind_for_capture(name: &str) -> Kind {
             "property" | "field" | "variable.member" => kind::PROPERTY,
             "operator" => kind::OPERATOR,
             "punctuation" => kind::PUNCTUATION,
-            "attribute" => kind::ATTRIBUTE,
+            "attribute" | "label" | "text.uri" => kind::ATTRIBUTE,
             "tag" => kind::TAG,
+            // Markdown : titres, code, liens, emphase (les couleurs sont les seules distinctions)
+            "text.title" => kind::FUNCTION,
+            "text.literal" => kind::STRING,
+            "text.reference" => kind::PROPERTY,
+            "text.emphasis" => kind::TYPE,
+            "text.strong" => kind::CONSTANT,
             _ => 0,
         };
         if k != 0 {
@@ -83,33 +89,186 @@ pub struct Highlighter {
     query: Query,
     capture_kinds: Vec<Kind>,
     cursor: QueryCursor,
-    /// Langage imbriqué : le HTML des fichiers PHP (voir [`Injection`]).
-    inject: Option<Injection>,
+    /// Langages imbriqués : le HTML des fichiers PHP, le JavaScript des `<script>` et le CSS des
+    /// `<style>` (voir [`Embedded`]).
+    embedded: Option<Embedded>,
+    /// Plages dont la structure a changé au dernier `update` (`None` : inconnues).
+    changed: Option<Vec<TsRange>>,
     // tampons réutilisés
     captures: Vec<(usize, usize, usize, Kind)>,
     paint: Vec<Kind>,
 }
 
-/// Le HTML qui entoure le code d'un fichier PHP ou `.phtml` : la grammaire PHP le repère (nœuds
-/// `text`), une seconde analyse HTML, **limitée à ces plages**, le colore. Elle est refaite en
-/// entier après chaque modification (le HTML d'un modèle est petit ; l'arbre PHP, lui, reste
-/// incrémental).
-struct Injection {
+/// Les langages imbriqués d'un fichier HTML ou PHP. Chaque couche est une seconde analyse
+/// tree-sitter **limitée à des plages** de la couche du dessus : le HTML d'un fichier PHP (nœuds
+/// `text`), puis le JavaScript des `<script>` et le CSS des `<style>` (nœuds `raw_text`). Une
+/// couche n'est créée que s'il y a quelque chose à colorer (la compilation de sa requête n'est pas
+/// gratuite), et chaque couche réutilise son ancien arbre : tree-sitter compare les plages
+/// incluses et ne reparse que ce qui a changé.
+struct Embedded {
+    /// Le HTML qui entoure le code PHP (absent pour un fichier HTML : c'est l'arbre principal).
+    html: Option<Layer>,
+    /// Le texte courant d'un document Markdown (emphase, liens, code en ligne) : une seconde
+    /// grammaire, appliquée aux nœuds `inline` de l'arbre des blocs.
+    inline: Option<Layer>,
+    js: Option<Layer>,
+    css: Option<Layer>,
+    /// Plages à analyser, réutilisées d'une modification à l'autre.
+    ranges: Vec<TsRange>,
+    css_ranges: Vec<TsRange>,
+    /// Repère les `<script>` et `<style>` du HTML (créé au premier besoin).
+    scan: Option<Scan>,
+}
+
+/// Une couche de coloration : analyseur, arbre et requête d'un langage imbriqué.
+struct Layer {
     parser: Parser,
     tree: Option<Tree>,
     query: Query,
     capture_kinds: Vec<Kind>,
     cursor: QueryCursor,
-    ranges: Vec<TsRange>,
+    /// Départage les motifs de deux couches qui se recouvrent (la couche du dessous gagne).
+    base: usize,
+    /// Plages dont la structure a changé au dernier `reparse` (`None` : inconnues, analyse complète).
+    changed: Option<Vec<TsRange>>,
 }
 
-impl Injection {
-    fn new() -> Result<Self, String> {
-        let grammar: tree_sitter::Language = tree_sitter_html::LANGUAGE.into();
+/// Nœuds dont les plages sont analysées par la couche HTML d'un fichier PHP : `(type du nœud, type
+/// de son parent)`.
+const HTML_IN_PHP: (&str, Option<&str>) = ("text", None);
+const MD_INLINE: (&str, Option<&str>) = ("inline", None);
+
+impl Embedded {
+    fn new() -> Self {
+        Self {
+            html: None,
+            inline: None,
+            js: None,
+            css: None,
+            ranges: Vec::new(),
+            css_ranges: Vec::new(),
+            scan: None,
+        }
+    }
+
+    /// Réanalyse toutes les couches d'après le nouvel arbre principal.
+    fn reparse(
+        &mut self,
+        language: Language,
+        main: &Tree,
+        main_changed: Option<&[TsRange]>,
+        rope: &Rope,
+        edits: &[TextEdit],
+    ) {
+        let Self {
+            html,
+            inline,
+            js,
+            css,
+            ranges,
+            css_ranges,
+            scan,
+        } = self;
+        if language == Language::Markdown {
+            ranges.clear();
+            collect_ranges(main.root_node(), MD_INLINE, ranges);
+            Layer::update(
+                inline,
+                tree_sitter_md::INLINE_LANGUAGE.into(),
+                tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+                1_000_000,
+                ranges,
+                rope,
+                edits,
+            );
+            return;
+        }
+        // La couche HTML : l'arbre principal si le fichier est du HTML, sinon celle du PHP.
+        let html_tree: Option<&Tree> = if language == Language::Php {
+            ranges.clear();
+            collect_ranges(main.root_node(), HTML_IN_PHP, ranges);
+            Layer::update(
+                html,
+                tree_sitter_html::LANGUAGE.into(),
+                tree_sitter_html::HIGHLIGHTS_QUERY,
+                1_000_000,
+                ranges,
+                rope,
+                edits,
+            );
+            html.as_ref().and_then(|l| l.tree.as_ref())
+        } else {
+            Some(main)
+        };
+        // Les `<script>` et les `<style>` : une seule requête pour le JavaScript et le CSS.
+        ranges.clear();
+        css_ranges.clear();
+        if scan.is_none() {
+            *scan = Scan::new();
+        }
+        if let Some(scan) = scan.as_mut() {
+            match html_tree {
+                Some(tree) => {
+                    // seules les zones modifiées sont relues (voir `Scan`)
+                    let changed = if language == Language::Php {
+                        html.as_ref().and_then(|l| l.changed.as_deref())
+                    } else {
+                        main_changed
+                    };
+                    scan.update(tree.root_node(), edits, changed);
+                    scan.ranges(rope, ranges, css_ranges);
+                }
+                None => scan.reset(),
+            }
+        }
+        Layer::update(
+            js,
+            tree_sitter_javascript::LANGUAGE.into(),
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            2_000_000,
+            ranges,
+            rope,
+            edits,
+        );
+        Layer::update(
+            css,
+            tree_sitter_css::LANGUAGE.into(),
+            tree_sitter_css::HIGHLIGHTS_QUERY,
+            3_000_000,
+            css_ranges,
+            rope,
+            edits,
+        );
+    }
+
+    /// Les couches qui ont un arbre, du dessous au dessus.
+    fn layers(&mut self) -> impl Iterator<Item = &mut Layer> {
+        [
+            self.html.as_mut(),
+            self.inline.as_mut(),
+            self.js.as_mut(),
+            self.css.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|l| l.tree.is_some())
+    }
+
+    fn reset(&mut self) {
+        for l in self.layers() {
+            l.tree = None;
+        }
+        if let Some(scan) = self.scan.as_mut() {
+            scan.reset();
+        }
+    }
+}
+
+impl Layer {
+    fn new(grammar: &tree_sitter::Language, query: &str, base: usize) -> Result<Self, String> {
         let mut parser = Parser::new();
-        parser.set_language(&grammar).map_err(|e| e.to_string())?;
-        let query =
-            Query::new(&grammar, tree_sitter_html::HIGHLIGHTS_QUERY).map_err(|e| e.to_string())?;
+        parser.set_language(grammar).map_err(|e| e.to_string())?;
+        let query = Query::new(grammar, query).map_err(|e| e.to_string())?;
         let capture_kinds = query
             .capture_names()
             .iter()
@@ -121,17 +280,41 @@ impl Injection {
             query,
             capture_kinds,
             cursor: QueryCursor::new(),
-            ranges: Vec::new(),
+            base,
+            changed: None,
         })
     }
 
-    /// Réanalyse le HTML situé dans les nœuds `text` de l'arbre PHP. L'ancien arbre HTML est
-    /// réutilisé (modifications appliquées) : tree-sitter compare les plages incluses et ne
-    /// reparse que ce qui a changé.
-    fn reparse(&mut self, php: &Tree, rope: &Rope, edits: &[TextEdit]) {
-        self.ranges.clear();
-        collect_text_ranges(php.root_node(), &mut self.ranges);
-        if self.ranges.is_empty() || self.parser.set_included_ranges(&self.ranges).is_err() {
+    /// Met à jour la couche `slot` pour les plages `ranges` ; la crée au premier besoin, et
+    /// l'oublie quand il n'y a plus rien à analyser.
+    fn update(
+        slot: &mut Option<Layer>,
+        grammar: tree_sitter::Language,
+        query: &str,
+        base: usize,
+        ranges: &[TsRange],
+        rope: &Rope,
+        edits: &[TextEdit],
+    ) {
+        if ranges.is_empty() {
+            if let Some(layer) = slot.as_mut() {
+                layer.tree = None;
+                layer.changed = None;
+            }
+            return;
+        }
+        if slot.is_none() {
+            *slot = Layer::new(&grammar, query, base).ok();
+        }
+        if let Some(layer) = slot.as_mut() {
+            layer.reparse(ranges, rope, edits);
+        }
+    }
+
+    /// Réanalyse les plages `ranges`. L'ancien arbre est réutilisé (modifications appliquées).
+    fn reparse(&mut self, ranges: &[TsRange], rope: &Rope, edits: &[TextEdit]) {
+        self.changed = None;
+        if self.parser.set_included_ranges(ranges).is_err() {
             self.tree = None;
             return;
         }
@@ -155,18 +338,28 @@ impl Injection {
             let (chunk, start, _, _) = rope.chunk_at_byte(byte);
             &chunk.as_bytes()[byte - start..]
         };
+        let old = self.tree.clone();
         self.tree = self
             .parser
             .parse_with_options(&mut provider, self.tree.as_ref(), None);
+        self.changed = match (&old, &self.tree) {
+            (Some(o), Some(n)) => Some(o.changed_ranges(n).collect()),
+            _ => None,
+        };
     }
 }
 
-/// Plages des nœuds `text` (le HTML hors des balises `<?php … ?>`), dans l'ordre du document.
-fn collect_text_ranges(root: Node<'_>, out: &mut Vec<TsRange>) {
+/// Plages des nœuds `(type, type du parent)` sous `root`, dans l'ordre du document : le HTML hors
+/// des balises `<?php … ?>` (`text`), ou le contenu des `<script>` et `<style>` (`raw_text`). On ne
+/// descend pas dans un nœud retenu.
+fn collect_ranges(root: Node<'_>, (kind, parent): (&str, Option<&str>), out: &mut Vec<TsRange>) {
     let mut cursor = root.walk();
     loop {
-        if cursor.node().kind() == "text" {
-            out.push(cursor.node().range());
+        let node = cursor.node();
+        let wanted = node.kind() == kind
+            && parent.map_or(true, |p| node.parent().is_some_and(|n| n.kind() == p));
+        if wanted {
+            out.push(node.range());
         } else if cursor.goto_first_child() {
             continue;
         }
@@ -177,6 +370,166 @@ fn collect_text_ranges(root: Node<'_>, out: &mut Vec<TsRange>) {
             if !cursor.goto_parent() {
                 return;
             }
+        }
+    }
+}
+
+/// Plage d'octets du contenu d'un `<script>` ou d'un `<style>` ; `dirty` : une modification l'a
+/// touchée, elle doit être relue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Block {
+    start: usize,
+    end: usize,
+    dirty: bool,
+}
+
+/// Repère le contenu des `<script>` et des `<style>` d'un arbre HTML, et le tient à jour d'une
+/// modification à l'autre. Une requête tree-sitter (exécutée côté C) coûte bien moins qu'un parcours
+/// nœud par nœud, mais relire tout l'arbre à chaque frappe ajoutait encore 30 à 40 % à la
+/// coloration d'un gros fichier (mesuré) : on décale donc les plages connues d'après les
+/// modifications et on ne relit que les zones où la structure a changé (`changed_ranges`) et les
+/// plages touchées.
+struct Scan {
+    query: Query,
+    cursor: QueryCursor,
+    js: Vec<Block>,
+    css: Vec<Block>,
+    /// Les listes décrivent le document précédent (sinon : analyse complète).
+    primed: bool,
+}
+
+/// Décale les plages d'après une modification ; celles qu'elle touche sont marquées à relire
+/// (elles couvrent alors toute la zone modifiée).
+fn shift_blocks(blocks: &mut [Block], e: &TextEdit) {
+    let delta = e.new_end_byte as isize - e.old_end_byte as isize;
+    let moved = |x: usize| (x as isize + delta) as usize;
+    for b in blocks {
+        if b.end < e.start_byte {
+            // avant la modification : inchangée
+        } else if b.start > e.old_end_byte {
+            b.start = moved(b.start);
+            b.end = moved(b.end);
+        } else {
+            b.start = b.start.min(e.start_byte);
+            b.end = moved(b.end.max(e.old_end_byte));
+            b.dirty = true;
+        }
+    }
+}
+
+impl Scan {
+    fn new() -> Option<Self> {
+        let grammar: tree_sitter::Language = tree_sitter_html::LANGUAGE.into();
+        let query = Query::new(
+            &grammar,
+            "(script_element (raw_text) @js) (style_element (raw_text) @css)",
+        )
+        .ok()?;
+        Some(Self {
+            query,
+            cursor: QueryCursor::new(),
+            js: Vec::new(),
+            css: Vec::new(),
+            primed: false,
+        })
+    }
+
+    fn reset(&mut self) {
+        self.js.clear();
+        self.css.clear();
+        self.primed = false;
+    }
+
+    /// Relit les plages dans `window` (octets) et les ajoute aux listes.
+    fn scan_window(&mut self, root: Node<'_>, window: Range<usize>) {
+        self.cursor.set_byte_range(window);
+        // la requête n'a pas de prédicat : aucun texte n'est demandé
+        let mut matches = self
+            .cursor
+            .matches(&self.query, root, |_: Node<'_>| std::iter::empty::<&[u8]>());
+        while let Some(m) = matches.next() {
+            for c in m.captures() {
+                let block = Block {
+                    start: c.node.start_byte(),
+                    end: c.node.end_byte(),
+                    dirty: false,
+                };
+                if c.index == 0 {
+                    self.js.push(block);
+                } else {
+                    self.css.push(block);
+                }
+            }
+        }
+    }
+
+    /// Met les listes à jour pour le nouvel arbre `root`. `edits` : les modifications depuis le
+    /// dernier appel ; `changed` : plages dont la structure a changé (`None` : on ne sait pas).
+    fn update(&mut self, root: Node<'_>, edits: &[TextEdit], changed: Option<&[TsRange]>) {
+        let (Some(changed), true) = (changed, self.primed && !edits.is_empty()) else {
+            self.js.clear();
+            self.css.clear();
+            self.scan_window(root, 0..usize::MAX);
+            self.primed = true;
+            return;
+        };
+        for e in edits {
+            shift_blocks(&mut self.js, e);
+            shift_blocks(&mut self.css, e);
+        }
+        // zones à relire : structure modifiée, et plages touchées (le texte d'un `raw_text` peut
+        // changer sans que sa structure change)
+        let mut windows: Vec<Range<usize>> = changed
+            .iter()
+            .map(|r| r.start_byte.saturating_sub(1)..r.end_byte + 1)
+            .collect();
+        windows.extend(
+            self.js
+                .iter()
+                .chain(&self.css)
+                .filter(|b| b.dirty)
+                .map(|b| b.start.saturating_sub(1)..b.end + 1),
+        );
+        let touches = |b: &Block| windows.iter().any(|w| b.end >= w.start && b.start <= w.end);
+        self.js.retain(|b| !touches(b));
+        self.css.retain(|b| !touches(b));
+        for w in windows {
+            self.scan_window(root, w);
+        }
+        for list in [&mut self.js, &mut self.css] {
+            list.sort_unstable_by_key(|b| (b.start, b.end));
+            list.dedup();
+            // jamais deux plages qui se recouvrent (l'analyseur les refuserait)
+            let mut last_end = 0;
+            list.retain(|b| {
+                let keep = b.start >= last_end;
+                if keep {
+                    last_end = b.end;
+                }
+                keep
+            });
+        }
+    }
+
+    /// Les plages à donner aux couches JavaScript et CSS (avec leurs positions ligne/colonne).
+    fn ranges(&self, rope: &Rope, js: &mut Vec<TsRange>, css: &mut Vec<TsRange>) {
+        let len = rope.len_bytes();
+        let point = |byte: usize| {
+            let byte = byte.min(len);
+            let row = rope.byte_to_line(byte);
+            Point {
+                row,
+                column: byte - rope.line_to_byte(row),
+            }
+        };
+        for (blocks, out) in [(&self.js, js), (&self.css, css)] {
+            out.clear();
+            out.extend(blocks.iter().map(|b| TsRange {
+                start_byte: b.start,
+                end_byte: b.end.min(len),
+                start_point: point(b.start),
+                end_point: point(b.end),
+            }));
         }
     }
 }
@@ -248,7 +601,8 @@ impl Highlighter {
         let grammar = language.grammar();
         let mut parser = Parser::new();
         parser.set_language(&grammar).map_err(|e| e.to_string())?;
-        let query = Query::new(&grammar, language.highlights_query()).map_err(|e| e.to_string())?;
+        let query =
+            Query::new(&grammar, &language.highlights_query()).map_err(|e| e.to_string())?;
         let capture_kinds = query
             .capture_names()
             .iter()
@@ -261,11 +615,12 @@ impl Highlighter {
             query,
             capture_kinds,
             cursor: QueryCursor::new(),
-            inject: if language == Language::Php {
-                Some(Injection::new()?)
-            } else {
-                None
-            },
+            embedded: matches!(
+                language,
+                Language::Php | Language::Html | Language::Markdown
+            )
+            .then(Embedded::new),
+            changed: None,
             captures: Vec::new(),
             paint: Vec::new(),
         })
@@ -299,11 +654,16 @@ impl Highlighter {
             let (chunk, start, _, _) = rope.chunk_at_byte(byte);
             &chunk.as_bytes()[byte - start..]
         };
+        let old = self.tree.clone();
         self.tree = self
             .parser
             .parse_with_options(&mut provider, self.tree.as_ref(), None);
-        if let (Some(inject), Some(tree)) = (self.inject.as_mut(), self.tree.as_ref()) {
-            inject.reparse(tree, rope, edits);
+        self.changed = match (&old, &self.tree) {
+            (Some(o), Some(n)) => Some(o.changed_ranges(n).collect()),
+            _ => None,
+        };
+        if let (Some(embedded), Some(tree)) = (self.embedded.as_mut(), self.tree.as_ref()) {
+            embedded.reparse(self.language, tree, self.changed.as_deref(), rope, edits);
         }
     }
 
@@ -311,8 +671,8 @@ impl Highlighter {
     pub fn reset(&mut self) {
         self.tree = None;
         self.parser.reset();
-        if let Some(inject) = self.inject.as_mut() {
-            inject.tree = None;
+        if let Some(embedded) = self.embedded.as_mut() {
+            embedded.reset();
         }
     }
 
@@ -331,7 +691,7 @@ impl Highlighter {
             query,
             cursor,
             capture_kinds,
-            inject,
+            embedded,
             captures,
             paint,
             ..
@@ -347,25 +707,23 @@ impl Highlighter {
             0,
             captures,
         );
-        // le HTML d'un fichier PHP : ses motifs passent après ceux du PHP (base élevée)
-        if let Some(Injection {
-            tree: Some(html),
-            query,
-            cursor,
-            capture_kinds,
-            ..
-        }) = inject
-        {
-            collect_captures(
-                query,
-                cursor,
-                capture_kinds,
-                html,
-                rope,
-                &range,
-                1_000_000,
-                captures,
-            );
+        // les langages imbriqués (HTML d'un fichier PHP, JavaScript, CSS) : leurs motifs passent
+        // après ceux de la couche principale (base élevée)
+        if let Some(embedded) = embedded {
+            for layer in embedded.layers() {
+                if let Some(layer_tree) = layer.tree.as_ref() {
+                    collect_captures(
+                        &layer.query,
+                        &mut layer.cursor,
+                        &layer.capture_kinds,
+                        layer_tree,
+                        rope,
+                        &range,
+                        layer.base,
+                        captures,
+                    );
+                }
+            }
         }
 
         // Aplatit les captures qui se recouvrent en une couleur par octet : le texte le plus
@@ -601,6 +959,274 @@ mod tests {
             seul.iter().any(|(t, k)| t == "em" && *k == "tag"),
             "{seul:?}"
         );
+    }
+
+    const PAGE: &str = "<!DOCTYPE html>\n<style>\n  a { color: red; margin: 0 }\n</style>\n<p class=\"x\">hi</p>\n<script>\n  const n = 42; // note\n  function f(s) { return \"t\" + s; }\n</script>\n";
+
+    fn has(s: &[(String, &'static str)], text: &str, kind: &str) -> bool {
+        s.iter().any(|(t, k)| t == text && *k == kind)
+    }
+
+    #[test]
+    fn html_colore_le_javascript_et_le_css_integres() {
+        let s = spans_of(Language::Html, PAGE);
+        // JavaScript des <script>
+        assert!(has(&s, "const", "keyword"), "{s:?}");
+        assert!(has(&s, "42", "number"), "{s:?}");
+        assert!(has(&s, "// note", "comment"), "{s:?}");
+        assert!(has(&s, "function", "keyword"), "{s:?}");
+        assert!(has(&s, "\"t\"", "string"), "{s:?}");
+        // CSS des <style>
+        assert!(has(&s, "color", "property"), "{s:?}");
+        assert!(has(&s, "margin", "property"), "{s:?}");
+        // et le HTML autour reste coloré
+        assert!(has(&s, "script", "tag"), "{s:?}");
+        assert!(has(&s, "class", "attribute"), "{s:?}");
+    }
+
+    #[test]
+    fn php_colore_aussi_le_javascript_et_le_css_des_modeles() {
+        let text =
+            "<?php $a = 1; ?>\n<style>b { color: blue }</style>\n<script>let z = 7;</script>\n";
+        let s = spans_of(Language::Php, text);
+        assert!(has(&s, "color", "property"), "{s:?}");
+        assert!(has(&s, "let", "keyword"), "{s:?}");
+        assert!(has(&s, "7", "number"), "{s:?}");
+    }
+
+    #[test]
+    fn le_javascript_integre_suit_les_modifications() {
+        let mut buf = Buffer::from_text("<p>x</p>\n<script>var a = 1;</script>\n");
+        buf.track_edits(true);
+        let mut h = Highlighter::new(Language::Html).unwrap();
+        h.update(buf.rope(), &[]);
+        // on ajoute un script après le premier, puis on édite dedans
+        let at = buf.len_chars();
+        buf.insert(at, "<script>let b = \"s\";</script>\n");
+        let edits = buf.take_edits();
+        h.update(buf.rope(), &edits);
+        let text = buf.rope().to_string();
+        let colors = |h: &mut Highlighter, buf: &Buffer| -> Vec<(String, &'static str)> {
+            let t = buf.rope().to_string();
+            h.highlights(buf.rope(), 0..t.len())
+                .iter()
+                .map(|s| (t[s.start..s.end].to_owned(), kind_name(s.kind)))
+                .collect()
+        };
+        let s = colors(&mut h, &buf);
+        assert!(has(&s, "var", "keyword"), "{s:?}");
+        assert!(has(&s, "let", "keyword"), "{s:?}");
+        let at = text.find("\"s\"").unwrap() + 1;
+        let char_at = buf.rope().byte_to_char(at);
+        buf.insert(char_at, "zz");
+        let edits = buf.take_edits();
+        h.update(buf.rope(), &edits);
+        let s = colors(&mut h, &buf);
+        assert!(has(&s, "\"zzs\"", "string"), "{s:?}");
+        // le dernier script disparaît : plus de couleur JavaScript pour lui, sans plantage
+        let text = buf.rope().to_string();
+        let from = text.find("<script>let").unwrap();
+        let (a, b) = (
+            buf.rope().byte_to_char(from),
+            buf.rope().byte_to_char(text.len()),
+        );
+        buf.delete(a..b);
+        let edits = buf.take_edits();
+        h.update(buf.rope(), &edits);
+        let s = colors(&mut h, &buf);
+        assert!(has(&s, "var", "keyword"), "{s:?}");
+        assert!(!has(&s, "let", "keyword"), "{s:?}");
+    }
+
+    #[test]
+    fn les_nouveaux_langages_sont_colores() {
+        let md = spans_of(
+            Language::Markdown,
+            "# Titre\n\nDu *texte* avec `code` et [un lien](http://x.fr).\n\n- item\n\n```\nlet a = 1;\n```\n",
+        );
+        assert!(has(&md, "Titre", "function"), "{md:?}");
+        assert!(has(&md, "code", "string"), "{md:?}");
+        assert!(
+            has(&md, "*texte*", "type") || has(&md, "texte", "type"),
+            "{md:?}"
+        );
+        assert!(has(&md, "http://x.fr", "attribute"), "{md:?}");
+        assert!(has(&md, "- ", "punctuation"), "{md:?}");
+
+        let yaml = spans_of(
+            Language::Yaml,
+            "# c\nname: demo\nport: 8080\nok: true\nlist:\n  - \"a\"\n",
+        );
+        assert!(has(&yaml, "# c", "comment"), "{yaml:?}");
+        assert!(has(&yaml, "name", "property"), "{yaml:?}");
+        assert!(has(&yaml, "8080", "number"), "{yaml:?}");
+        assert!(has(&yaml, "\"a\"", "string"), "{yaml:?}");
+
+        let xml = spans_of(
+            Language::Xml,
+            "<?xml version=\"1.0\"?>\n<!-- c -->\n<root id=\"1\"><item>t</item></root>\n",
+        );
+        assert!(has(&xml, "<!-- c -->", "comment"), "{xml:?}");
+        assert!(has(&xml, "root", "tag"), "{xml:?}");
+        assert!(has(&xml, "id", "property"), "{xml:?}");
+
+        let sh = spans_of(
+            Language::Shell,
+            "#!/bin/bash\n# c\nif [ -f \"$1\" ]; then\n  echo \"ok $HOME\"\nfi\n",
+        );
+        assert!(has(&sh, "# c", "comment"), "{sh:?}");
+        assert!(has(&sh, "if", "keyword"), "{sh:?}");
+        assert!(has(&sh, "echo", "function"), "{sh:?}");
+    }
+
+    #[test]
+    fn markdown_suit_les_modifications() {
+        let mut buf = Buffer::from_text("# A\n\ntexte\n");
+        buf.track_edits(true);
+        let mut h = Highlighter::new(Language::Markdown).unwrap();
+        h.update(buf.rope(), &[]);
+        let at = buf.len_chars();
+        buf.insert(at, "et `code`\n");
+        let edits = buf.take_edits();
+        h.update(buf.rope(), &edits);
+        let t = buf.rope().to_string();
+        let s: Vec<_> = h
+            .highlights(buf.rope(), 0..t.len())
+            .iter()
+            .map(|s| (t[s.start..s.end].to_owned(), kind_name(s.kind)))
+            .collect();
+        assert!(has(&s, "code", "string"), "{s:?}");
+        assert!(has(&s, "A", "function"), "{s:?}");
+    }
+
+    /// Plages `<script>` / `<style>` connues du highlighter, `(début, fin)`.
+    type Spans = Vec<(usize, usize)>;
+
+    fn blocks_of(h: &Highlighter) -> (Spans, Spans) {
+        let scan = h.embedded.as_ref().and_then(|e| e.scan.as_ref());
+        let list = |f: fn(&Scan) -> &Vec<Block>| {
+            scan.map(|s| f(s).iter().map(|b| (b.start, b.end)).collect())
+                .unwrap_or_default()
+        };
+        (list(|s| &s.js), list(|s| &s.css))
+    }
+
+    /// Le scan incrémental donne toujours les mêmes plages qu'un scan complet, quelles que soient
+    /// les modifications (balises ouvertes, fermées, collées, supprimées).
+    #[test]
+    fn le_scan_incremental_vaut_le_scan_complet() {
+        let pool = [
+            "<script>",
+            "</script>",
+            "<style>",
+            "</style>",
+            "x",
+            "<",
+            ">",
+            "/",
+            "\n",
+            "var a = 1;",
+            "a { color: red }",
+            "<p>",
+            "</p>",
+            "<?php $a; ?>",
+            "\"",
+            "<!--",
+            "-->",
+            "  ",
+            "<script>let b;</script>",
+            "<style>p{}</style>",
+        ];
+        for language in [Language::Html, Language::Php] {
+            let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+            let mut rnd = |n: usize| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((seed >> 33) as usize) % n.max(1)
+            };
+            let mut buf = Buffer::from_text(
+                "<p>a</p>\n<script>var z = 1;</script>\n<style>b { margin: 0 }</style>\n<p>c</p>\n",
+            );
+            buf.track_edits(true);
+            let mut h = Highlighter::new(language).unwrap();
+            h.update(buf.rope(), &[]);
+            for step in 0..120 {
+                // un lot de 1 à 3 modifications, comme le ferait un collage ou un annuler groupé
+                for _ in 0..=rnd(3) {
+                    let len = buf.len_chars();
+                    if rnd(3) == 0 && len > 0 {
+                        let a = rnd(len);
+                        let b = (a + 1 + rnd(12)).min(len);
+                        buf.delete(a..b);
+                    } else {
+                        let at = rnd(len + 1);
+                        buf.insert(at, pool[rnd(pool.len())]);
+                    }
+                }
+                let edits = buf.take_edits();
+                h.update(buf.rope(), &edits);
+                let mut fresh = Highlighter::new(language).unwrap();
+                fresh.update(buf.rope(), &[]);
+                assert_eq!(
+                    blocks_of(&h),
+                    blocks_of(&fresh),
+                    "{language:?}, pas {step}, texte : {:?}",
+                    buf.rope().to_string()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn html_sans_script_ni_style_ne_cree_pas_de_couche() {
+        let mut h = Highlighter::new(Language::Html).unwrap();
+        h.update(&Rope::from_str("<p>juste du HTML</p>"), &[]);
+        let e = h.embedded.as_mut().unwrap();
+        assert!(e.js.is_none() && e.css.is_none());
+    }
+
+    /// Coût d'une modification dans un gros fichier HTML plein de `<script>` et de `<style>` :
+    /// `cargo test --release -p paulwrite-syntax --lib mesure_html -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure"]
+    fn mesure_html_integre() {
+        for kb in [50usize, 200, 1000] {
+            let mut text = String::new();
+            let mut i = 0;
+            while text.len() < kb * 1024 {
+                text.push_str(&format!(
+                    "<div class=\"c{i}\"><style>.c{i} {{ color: red; margin: {i}px }}</style>
+<script>const v{i} = [{i}, \"x\"]; function f{i}(a) {{ return a + {i}; }}</script></div>
+"
+                ));
+                i += 1;
+            }
+            let mut buf = Buffer::from_text(&text);
+            buf.track_edits(true);
+            let mut h = Highlighter::new(Language::Html).unwrap();
+            let t = std::time::Instant::now();
+            h.update(buf.rope(), &[]);
+            let full = t.elapsed();
+            let mut times = Vec::new();
+            for k in 0..20 {
+                let at = buf.len_chars() / 2;
+                buf.insert(at, if k % 2 == 0 { "x" } else { " " });
+                let edits = buf.take_edits();
+                let t = std::time::Instant::now();
+                h.update(buf.rope(), &edits);
+                let r = buf.len_bytes() / 2;
+                let _ = h.highlights(buf.rope(), r..r + 8000);
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            println!(
+                "HTML {kb} Ko : analyse complete {:.0} ms ; modification + fenetre : p50 {:.1} ms, max {:.1} ms",
+                full.as_secs_f64() * 1000.0,
+                times[times.len() / 2],
+                times[times.len() - 1]
+            );
+        }
     }
 
     /// Coût d'une modification dans un gros modèle PHP (HTML réanalysé en entier à chaque fois) :
