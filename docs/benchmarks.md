@@ -542,3 +542,20 @@ La copie de la surface entière (deux fois : décalage dans l'image en mémoire,
 fenêtre) est limitée par la bande passante mémoire : 33 Mo par copie en 4K. Pistes si cela devient
 un cas d'usage : défilement par le GPU (swap chain, voir `rendering.md`), ou ne déplacer que la
 zone visible utile. Aucune n'est entreprise sans votre avis.
+
+## Étape 1 du quotidien : rechargement, récents, zoom, remplacement dans le projet
+
+Mesuré en alternant la version d'avant (`76e2892`) et la version actuelle, fenêtre hors écran,
+binaires release compilés sur la même machine.
+
+| Mesure | Avant | Après | Objectif |
+|---|---|---|---|
+| Démarrage à froid, fenêtre visible (médiane de 21 lancements) | 76,2 ms | 74,9 ms | < 100 ms |
+| Frappe, événement → image (300 frappes, 5 séries) : p50 / p99 | 3,12 / 6,53 ms | 3,10 / 6,64 ms | p99 < 16 ms |
+| Défilement (600 images, 5 séries) : p50 / p99 | 1,06 / 3,13 ms | 1,08 / 3,04 ms | fluide |
+
+Rien n'a été ajouté au chemin de démarrage ni de frappe : la vérification des fichiers modifiés
+(`stat` par fichier ouvert) a lieu au retour sur la fenêtre et sur le worker ; les fichiers récents
+sont lus par le worker ; la police et la tabulation ne sont refaites que si les réglages diffèrent
+des valeurs par défaut ; le remplacement dans le projet tourne entièrement sur le worker.
+
