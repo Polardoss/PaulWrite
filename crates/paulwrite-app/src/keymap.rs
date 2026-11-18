@@ -75,7 +75,9 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             ("k", true) => Some(Command::DeleteLine),
             ("l", _) => Some(Command::SelectLine),
             // Ctrl+/ ; sur un clavier AZERTY la barre oblique est Maj+« : »
-            ("/", _) | (":", true) => Some(Command::ToggleComment),
+            // Ctrl+/ ou Ctrl+: (clavier AZERTY : la touche « : » sans Maj) ; avec Maj, commentaire de bloc
+            ("/" | ":", false) => Some(Command::ToggleComment),
+            ("/" | ":", true) => Some(Command::ToggleBlockComment),
             // zoom : Ctrl+= ou Ctrl++ (AZERTY : « = » ou Maj+« = »), Ctrl+-, Ctrl+0 (AZERTY : « à »)
             ("=" | "+", _) => Some(Command::ZoomIn),
             ("-", _) => Some(Command::ZoomOut),
@@ -417,8 +419,11 @@ mod tests {
         assert_eq!(command_for(&ch("d"), cs), Some(Command::DuplicateLine));
         assert_eq!(command_for(&ch("k"), cs), Some(Command::DeleteLine));
         assert_eq!(command_for(&ch("l"), c), Some(Command::SelectLine));
+        // Ctrl+/ et Ctrl+: commentent la ligne ; avec Maj, commentaire de bloc
         assert_eq!(command_for(&ch("/"), c), Some(Command::ToggleComment));
-        assert_eq!(command_for(&ch(":"), cs), Some(Command::ToggleComment));
+        assert_eq!(command_for(&ch(":"), c), Some(Command::ToggleComment));
+        assert_eq!(command_for(&ch("/"), cs), Some(Command::ToggleBlockComment));
+        assert_eq!(command_for(&ch(":"), cs), Some(Command::ToggleBlockComment));
         assert_eq!(
             command_for(&named(NamedKey::ArrowUp), cs),
             Some(Command::MoveLineUp)

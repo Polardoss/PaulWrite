@@ -96,6 +96,11 @@ fn menus() -> Vec<Menu> {
                     "Toggle Comment",
                     "Commenter / d\u{e9}commenter",
                 ),
+                Item(
+                    Command::ToggleBlockComment,
+                    "Toggle Block Comment",
+                    "Commentaire de bloc",
+                ),
                 Item(Command::Indent, "Indent", "Indenter"),
                 Item(Command::Unindent, "Unindent", "D\u{e9}sindenter"),
                 Sep,

@@ -41,7 +41,7 @@ pub struct CommentStyle {
 impl CommentStyle {
     pub const SLASHES: Self = Self {
         line: Some("//"),
-        block: None,
+        block: Some(("/*", "*/")),
     };
     pub const HASH: Self = Self {
         line: Some("#"),
@@ -49,7 +49,7 @@ impl CommentStyle {
     };
     pub const DASHES: Self = Self {
         line: Some("--"),
-        block: None,
+        block: Some(("/*", "*/")),
     };
     pub const HTML: Self = Self {
         line: None,
@@ -347,6 +347,139 @@ pub fn toggle_comment(doc: &mut Document, style: CommentStyle, now_ms: u64) -> b
     }
     let sels = mapped(doc, |pos| Document::map_position(&repl, pos));
     doc.apply_replacements(&repl, sels, EditKind::Other, now_ms)
+}
+
+/// Commentaire de bloc (`/* … */`, `<!-- … -->`) autour de chaque sélection ; sans sélection, autour
+/// du texte de la ligne du curseur. Si la sélection est déjà commentée (délimiteurs dedans, ou juste
+/// autour), on les retire. Un langage sans commentaire de bloc (`#`, TOML…) retombe sur le
+/// commentaire de ligne.
+pub fn toggle_block_comment(doc: &mut Document, style: CommentStyle, now_ms: u64) -> bool {
+    let Some((open, close)) = style.block else {
+        return toggle_comment(doc, style, now_ms);
+    };
+    let (open_len, close_len) = (open.chars().count(), close.chars().count());
+    let buf = doc.buffer();
+    let slice = |a: usize, b: usize| buf.slice(a..b).to_string();
+    let end_of_text = buf.len_chars();
+    let mut repl: Vec<Replacement> = Vec::new();
+    // pour chaque sélection : le contenu une fois (dé)commenté, dans le texte final (`None` : la
+    // sélection suit simplement le texte)
+    let mut content: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut shift: isize = 0; // décalage cumulé des remplacements des sélections précédentes
+    let at = |pos: usize, shift: isize| (pos as isize + shift) as usize;
+    for s in doc.selections() {
+        let caret = s.is_empty();
+        let (mut a, mut b) = (s.start(), s.end());
+        if caret {
+            let line = buf.char_to_line(a);
+            let text = line_string(buf, line);
+            if text.trim().is_empty() {
+                content.push(None);
+                continue;
+            }
+            let start = buf.line_start(line);
+            a = start + indent_chars(&text);
+            b = start + text.trim_end().chars().count();
+        }
+        let inner = slice(a, b);
+        let t = inner.trim();
+        let lead = inner.chars().take_while(|c| c.is_whitespace()).count();
+        let trail = inner
+            .chars()
+            .rev()
+            .take_while(|c| c.is_whitespace())
+            .count();
+        let (ta, tb) = (a + lead, b - trail);
+        // (début, fin) du contenu dans le texte d'avant, et ce qui est retiré / ajouté
+        let removed: Vec<(usize, usize)>;
+        let result: (usize, usize);
+        if t.chars().count() >= open_len + close_len && t.starts_with(open) && t.ends_with(close) {
+            // les délimiteurs sont dans la sélection : on les retire (avec une espace de chaque côté)
+            let after_open = ta + open_len;
+            let before_close = tb - close_len;
+            let gap =
+                usize::from(after_open < before_close && slice(after_open, after_open + 1) == " ");
+            let gap_end = usize::from(
+                before_close > after_open + gap && slice(before_close - 1, before_close) == " ",
+            );
+            removed = vec![(ta, after_open + gap), (before_close - gap_end, tb)];
+            result = (after_open + gap, before_close - gap_end);
+        } else {
+            // les délimiteurs sont juste autour de la sélection ?
+            let before = [
+                slice(a.saturating_sub(open_len), a),
+                slice(a.saturating_sub(open_len + 1), a),
+            ];
+            let after = [
+                slice(b, (b + close_len).min(end_of_text)),
+                slice(b, (b + close_len + 1).min(end_of_text)),
+            ];
+            let open_at = if before[0] == open {
+                Some(a - open_len)
+            } else if before[1] == format!("{open} ") {
+                Some(a - open_len - 1)
+            } else {
+                None
+            };
+            let close_to = if after[0] == close {
+                Some(b + close_len)
+            } else if after[1] == format!(" {close}") {
+                Some(b + close_len + 1)
+            } else {
+                None
+            };
+            if let (Some(o), Some(c)) = (open_at, close_to) {
+                removed = vec![(o, a), (b, c)];
+                result = (a, b);
+            } else {
+                // on commente : le contenu est la sélection, décalée par le délimiteur ouvrant
+                repl.push((a, a, format!("{open} ")));
+                repl.push((b, b, format!(" {close}")));
+                let added = (open_len + 1 + close_len + 1) as isize;
+                content.push(if caret {
+                    None
+                } else {
+                    Some((at(a + open_len + 1, shift), at(b + open_len + 1, shift)))
+                });
+                shift += added;
+                continue;
+            }
+        }
+        let gone: usize = removed.iter().map(|(x, y)| y - x).sum();
+        // le contenu garde sa place, moins ce qui est retiré avant lui
+        let new_start = at(result.0, shift) - (removed[0].1 - removed[0].0);
+        content.push(if caret {
+            None
+        } else {
+            Some((new_start, new_start + (result.1 - result.0)))
+        });
+        for (x, y) in removed {
+            repl.push((x, y, String::new()));
+        }
+        shift -= gone as isize;
+    }
+    if repl.is_empty() {
+        return false;
+    }
+    let primary = doc.selections().primary_index();
+    let sels: Vec<Selection> = doc
+        .selections()
+        .iter()
+        .zip(&content)
+        .map(|(s, c)| match c {
+            Some((x, y)) => Selection::new(*x, *y),
+            None => Selection::new(
+                Document::map_position(&repl, s.anchor),
+                Document::map_position(&repl, s.head),
+            ),
+        })
+        .collect();
+    doc.apply_replacements(
+        &repl,
+        SelectionSet::from_vec(sels, primary),
+        EditKind::Other,
+        now_ms,
+    )
 }
 
 // --- Indentation ---------------------------------------------------------------------------------
@@ -743,6 +876,54 @@ mod tests {
         let mut d = doc("// a\nb\n", &[(0, 6)]);
         toggle_comment(&mut d, CommentStyle::SLASHES, 0);
         assert_eq!(text(&d), "// // a\n// b\n");
+    }
+
+    #[test]
+    fn commentaire_de_bloc_autour_de_la_selection() {
+        // PHP, JavaScript, Rust… : /* … */
+        let mut d = doc("$a = f($x, $y);\n", &[(5, 14)]);
+        assert!(toggle_block_comment(&mut d, CommentStyle::SLASHES, 0));
+        assert_eq!(text(&d), "$a = /* f($x, $y) */;\n");
+        // la sélection suit le texte : on décommente (délimiteurs juste autour)
+        assert!(toggle_block_comment(&mut d, CommentStyle::SLASHES, 1));
+        assert_eq!(text(&d), "$a = f($x, $y);\n");
+        // sélection qui contient les délimiteurs
+        let mut d = doc("a /* b */ c\n", &[(2, 9)]);
+        toggle_block_comment(&mut d, CommentStyle::SLASHES, 0);
+        assert_eq!(text(&d), "a b c\n");
+        // délimiteurs collés, sans espace
+        let mut d = doc("a /*b*/ c\n", &[(2, 7)]);
+        toggle_block_comment(&mut d, CommentStyle::SLASHES, 0);
+        assert_eq!(text(&d), "a b c\n");
+        // plusieurs lignes dans un seul commentaire
+        let mut d = doc("a();\nb();\n", &[(0, 9)]);
+        toggle_block_comment(&mut d, CommentStyle::SLASHES, 0);
+        assert_eq!(text(&d), "/* a();\nb(); */\n");
+    }
+
+    #[test]
+    fn commentaire_de_bloc_sans_selection_et_cas_limites() {
+        // sans sélection : le texte de la ligne, indentation conservée
+        let mut d = doc("    x = 1;\n", &[(6, 6)]);
+        assert!(toggle_block_comment(&mut d, CommentStyle::SLASHES, 0));
+        assert_eq!(text(&d), "    /* x = 1; */\n");
+        // ligne vide : rien à faire
+        let mut d = doc("\n", &[(0, 0)]);
+        assert!(!toggle_block_comment(&mut d, CommentStyle::SLASHES, 0));
+        // HTML : <!-- -->
+        let mut d = doc("<p>x</p>\n", &[(0, 0)]);
+        toggle_block_comment(&mut d, CommentStyle::HTML, 0);
+        assert_eq!(text(&d), "<!-- <p>x</p> -->\n");
+        // un langage sans commentaire de bloc retombe sur le commentaire de ligne
+        let mut d = doc("a\n", &[(0, 0)]);
+        toggle_block_comment(&mut d, CommentStyle::HASH, 0);
+        assert_eq!(text(&d), "# a\n");
+        // plusieurs curseurs : chacun sa ligne, en un seul pas d'annulation
+        let mut d = doc("a\nb\n", &[(0, 0), (2, 2)]);
+        toggle_block_comment(&mut d, CommentStyle::SLASHES, 0);
+        assert_eq!(text(&d), "/* a */\n/* b */\n");
+        assert!(d.undo());
+        assert_eq!(text(&d), "a\nb\n");
     }
 
     #[test]

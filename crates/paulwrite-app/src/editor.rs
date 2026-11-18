@@ -839,6 +839,10 @@ impl Editor {
                 editing::toggle_comment(&mut self.doc, self.comment, now_ms);
                 self.ensure_caret_visible();
             }
+            Command::ToggleBlockComment => {
+                editing::toggle_block_comment(&mut self.doc, self.comment, now_ms);
+                self.ensure_caret_visible();
+            }
             Command::Indent => {
                 editing::indent_lines(&mut self.doc, now_ms);
                 self.ensure_caret_visible();

@@ -94,6 +94,8 @@ pub enum Command {
     MoveLineDown,
     /// Commente ou décommente les lignes (selon le langage).
     ToggleComment,
+    /// Commentaire de bloc (`/* … */`) autour de la sélection ou de la ligne.
+    ToggleBlockComment,
     /// Indente / désindente les lignes touchées par la sélection.
     Indent,
     Unindent,
@@ -204,6 +206,7 @@ impl Command {
             Command::MoveLineUp => "edit.move_line_up",
             Command::MoveLineDown => "edit.move_line_down",
             Command::ToggleComment => "edit.toggle_comment",
+            Command::ToggleBlockComment => "edit.toggle_block_comment",
             Command::Indent => "edit.indent",
             Command::Unindent => "edit.unindent",
             Command::SelectLine => "select.line",
@@ -287,6 +290,7 @@ impl Command {
             Command::MoveLineUp,
             Command::MoveLineDown,
             Command::ToggleComment,
+            Command::ToggleBlockComment,
             Command::Indent,
             Command::Unindent,
             Command::SelectLine,
@@ -365,6 +369,7 @@ impl Command {
             Command::MoveLineUp => "Édition : déplacer la ligne vers le haut",
             Command::MoveLineDown => "Édition : déplacer la ligne vers le bas",
             Command::ToggleComment => "Édition : commenter / décommenter",
+            Command::ToggleBlockComment => "Édition : commentaire de bloc",
             Command::Indent => "Édition : indenter",
             Command::Unindent => "Édition : désindenter",
             Command::SelectLine => "Sélection : la ligne",
@@ -451,6 +456,7 @@ impl Command {
             Command::MoveLineUp => "Edit: move line up",
             Command::MoveLineDown => "Edit: move line down",
             Command::ToggleComment => "Edit: toggle comment",
+            Command::ToggleBlockComment => "Edit: toggle block comment",
             Command::Indent => "Edit: indent",
             Command::Unindent => "Edit: unindent",
             Command::SelectLine => "Selection: line",
