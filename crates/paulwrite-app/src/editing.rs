@@ -32,6 +32,10 @@ impl CommentStyle {
         line: Some("#"),
         block: None,
     };
+    pub const DASHES: Self = Self {
+        line: Some("--"),
+        block: None,
+    };
     pub const HTML: Self = Self {
         line: None,
         block: Some(("<!--", "-->")),
@@ -50,6 +54,7 @@ pub fn comment_style(language: Option<paulwrite_syntax::Language>) -> CommentSty
         Some(L::Rust | L::JavaScript | L::Php) => CommentStyle::SLASHES,
         Some(L::Python | L::Toml | L::Yaml | L::Shell) | None => CommentStyle::HASH,
         Some(L::Html | L::Xml | L::Markdown) => CommentStyle::HTML,
+        Some(L::Sql) => CommentStyle::DASHES,
         Some(L::Css) => CommentStyle::CSS,
         Some(L::Json) => CommentStyle::default(),
     }

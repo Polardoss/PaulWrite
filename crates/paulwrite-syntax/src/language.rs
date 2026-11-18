@@ -20,6 +20,7 @@ pub enum Language {
     Xml,
     /// Scripts shell (`sh`, `bash`, `zsh`).
     Shell,
+    Sql,
 }
 
 /// Les clés d'un mapping YAML, à placer avant les motifs génériques de la requête de coloration.
@@ -28,6 +29,13 @@ const YAML_KEYS: &str = r#"
 (block_mapping_pair key: (flow_node (plain_scalar (string_scalar) @property)))
 (flow_mapping (_ key: (flow_node [(double_quote_scalar) (single_quote_scalar)] @property)))
 (flow_mapping (_ key: (flow_node (plain_scalar (string_scalar) @property))))
+"#;
+
+/// Les nombres SQL (la requête de base colore tout littéral comme une chaîne avant de reconnaître
+/// les nombres).
+const SQL_NUMBERS: &str = r#"
+((literal) @number (#match? @number "^[-+]?[0-9]+$"))
+((literal) @number (#match? @number "^[-+]?[0-9]*\\.[0-9]*$"))
 "#;
 
 impl Language {
@@ -47,11 +55,12 @@ impl Language {
             Language::Yaml => "YAML",
             Language::Xml => "XML",
             Language::Shell => "Shell",
+            Language::Sql => "SQL",
         }
     }
 
     /// Tous les langages.
-    pub const ALL: [Language; 12] = [
+    pub const ALL: [Language; 13] = [
         Language::Rust,
         Language::Json,
         Language::Toml,
@@ -64,6 +73,7 @@ impl Language {
         Language::Yaml,
         Language::Xml,
         Language::Shell,
+        Language::Sql,
     ];
 
     /// Langage d'après l'extension du fichier (insensible à la casse).
@@ -84,6 +94,7 @@ impl Language {
             "xml" | "xsd" | "xsl" | "xslt" | "svg" | "plist" | "csproj" | "vbproj" | "props"
             | "targets" | "xaml" | "rss" | "atom" => Language::Xml,
             "sh" | "bash" | "zsh" | "ksh" => Language::Shell,
+            "sql" => Language::Sql,
             _ => return None,
         })
     }
@@ -104,6 +115,7 @@ impl Language {
             Language::Yaml => "YAML",
             Language::Xml => "XML",
             Language::Shell => "Shell",
+            Language::Sql => "SQL",
         }
     }
 
@@ -123,6 +135,7 @@ impl Language {
             Language::Yaml => "yaml",
             Language::Xml => "xml",
             Language::Shell => "shellscript",
+            Language::Sql => "sql",
         }
     }
 
@@ -140,14 +153,17 @@ impl Language {
             Language::Yaml => tree_sitter_yaml::LANGUAGE.into(),
             Language::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
             Language::Shell => tree_sitter_bash::LANGUAGE.into(),
+            Language::Sql => tree_sitter_sequel::LANGUAGE.into(),
         }
     }
 
-    /// Requête de coloration. Celle de YAML est écrite pour un moteur où le dernier motif
-    /// l'emporte ; ici c'est le premier : les clés (`@property`) sont donc placées avant le reste.
+    /// Requête de coloration. Celles de YAML et de SQL sont écrites pour un moteur où le dernier
+    /// motif l'emporte ; ici c'est le premier : les motifs précis (clés, nombres) sont donc placés
+    /// avant le reste.
     pub(crate) fn highlights_query(self) -> std::borrow::Cow<'static, str> {
         match self {
             Language::Yaml => [YAML_KEYS, self.base_query()].join("\n").into(),
+            Language::Sql => [SQL_NUMBERS, self.base_query()].join("\n").into(),
             _ => self.base_query().into(),
         }
     }
@@ -166,6 +182,7 @@ impl Language {
             Language::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
             Language::Xml => tree_sitter_xml::XML_HIGHLIGHT_QUERY,
             Language::Shell => tree_sitter_bash::HIGHLIGHT_QUERY,
+            Language::Sql => tree_sitter_sequel::HIGHLIGHTS_QUERY,
         }
     }
 }
@@ -187,6 +204,7 @@ mod tests {
         assert_eq!(l("README.md"), Some(Language::Markdown));
         assert_eq!(l("ci.YML"), Some(Language::Yaml));
         assert_eq!(l("logo.svg"), Some(Language::Xml));
+        assert_eq!(l("schema.SQL"), Some(Language::Sql));
         assert_eq!(l("deploy.sh"), Some(Language::Shell));
         assert_eq!(l("notes.txt"), None);
         assert_eq!(l("Makefile"), None);

@@ -29,6 +29,7 @@ tree-sitter-md = "0.5"
 tree-sitter-yaml = "0.7"
 tree-sitter-xml = "0.7"
 tree-sitter-bash = "0.25"
+tree-sitter-sequel = "0.3"
 # PHP et modèles .phtml (les parties HTML sont colorées par la grammaire HTML : voir highlight.rs).
 tree-sitter-php = "0.25"
 

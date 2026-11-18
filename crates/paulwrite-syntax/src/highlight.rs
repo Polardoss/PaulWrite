@@ -1070,6 +1070,15 @@ mod tests {
         assert!(has(&xml, "root", "tag"), "{xml:?}");
         assert!(has(&xml, "id", "property"), "{xml:?}");
 
+        let sql = spans_of(
+            Language::Sql,
+            "-- note\nSELECT id, name FROM users WHERE id = 42 AND name = 'x';\n",
+        );
+        assert!(has(&sql, "-- note", "comment"), "{sql:?}");
+        assert!(has(&sql, "SELECT", "keyword"), "{sql:?}");
+        assert!(has(&sql, "42", "number"), "{sql:?}");
+        assert!(has(&sql, "'x'", "string"), "{sql:?}");
+
         let sh = spans_of(
             Language::Shell,
             "#!/bin/bash\n# c\nif [ -f \"$1\" ]; then\n  echo \"ok $HOME\"\nfi\n",
@@ -1176,6 +1185,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore = "mesure"]
+    fn mesure_sql() {
+        let mut text = String::new();
+        while text.len() < 20_000 {
+            text.push_str("-- requete\nSELECT u.id, u.name FROM users u JOIN orders o ON o.uid = u.id WHERE u.id = 42 AND o.total > 10.5 ORDER BY u.name;\n");
+        }
+        let t = std::time::Instant::now();
+        let mut h = Highlighter::new(Language::Sql).unwrap();
+        let create = t.elapsed();
+        let rope = Rope::from_str(&text);
+        let t = std::time::Instant::now();
+        h.update(&rope, &[]);
+        let parse = t.elapsed();
+        let t = std::time::Instant::now();
+        let n = h.highlights(&rope, 0..text.len().min(8000)).len();
+        println!(
+            "SQL : creation {:.1} ms, analyse 20 Ko {:.1} ms, fenetre {:.1} ms ({n} plages)",
+            create.as_secs_f64() * 1000.0,
+            parse.as_secs_f64() * 1000.0,
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+        let t = std::time::Instant::now();
+        let _ = Highlighter::new(Language::Rust).unwrap();
+        println!(
+            "Rust : creation {:.1} ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     #[test]

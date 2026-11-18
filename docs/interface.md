@@ -108,13 +108,16 @@ Au-delà de `highlight_max_bytes` (1 Mo), pas de couleurs.
   Mesuré (worker, fichier HTML de 50 / 200 / 1000 Ko, un `<style>` et un `<script>` toutes les deux
   lignes, ce qui est extrême) : modification + fenêtre colorée en **4 / 13 / 85 ms**.
 - **Nouveaux langages** : Markdown (`.md`, `.markdown` : titres, listes, code, et en seconde couche
-  emphase, liens et code en ligne), YAML (`.yaml`, `.yml`), XML (`.xml`, `.xsd`, `.xsl`, `.svg`,
+  emphase, liens et code en ligne), YAML (`.yaml`, `.yml`), SQL, XML (`.xml`, `.xsd`, `.xsl`, `.svg`,
   `.csproj`, `.xaml`, `.rss`…) et scripts shell (`.sh`, `.bash`, `.zsh`). Commentaires :
   `#` pour YAML et shell, `<!-- -->` pour XML et Markdown.
-- **Non retenu : SQL.** La seule grammaire disponible (`tree-sitter-sequel`) ajoute **15 Mo** à
-  l'exécutable (les quatre autres grammaires : 2,3 Mo en tout) : refusé au nom de la règle n°7.
-  Options : colorateur de mots-clés écrit à la main, ou grammaire en option de compilation.
-- Exécutable : 7,5 → 9,8 Mo. Démarrage inchangé (médiane ≈ 90 ms avant et après).
+- **SQL** (`.sql`) : la grammaire (`tree-sitter-sequel`) est la plus lourde de toutes (32 966 états,
+  contre 3 825 pour Rust) et ajoute **15 Mo** à l'exécutable. Gardée, parce que le poids sur disque ne
+  coûte rien au démarrage : mesuré en alternant les deux exécutables (12 mesures chacun), la fenêtre
+  est visible en **83 ms (médiane) avec comme sans SQL**. Le coût est à l'ouverture d'un `.sql`
+  (sur le worker, sans bloquer l'interface) : préparation de la grammaire 45 ms (20 ms pour Rust) puis
+  analyse 18 ms pour 20 Ko. Commentaires `--`.
+- Exécutable : 7,5 → 23 Mo (dont 15 pour SQL). Démarrage inchangé (voir ci-dessus).
 
 ## Retour à la ligne et repli (étape 6)
 
