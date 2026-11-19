@@ -378,7 +378,7 @@ impl SoftRenderer {
                 ((40.0 + chars * 6.6) * s).clamp(170.0 * s, 320.0 * s)
             })
             .collect();
-        let avail = (self.size.0 as f32 - self.tabs_left() - self.tabs_right()).max(1.0);
+        let avail = (self.view_w() as f32 - self.tabs_left() - self.tabs_right()).max(1.0);
         let total: f32 = wants.iter().sum();
         let k = if total > avail { avail / total } else { 1.0 };
         let mut x = self.tabs_left();
@@ -415,9 +415,9 @@ impl SoftRenderer {
             return None;
         }
         let left = self.tabs_left();
-        let w = self.size.0 as f32;
+        let w = self.view_w() as f32;
         let origin = self.metrics.sidebar as f32;
-        if x < origin {
+        if x < origin || x >= w {
             return None;
         }
         if x < left {
@@ -930,7 +930,7 @@ impl SoftRenderer {
         if self.metrics.minimap == 0 {
             return;
         }
-        let (w, top) = (self.size.0 as i32, self.metrics.top);
+        let (stride, w, top) = (self.size.0 as usize, self.view_w(), self.metrics.top);
         let bottom = self.size.1 as i32 - self.metrics.status_bar;
         let x_start = w - self.metrics.minimap;
         let (xa, xb) = (band.left.max(x_start), band.right.min(w));
@@ -964,7 +964,7 @@ impl SoftRenderer {
                 // rognée à la fenêtre par l'appelant) ; la DIB est vivante tant que `self` l'est.
                 let row = unsafe {
                     std::slice::from_raw_parts_mut(
-                        self.bits.add(y as usize * w as usize + a as usize),
+                        self.bits.add(y as usize * stride + a as usize),
                         (b - a) as usize,
                     )
                 };
@@ -997,6 +997,60 @@ impl SoftRenderer {
         }
     }
 
+    /// Recopie dans la DIB la partie de `band` qui recouvre le second volet (encart de droite,
+    /// entre le haut de la fenêtre et la barre d'état), à partir de l'image de `pane`. Une ligne
+    /// de séparation est tracée à son bord gauche. Le panneau flottant, déjà dessiné par Direct2D,
+    /// est préservé (comme pour [`blit_strip`](Self::blit_strip)).
+    pub(super) fn blit_pane(&mut self, band: &Band, pane: &SoftRenderer) {
+        let (stride, vw) = (self.size.0 as usize, self.view_w());
+        let bottom = self.size.1 as i32 - self.metrics.status_bar;
+        let (xa, xb) = (band.left.max(vw), band.right.min(self.size.0 as i32));
+        let (ya, yb) = (band.top.max(0), band.bottom.min(bottom));
+        if self.inset <= 0 || xa >= xb || ya >= yb {
+            return;
+        }
+        let pane_w = pane.size.0 as i32;
+        let bg = argb(self.colors.background);
+        let divider = blend(bg, argb(self.colors.text), 0.16);
+        let panel = self.panel_geometry().map(|(rect, _)| rect);
+        for y in ya..yb {
+            let mut segments = [(xa, xb), (0, 0)];
+            if let Some(p) = panel {
+                if y >= p.top && y < p.bottom && p.left < xb && p.right > xa {
+                    segments = [(xa, p.left.max(xa)), (p.right.min(xb), xb)];
+                }
+            }
+            for (a, b) in segments {
+                if a >= b {
+                    continue;
+                }
+                // SAFETY: `y < hauteur` et `a..b` est dans la largeur de la DIB (`band` est rognée
+                // à la fenêtre) ; la DIB est vivante tant que `self` l'est.
+                let row = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        self.bits.add(y as usize * stride + a as usize),
+                        (b - a) as usize,
+                    )
+                };
+                // image du volet : colonne `x - vw` ; au-delà de sa largeur (encart plus large
+                // que l'image), le fond
+                let src_row = y as usize * pane.size.0 as usize;
+                let copy_end = b.min(vw + pane_w).max(a);
+                if copy_end > a && (y as u32) < pane.size.1 {
+                    let from = src_row + (a - vw) as usize;
+                    let n = (copy_end - a) as usize;
+                    row[..n].copy_from_slice(&pane.pixels()[from..from + n]);
+                } else {
+                    row[..(copy_end - a) as usize].fill(bg);
+                }
+                row[(copy_end - a) as usize..].fill(bg);
+                if a <= vw && b > vw {
+                    row[(vw - a) as usize] = divider;
+                }
+            }
+        }
+    }
+
     /// Ordonnée et hauteur du curseur de la barre de défilement. Le document peut défiler
     /// jusqu'à sa dernière ligne en haut de la fenêtre : la plage est `total - 1 + visible`.
     fn thumb(&self, top: i32, bottom: i32) -> Option<(f32, f32)> {
@@ -1016,10 +1070,7 @@ impl SoftRenderer {
     #[must_use]
     pub fn strip_hit(&self, x: f32, y: f32) -> Option<StripHit> {
         let sc = self.status.scroll?;
-        let (ex1, w) = (
-            self.size.0 as i32 - self.metrics.minimap,
-            self.size.0 as f32,
-        );
+        let (ex1, w) = (self.view_w() - self.metrics.minimap, self.view_w() as f32);
         let top = self.metrics.top as f32;
         let bottom = (self.size.1 as i32 - self.metrics.status_bar) as f32;
         if self.metrics.minimap == 0 || x < ex1 as f32 || y < top || y >= bottom {

@@ -506,6 +506,12 @@ pub struct SoftRenderer {
     hover_sidebar: Option<usize>,
     /// Largeur de la barre latérale, en pixels logiques (réglable à la souris).
     sidebar_w: f32,
+    /// Largeur (pixels) réservée à droite pour un second volet d'édition, dessiné par un autre
+    /// moteur ([`SoftRenderer::new_pane`]) et recopié ici ; 0 : pas de second volet.
+    inset: i32,
+    /// Moteur de volet ([`SoftRenderer::new_pane`]) : il ne présente jamais vers la fenêtre, le
+    /// moteur principal recopie ses bandes et sa zone défilée.
+    is_pane: bool,
     // Barre d'onglets
     tabs: Vec<TabEntry>,
     tabs_clean: bool,
@@ -620,6 +626,8 @@ impl SoftRenderer {
                 hover_tab: None,
                 hover_sidebar: None,
                 sidebar_w: SIDEBAR_DEFAULT_W,
+                inset: 0,
+                is_pane: false,
                 tabs: Vec::new(),
                 tabs_clean: false,
                 status: chrome::Status::default(),
@@ -633,6 +641,41 @@ impl SoftRenderer {
                 drawn_overlay: None,
             })
         }
+    }
+
+    /// Crée un moteur de **volet** : une zone d'édition seule (onglets, gouttière, rangées,
+    /// minimap), sans barre latérale ni barre d'état. Il dessine dans sa propre image, que le
+    /// moteur principal recopie ([`SoftRenderer::set_inset`], [`SoftRenderer::draw_with`]).
+    ///
+    /// # Errors
+    /// Échec de création des objets Direct2D / DirectWrite / GDI.
+    pub fn new_pane(scale: f32, size: (u32, u32), colors: Colors) -> Result<Self> {
+        let mut r = Self::new(scale, size, colors)?;
+        r.metrics.status_bar = 0;
+        r.is_pane = true;
+        Ok(r)
+    }
+
+    /// Réserve `px` pixels à droite pour un second volet (0 : le retire). Redessine tout.
+    pub fn set_inset(&mut self, px: i32) {
+        let px = px.clamp(0, self.size.0 as i32);
+        if px != self.inset {
+            self.inset = px;
+            self.valid = false;
+            self.minimap = chrome::MinimapState::default();
+            self.refresh_metrics();
+        }
+    }
+
+    /// Largeur du second volet réservé à droite (0 : aucun).
+    #[must_use]
+    pub fn inset(&self) -> i32 {
+        self.inset
+    }
+
+    /// Largeur de la zone gérée par ce moteur : la fenêtre moins le second volet.
+    fn view_w(&self) -> i32 {
+        self.size.0 as i32 - self.inset
     }
 
     /// Dimensions d'un caractère à l'échelle courante.
@@ -849,7 +892,7 @@ impl SoftRenderer {
     /// absente dans une fenêtre étroite.
     fn minimap_width(&self) -> f32 {
         let s = self.scale;
-        let w = self.size.0 as f32 - self.metrics.sidebar as f32;
+        let w = self.view_w() as f32 - self.metrics.sidebar as f32;
         if w < 560.0 * s {
             0.0
         } else {
@@ -870,10 +913,7 @@ impl SoftRenderer {
     /// Abscisses `[gauche, droite)` de la zone des rangées (entre le bord gauche et la zone de
     /// droite).
     fn editor_x(&self) -> (i32, i32) {
-        (
-            self.metrics.sidebar,
-            self.size.0 as i32 - self.metrics.minimap,
-        )
+        (self.metrics.sidebar, self.view_w() - self.metrics.minimap)
     }
 
     /// Redessine ce qui a changé. `scrolled_by` : de combien de rangées le contenu a défilé depuis
@@ -887,7 +927,28 @@ impl SoftRenderer {
     /// # Errors
     /// Échec Direct2D / DirectWrite / GDI.
     pub fn draw(&mut self, src: &dyn RowSource, scrolled_by: isize) -> Result<&[Band]> {
+        self.draw_with(src, scrolled_by, None)
+    }
+
+    /// Comme [`draw`](Self::draw), avec le second volet : `pane` est le moteur
+    /// ([`new_pane`](Self::new_pane)) qui a **déjà dessiné** son image pour cette image ; ses
+    /// bandes redessinées sont recopiées ici dans l'encart réservé à droite.
+    ///
+    /// # Errors
+    /// Échec Direct2D / DirectWrite / GDI.
+    pub fn draw_with(
+        &mut self,
+        src: &dyn RowSource,
+        scrolled_by: isize,
+        pane: Option<&SoftRenderer>,
+    ) -> Result<&[Band]> {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let vw = self.view_w();
+        let pane = pane.filter(|_| self.inset > 0);
+        if self.is_pane {
+            // personne ne présente ce moteur : la zone défilée ne vaut que pour cette image
+            self.shift_region = None;
+        }
         let lh = self.metrics.line_height.max(1);
         let top = self.metrics.top;
         let rows = src.len().min(self.metrics.rows_for(self.size.1));
@@ -925,10 +986,22 @@ impl SoftRenderer {
             if !self.tabs_clean && top > 0 {
                 self.bands.push(Band {
                     left: ex0,
-                    right: w,
+                    right: vw,
                     top: 0,
                     bottom: top,
                 });
+            }
+            if let Some(p) = pane {
+                // ce que le second volet a redessiné, en coordonnées de la fenêtre
+                // les bandes redessinées, plus la zone dont les pixels ont été déplacés
+                for b in p.bands().iter().chain(p.shift_region.as_ref()) {
+                    self.bands.push(Band {
+                        left: b.left + vw,
+                        right: b.right + vw,
+                        top: b.top,
+                        bottom: b.bottom,
+                    });
+                }
             }
             if !self.sidebar_clean && ex0 > 0 {
                 self.bands.push(Band {
@@ -955,10 +1028,10 @@ impl SoftRenderer {
                     bottom: (top + r as i32 * lh).min(h),
                 });
             }
-            if self.strip_dirty && ex1 < w {
+            if self.strip_dirty && ex1 < vw {
                 self.bands.push(Band {
                     left: ex1,
-                    right: w,
+                    right: vw,
                     top,
                     bottom: status_top,
                 });
@@ -974,7 +1047,7 @@ impl SoftRenderer {
         }
 
         let bands = std::mem::take(&mut self.bands);
-        let result = self.paint_bands(&bands, src, rows);
+        let result = self.paint_bands(&bands, src, rows, pane);
         self.bands = bands;
         result?;
         self.tabs_clean = true;
@@ -1047,8 +1120,15 @@ impl SoftRenderer {
 
     /// Redessine chaque bande **entièrement** (toutes les couches qui la recouvrent) : une bande
     /// ne dépend que de l'état courant, jamais de ce qui était dessiné avant.
-    fn paint_bands(&mut self, bands: &[Band], src: &dyn RowSource, rows: usize) -> Result<()> {
+    fn paint_bands(
+        &mut self,
+        bands: &[Band],
+        src: &dyn RowSource,
+        rows: usize,
+        pane: Option<&SoftRenderer>,
+    ) -> Result<()> {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let vw = self.view_w();
         let lh = self.metrics.line_height.max(1);
         let top = self.metrics.top;
         let pad = self.metrics.pad_x;
@@ -1066,8 +1146,14 @@ impl SoftRenderer {
             }
             // Bande entièrement dans la zone de droite, entre les onglets et la barre d'état :
             // copie de pixels seulement (pas de Direct2D).
-            if ex1 < w && b.left >= ex1 && b.top >= top && b.bottom <= status_top {
+            if ex1 < vw && b.left >= ex1 && b.right <= vw && b.top >= top && b.bottom <= status_top
+            {
                 self.blit_strip(&b);
+                continue;
+            }
+            // Bande entièrement dans le second volet : copie de son image.
+            if let (Some(p), true) = (pane, b.left >= vw && b.bottom <= status_top) {
+                self.blit_pane(&b, p);
                 continue;
             }
             // On ne lie à la cible Direct2D que la bande modifiée : `BindDC` et `EndDraw`
@@ -1095,7 +1181,7 @@ impl SoftRenderer {
                     &self.brushes[BR_BG],
                 );
                 if b.top < top && b.right > ex0 {
-                    self.paint_tabs(w)?;
+                    self.paint_tabs(vw)?;
                 }
                 if b.left < ex0 && b.top < status_top {
                     self.paint_sidebar(ex0, status_top)?;
@@ -1115,6 +1201,9 @@ impl SoftRenderer {
                 self.paint_overlay(&b)?;
                 self.rt.EndDraw(None, None)?;
                 self.blit_strip(&b);
+                if let Some(p) = pane {
+                    self.blit_pane(&b, p);
+                }
             }
         }
         Ok(())
@@ -1677,6 +1766,112 @@ mod tests {
                 "pixels différents à l'étape {step}"
             );
         }
+    }
+
+    /// Moteurs de test à deux volets : fenêtre de 900×300 dont l'encart de droite fait 420 px.
+    fn split_renderers() -> (SoftRenderer, SoftRenderer) {
+        let inset = 420;
+        let mut main = SoftRenderer::new(1.0, (900, 300), Colors::default()).expect("renderer");
+        main.set_inset(inset);
+        let visible = main.metrics().rows_for(300);
+        main.set_chrome(&chrome("Line 1, Column 1", 0, visible));
+        main.set_minimap(&Doc, 1).unwrap();
+        let mut pane = SoftRenderer::new_pane(
+            1.0,
+            (inset as u32, 300 - main.metrics().status_bar as u32),
+            Colors::default(),
+        )
+        .expect("pane");
+        let visible = pane.metrics().rows_for(pane.size().1);
+        pane.set_chrome(&chrome("", 0, visible));
+        pane.set_tabs(&[tab("autre.txt", false, true)]);
+        main.set_tabs(&[tab("un.txt", false, true)]);
+        (main, pane)
+    }
+
+    /// Le second volet est recopié tel quel (séparateur mis à part), les deux volets défilent et
+    /// changent sans se gêner, et le rendu par régions reste identique au redessin complet.
+    #[test]
+    fn deux_volets_regions_identiques_au_redessin_complet() {
+        let (mut inc, mut inc_pane) = split_renderers();
+        let (mut full, mut full_pane) = split_renderers();
+        let rows_main = inc.metrics().rows_for(300);
+        let rows_pane = inc_pane.metrics().rows_for(inc_pane.size().1);
+        let mut left = Rows::new(lines(10, rows_main), Some((2, 3)), None);
+        let mut right = Rows::new(lines(500, rows_pane), Some((1, 1)), None);
+        let mut rng = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        inc_pane.draw(&right, 0).unwrap();
+        inc.draw_with(&left, 0, Some(&inc_pane)).unwrap();
+        for step in 0..100 {
+            let mut scrolled = (0isize, 0isize);
+            match next() % 4 {
+                0 => {
+                    let r = (next() % rows_main as u64) as usize;
+                    left.texts[r].push_str("ab");
+                }
+                1 => {
+                    let r = (next() % rows_pane as u64) as usize;
+                    right.texts[r].push_str("cd");
+                }
+                2 => {
+                    let d = (next() % 3 + 1) as isize;
+                    right.set_texts(lines(500 + step * 3, rows_pane));
+                    scrolled.1 = d;
+                }
+                _ => left.set_caret(Some(((next() % rows_main as u64) as usize, 2))),
+            }
+            inc_pane.draw(&right, scrolled.1).unwrap();
+            inc.draw_with(&left, scrolled.0, Some(&inc_pane)).unwrap();
+            full_pane.invalidate();
+            full_pane.draw(&right, 0).unwrap();
+            full.invalidate();
+            full.draw_with(&left, 0, Some(&full_pane)).unwrap();
+            assert!(
+                inc.pixels() == full.pixels(),
+                "pixels différents à l'étape {step}"
+            );
+        }
+        // l'encart reproduit l'image du volet, sauf la ligne de séparation à son bord gauche
+        let (w, h) = (900usize, 300 - inc.metrics().status_bar as usize);
+        let vw = 900 - 420;
+        for y in 0..h {
+            for x in 1..420 {
+                assert_eq!(
+                    inc.pixels()[y * w + vw + x],
+                    inc_pane.pixels()[y * 420 + x],
+                    "pixel ({x}, {y}) du second volet"
+                );
+            }
+        }
+    }
+
+    /// Les clics et la géométrie du premier volet s'arrêtent au bord de l'encart.
+    #[test]
+    fn le_premier_volet_s_arrete_a_l_encart() {
+        let (main, pane) = split_renderers();
+        let vw = 900.0 - 420.0;
+        assert_eq!(main.inset(), 420);
+        assert_eq!(main.tab_button_at(vw - 8.0, 5.0), Some(TabButton::List));
+        assert_eq!(
+            main.tab_button_at(vw + 8.0, 5.0),
+            None,
+            "dans le second volet"
+        );
+        // le second volet a ses propres boutons, à son bord droit
+        let pw = pane.size().0 as f32;
+        assert_eq!(pane.tab_button_at(pw - 8.0, 5.0), Some(TabButton::List));
+        assert!(
+            main.text_cols()
+                < SoftRenderer::new(1.0, (900, 300), Colors::default())
+                    .unwrap()
+                    .text_cols()
+        );
     }
 
     #[test]
