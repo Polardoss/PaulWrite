@@ -62,6 +62,12 @@ impl RowSource for Demo {
                 5 => paulwrite_render::FoldMark::Open,
                 _ => paulwrite_render::FoldMark::None,
             },
+            change: match i {
+                0 | 1 => paulwrite_render::GitMark::Added,
+                3 => paulwrite_render::GitMark::Modified,
+                5 => paulwrite_render::GitMark::Deleted,
+                _ => paulwrite_render::GitMark::None,
+            },
         }
     }
 }

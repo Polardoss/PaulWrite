@@ -4,17 +4,19 @@
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use paulwrite_core::motion;
 use paulwrite_core::{
     Document, EditKind, Motion, Replacement, Selection, SelectionSet, TextChange, TextEdit,
 };
-use paulwrite_render::{FoldMark, MinimapSource, Row, RowSource, Scroll};
+use paulwrite_render::{FoldMark, GitMark, MinimapSource, Row, RowSource, Scroll};
 use paulwrite_syntax::{kind, Span};
 
 use crate::command::{Command, Effect, LspAction};
 use crate::editing::{self, CommentStyle};
 use crate::fold::{self, Folds};
+use crate::git::LineChanges;
 use crate::i18n::Lang;
 use crate::palette::PaletteMode;
 use crate::spans::SpanCache;
@@ -140,6 +142,8 @@ pub struct Editor {
     /// Coloration du document entier, pour la minimap (calculée par le worker au repos).
     overview: SpanCache,
     overview_version: u64,
+    /// Changements Git du fichier enregistré (marqueurs de la gouttière) ; `None` : inconnus.
+    changes: Option<Arc<LineChanges>>,
 }
 
 impl Default for Editor {
@@ -203,7 +207,32 @@ impl Editor {
             matches_revision: 0,
             overview: SpanCache::default(),
             overview_version: 0,
+            changes: None,
         }
+    }
+
+    /// Retient les changements Git du fichier enregistré. Renvoie `true` s'ils diffèrent des
+    /// précédents (la gouttière est à redessiner).
+    pub fn set_changes(&mut self, changes: Option<Arc<LineChanges>>) -> bool {
+        if self.changes == changes {
+            return false;
+        }
+        self.changes = changes;
+        true
+    }
+
+    /// Des changements Git sont connus (affichés ou non : voir [`Self::shows_changes`]).
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        self.changes.as_ref().is_some_and(|c| !c.is_empty())
+    }
+
+    /// Les marqueurs Git sont affichés : connus, et le texte est tel qu'enregistré (pendant la
+    /// frappe les numéros de ligne ne correspondent plus : les marqueurs s'effacent jusqu'au
+    /// prochain enregistrement).
+    #[must_use]
+    pub fn shows_changes(&self) -> bool {
+        self.has_changes() && !self.is_modified()
     }
 
     /// Remplace le document (fichier chargé). La vue repart du haut.
@@ -1442,7 +1471,10 @@ impl Editor {
     /// Les rangées préparées par [`build_view`](Self::build_view).
     #[must_use]
     pub fn view(&self) -> ViewRows<'_> {
-        ViewRows { editor: self }
+        ViewRows {
+            editor: self,
+            modified: self.is_modified(),
+        }
     }
 
     // --- Repli de code -----------------------------------------------------------------------
@@ -1676,6 +1708,8 @@ fn byte_of_utf16(text: &str, utf16: usize) -> usize {
 #[derive(Debug)]
 pub struct ViewRows<'a> {
     editor: &'a Editor,
+    /// Le tampon a des modifications non enregistrées (calculé une fois par image).
+    modified: bool,
 }
 
 impl RowSource for ViewRows<'_> {
@@ -1703,6 +1737,10 @@ impl RowSource for ViewRows<'_> {
             spans: &e.row_spans[index],
             squiggles: &e.row_squiggles[index],
             fold: info.fold,
+            change: match &e.changes {
+                Some(c) if real && !self.modified => c.of(info.line),
+                _ => GitMark::None,
+            },
         }
     }
 }

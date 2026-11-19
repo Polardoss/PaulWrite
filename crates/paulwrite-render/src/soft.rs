@@ -330,6 +330,9 @@ pub struct Row<'a> {
     pub current: bool,
     /// Flèche de repli de la gouttière.
     pub fold: FoldMark,
+    /// Changement Git de la ligne (barre à gauche de la gouttière) : `Added`, `Modified` ou
+    /// `Deleted` (suppression juste au-dessus de la ligne) ; `None` : rien.
+    pub change: GitMark,
 }
 
 /// Source des rangées visibles (évite d'allouer un tableau par image).
@@ -1540,6 +1543,7 @@ mod tests {
                     .iter()
                     .find(|(r, _)| *r == i)
                     .map_or(FoldMark::None, |(_, m)| *m),
+                change: GitMark::None,
             }
         }
     }

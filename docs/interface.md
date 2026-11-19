@@ -199,6 +199,19 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   `index` et `HEAD` de `.git` : commit, changement de branche, mais pas ses entrailles). Rien n'est
   demandé sans dossier ni fichier, ni dans les modes de mesure. Mesuré : démarrage 82,8 ms contre
   83,0 ms, frappe p99 6,7 ms contre 6,6 ms (15 mesures, dans le bruit).
+- **Marqueurs Git dans la gouttière** : pour un fichier suivi, les lignes changées par rapport à
+  `HEAD` reçoivent une barre à gauche des numéros : verte (ajoutée), orange (modifiée), et un trait
+  rouge entre deux lignes quand des lignes ont été supprimées. Un bloc qui remplace `b` lignes par
+  `d` lignes marque les `min(b, d)` premières « modifiées » et les suivantes (si `d > b`)
+  « ajoutées ». Un fichier non suivi est entièrement vert (sans appeler Git) ; un fichier ignoré
+  n'a pas de marqueurs. Les changements viennent de `git diff -U0 HEAD -- fichier` (`--no-textconv`,
+  `--literal-pathspecs`, sans renommages) : Git gère lui-même les fins de ligne (`core.autocrlf`)
+  et les filtres, aucune dépendance ajoutée. Calcul sur **un thread dédié** (`paulwrite-diff`, les
+  demandes d'un même fichier sont fusionnées). Demandé au chargement d'un fichier, à
+  l'enregistrement, au retour sur la fenêtre, au changement d'onglet et quand `.git` change (commit,
+  changement de branche). **Limite assumée** : les marqueurs décrivent le fichier *enregistré* ; dès
+  la première frappe ils s'effacent (les numéros de ligne ne correspondraient plus) et reviennent à
+  l'enregistrement. Pas de marqueurs au-delà de 8 Mo, ni dans les modes de mesure.
 
 ## Limites connues
 

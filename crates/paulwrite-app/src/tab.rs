@@ -25,6 +25,9 @@ pub struct Tab {
     pub loading: Option<(u64, u64)>,
     /// État « modifié » affiché dans la barre d'onglets (pour détecter un changement).
     pub shown_modified: bool,
+    /// État Git du fichier au moment de la dernière demande des marqueurs de la gouttière (un
+    /// fichier qui devient suivi, ou qui cesse de l'être, change ses marqueurs).
+    pub diff_state: Option<crate::git::FileState>,
     /// Ligne (à partir de 1) où placer le curseur dès que le fichier est chargé.
     pub pending_goto: Option<usize>,
     /// Curseur et vue à rétablir dès que le fichier est chargé (reprise de session) : ligne et
@@ -54,6 +57,7 @@ impl Tab {
             requested: None,
             loading: None,
             shown_modified: false,
+            diff_state: None,
             pending_goto: None,
             pending_restore: None,
             disk_stamp: None,

@@ -559,3 +559,23 @@ Rien n'a été ajouté au chemin de démarrage ni de frappe : la vérification d
 sont lus par le worker ; la police et la tabulation ne sont refaites que si les réglages diffèrent
 des valeurs par défaut ; le remplacement dans le projet tourne entièrement sur le worker.
 
+
+## Marqueurs Git dans la gouttière
+
+Mesuré en alternant la version d'avant (`2ba9d12`, celle qui était installée, sans marqueurs) et la
+version actuelle, fenêtre hors écran, binaires release compilés sur la même machine (15 séries
+chacune après un échauffement ; une première série de 9, très bruitée par une machine occupée, a
+donné les mêmes ordres de grandeur) :
+
+| Mesure | Avant | Après | Objectif |
+|---|---|---|---|
+| Démarrage à froid, fenêtre visible (médiane) | 85,3 ms (plage 75–115) | 90,5 ms (plage 68–110) | < 100 ms |
+| Frappe, événement → image (300 frappes) : p99, médiane des séries | 7,49 ms | 7,42 ms | p99 < 16 ms |
+| Défilement (600 images) : p99, médiane des séries | 4,90 ms | 4,32 ms | fluide |
+
+L'écart de 5 ms sur le démarrage est dans le bruit : les plages des deux versions se recouvrent
+presque entièrement (±20 ms d'une exécution à l'autre sur cette machine), et rien n'est demandé au
+démarrage (le mode de mesure ne lance aucun diff ; il ne reste qu'un thread de plus, créé comme
+celui de Git). Le calcul des changements (`git diff`) tourne sur son thread ; le thread de
+l'interface ne fait que lire une plage triée par ligne visible (recherche dichotomique), et ne
+redessine la gouttière que quand les marqueurs changent ou à la bascule modifié / enregistré.

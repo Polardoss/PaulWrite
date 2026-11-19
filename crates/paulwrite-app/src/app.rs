@@ -112,6 +112,8 @@ pub enum UserEvent {
     Found(FoundEvent),
     /// État Git d'un dossier (thread `git`).
     Git(git::GitResult),
+    /// Lignes changées d'un fichier par rapport à `HEAD` (thread `diff`).
+    Diff(git::DiffResult),
 }
 
 /// Pont entre le crochet de messages de la boucle d'événements (créé avant elle) et l'application.
@@ -392,6 +394,8 @@ struct App {
     /// Demandes d'état Git (thread dédié), dernier état reçu, dossier demandé et texte de la barre
     /// d'état.
     git_tx: Sender<PathBuf>,
+    /// Demandes des lignes changées d'un fichier (marqueurs de la gouttière), thread dédié.
+    diff_tx: Sender<PathBuf>,
     git: Option<Arc<GitStatus>>,
     git_dir: Option<PathBuf>,
     git_label: String,
@@ -503,6 +507,7 @@ impl App {
         jobs: Sender<Job>,
         syntax_tx: Sender<syntax::Request>,
         git_tx: Sender<PathBuf>,
+        diff_tx: Sender<PathBuf>,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
         let word_wrap = !opts.no_wrap;
@@ -547,6 +552,7 @@ impl App {
             reload_asked: false,
             keylog: std::env::var_os("PAULWRITE_KEYLOG").is_some(),
             git_tx,
+            diff_tx,
             git: None,
             git_dir: None,
             git_label: String::new(),
@@ -672,6 +678,12 @@ impl App {
         self.full_present = true;
         self.tabs_dirty = true;
         self.ime_area = None;
+        // sans dossier ouvert, l'état Git suit le fichier de l'onglet actif ; les marqueurs de la
+        // gouttière (par rapport à HEAD) sont ceux de ce fichier
+        if self.project_root.is_none() {
+            self.request_git();
+        }
+        self.request_diff(index);
         self.request_redraw();
     }
 
@@ -703,6 +715,11 @@ impl App {
         if self.tabs[self.active].shown_modified != m {
             self.tabs[self.active].shown_modified = m;
             self.tabs_dirty = true;
+            // les marqueurs Git de la gouttière disparaissent à la première frappe (les numéros de
+            // ligne ne correspondent plus) et reviennent à l'enregistrement
+            if ed!(self).has_changes() {
+                self.refresh_gutter();
+            }
         }
         if !self.tabs_dirty {
             return;
@@ -3544,6 +3561,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Found(ev) => self.on_found(ev),
             UserEvent::Git(result) => self.on_git(result),
+            UserEvent::Diff(result) => self.on_diff(result),
             UserEvent::DirChanged(dir) => {
                 // Seuls comptent les dossiers déjà lus ; les entrailles de `.git` changent sans cesse.
                 let git = dir.components().any(|c| c.as_os_str() == ".git");
@@ -3552,6 +3570,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // changement de branche) : l'état Git est à refaire ; pas ses entrailles
                 if !git || dir.file_name().is_some_and(|n| n == ".git") {
                     self.request_git();
+                }
+                // un commit ou un changement de branche change aussi les marqueurs de la gouttière
+                if dir.file_name().is_some_and(|n| n == ".git") {
+                    self.request_diff(self.active);
                 }
                 if known && !git {
                     self.dirty_dirs.insert(dir);
@@ -3770,6 +3792,13 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 self.full_present = true;
                             }
+                            // sans dossier ouvert, l'état Git suit le fichier de l'onglet actif
+                            if i == self.active {
+                                if self.project_root.is_none() {
+                                    self.request_git();
+                                }
+                                self.request_diff(i);
+                            }
                             if let Some(l) = self.tabs[i].pending_goto.take() {
                                 self.tabs[i].editor.goto(l, 0);
                             }
@@ -3817,6 +3846,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 self.tabs_dirty = true;
                                 self.request_git();
+                                self.request_diff(i);
                                 self.plugin_event("save", Some(i));
                                 self.lsp_save(i);
                             }
@@ -3876,6 +3906,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(true) => {
                 self.check_files();
                 self.request_git();
+                self.request_diff(self.active);
             }
             WindowEvent::Resized(_) => {
                 self.sync_viewport();
@@ -4278,7 +4309,11 @@ pub fn run(opts: Options) -> Result<(), String> {
     let git_tx = git::spawn(move |result| {
         let _ = git_proxy.send_event(UserEvent::Git(result));
     });
-    let mut app = App::new(opts, jobs, syntax_tx, git_tx, proxy);
+    let diff_proxy = proxy.clone();
+    let diff_tx = git::spawn_diff(move |result| {
+        let _ = diff_proxy.send_event(UserEvent::Diff(result));
+    });
+    let mut app = App::new(opts, jobs, syntax_tx, git_tx, diff_tx, proxy);
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 

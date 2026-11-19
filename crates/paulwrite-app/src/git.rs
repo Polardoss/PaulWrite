@@ -313,6 +313,174 @@ pub fn spawn(notify: impl Fn(GitResult) + Send + 'static) -> Sender<PathBuf> {
     tx
 }
 
+// --- Changements ligne par ligne (marqueurs de la gouttière) -------------------------------------
+
+/// Au-delà de cette taille, pas de marqueurs : `git diff` d'un énorme fichier coûterait trop.
+pub const MAX_DIFF_BYTES: usize = 8 * 1024 * 1024;
+
+/// Lignes ajoutées, modifiées ou supprimées d'un fichier par rapport à `HEAD`. **Lecture seule.**
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineChanges {
+    /// `(première ligne, fin exclue, nature)`, lignes comptées à partir de 0, triées, sans
+    /// chevauchement. `Deleted` : suppression juste au-dessus de la première ligne (une ligne).
+    ranges: Vec<(u32, u32, GitMark)>,
+}
+
+impl LineChanges {
+    /// Un fichier entièrement nouveau (non suivi) de `lines` lignes : toutes sont « ajoutées ».
+    #[must_use]
+    pub fn all_added(lines: usize) -> Self {
+        let end = u32::try_from(lines).unwrap_or(u32::MAX);
+        Self {
+            ranges: if end == 0 {
+                Vec::new()
+            } else {
+                vec![(0, end, GitMark::Added)]
+            },
+        }
+    }
+
+    /// Aucun changement.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Nature du changement de la ligne `line` (0 : première ligne) : `None` si inchangée.
+    #[must_use]
+    pub fn of(&self, line: usize) -> GitMark {
+        let line = u32::try_from(line).unwrap_or(u32::MAX);
+        let i = self.ranges.partition_point(|&(start, _, _)| start <= line);
+        match i.checked_sub(1).map(|i| self.ranges[i]) {
+            Some((_, end, mark)) if line < end => mark,
+            _ => GitMark::None,
+        }
+    }
+
+    /// Les plages, pour les tests.
+    #[must_use]
+    pub fn ranges(&self) -> &[(u32, u32, GitMark)] {
+        &self.ranges
+    }
+}
+
+/// Analyse la sortie de `git diff -U0` : une plage par bloc `@@ -a,b +c,d @@`.
+///
+/// - `b = 0` : `d` lignes ajoutées, à partir de la ligne `c` ;
+/// - `d = 0` : suppression, signalée sur la ligne qui suit (`c`, à partir de 0) ;
+/// - sinon : les `min(b, d)` premières lignes sont modifiées, les suivantes (si `d > b`) ajoutées.
+#[must_use]
+pub fn parse_diff(output: &str) -> LineChanges {
+    let mut ranges: Vec<(u32, u32, GitMark)> = Vec::new();
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("@@ -") else {
+            continue;
+        };
+        let Some((old, rest)) = rest.split_once(" +") else {
+            continue;
+        };
+        let Some((new, _)) = rest.split_once(" @@") else {
+            continue;
+        };
+        let count = |spec: &str| -> Option<(u32, u32)> {
+            match spec.split_once(',') {
+                Some((start, n)) => Some((start.parse().ok()?, n.parse().ok()?)),
+                None => Some((spec.parse().ok()?, 1)),
+            }
+        };
+        let (Some((_, b)), Some((c, d))) = (count(old), count(new)) else {
+            continue;
+        };
+        // première ligne du bloc, comptée à partir de 0 (`c` compte à partir de 1)
+        let first = c.saturating_sub(1);
+        if d == 0 {
+            // `+c,0` : suppression après la ligne `c` (1 = première) : elle précède la ligne c (de 0)
+            ranges.push((c, c.saturating_add(1), GitMark::Deleted));
+        } else if b == 0 {
+            ranges.push((first, first.saturating_add(d), GitMark::Added));
+        } else {
+            let modified = b.min(d);
+            ranges.push((first, first.saturating_add(modified), GitMark::Modified));
+            if d > b {
+                ranges.push((
+                    first.saturating_add(modified),
+                    first.saturating_add(d),
+                    GitMark::Added,
+                ));
+            }
+        }
+    }
+    ranges.sort_by_key(|&(start, _, _)| start);
+    // une suppression au même endroit qu'une plage ajoutée ou modifiée s'efface devant elle
+    let mut merged: Vec<(u32, u32, GitMark)> = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        match merged.last_mut() {
+            Some(prev) if prev.0 == r.0 && prev.2 == GitMark::Deleted => *prev = r,
+            Some(prev) if prev.0 == r.0 && r.2 == GitMark::Deleted => {}
+            _ => merged.push(r),
+        }
+    }
+    LineChanges { ranges: merged }
+}
+
+/// Les changements du fichier `file` par rapport à `HEAD` ; `None` hors d'un dépôt, sans commit
+/// ou sans `git`. Bloquant.
+#[must_use]
+pub fn read_diff(file: &Path) -> Option<LineChanges> {
+    let dir = file.parent()?;
+    let name = file.file_name()?.to_str()?;
+    let out = run_git(
+        dir,
+        &[
+            "--no-optional-locks",
+            "--literal-pathspecs",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "-U0",
+            "HEAD",
+            "--",
+            name,
+        ],
+        TIMEOUT,
+    )?;
+    Some(parse_diff(&String::from_utf8_lossy(&out)))
+}
+
+/// Réponse du thread des changements.
+#[derive(Debug)]
+pub struct DiffResult {
+    pub file: PathBuf,
+    pub changes: Option<LineChanges>,
+}
+
+/// Démarre le thread des changements ligne par ligne : chaque chemin envoyé demande le diff de ce
+/// fichier ; les demandes qui s'accumulent sont fusionnées (un calcul par fichier).
+pub fn spawn_diff(notify: impl Fn(DiffResult) + Send + 'static) -> Sender<PathBuf> {
+    let (tx, rx) = unbounded::<PathBuf>();
+    std::thread::Builder::new()
+        .name("paulwrite-diff".into())
+        .spawn(move || {
+            while let Ok(first) = rx.recv() {
+                let mut files = vec![first];
+                for f in rx.try_iter() {
+                    if !files.contains(&f) {
+                        files.push(f);
+                    }
+                }
+                for file in files {
+                    let changes = read_diff(&file);
+                    notify(DiffResult { file, changes });
+                }
+                std::thread::sleep(MIN_SPACING);
+            }
+        })
+        .expect("thread diff");
+    tx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +619,115 @@ mod tests {
         if find_repo_root(&absent).is_none() {
             assert!(read_status(&absent).is_none());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    use GitMark::{Added, Deleted, Modified};
+
+    #[test]
+    fn diff_ajout_modification_suppression() {
+        let c = parse_diff(
+            "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n\
+             @@ -0,0 +1,2 @@\n+a\n+b\n\
+             @@ -5 +6 @@\n-x\n+y\n\
+             @@ -9,3 +10,5 @@\n-1\n-2\n-3\n+1\n+2\n+3\n+4\n+5\n\
+             @@ -20,2 +22,0 @@\n-z\n-w\n",
+        );
+        assert_eq!(
+            c.ranges(),
+            [
+                (0, 2, Added),     // lignes 1 et 2
+                (5, 6, Modified),  // ligne 6
+                (9, 12, Modified), // lignes 10 à 12 modifiées…
+                (12, 14, Added),   // …13 et 14 ajoutées
+                (22, 23, Deleted), // suppression juste avant la ligne 23
+            ]
+        );
+        for (line, mark) in [
+            (0, Added),
+            (1, Added),
+            (2, GitMark::None),
+            (5, Modified),
+            (11, Modified),
+            (13, Added),
+            (14, GitMark::None),
+            (22, Deleted),
+            (23, GitMark::None),
+        ] {
+            assert_eq!(c.of(line), mark, "ligne {line}");
+        }
+    }
+
+    #[test]
+    fn diff_cas_limites() {
+        assert!(parse_diff("").is_empty());
+        assert!(parse_diff("rien d'utile\n+++ b/f\n").is_empty());
+        // suppression au tout début : avant la ligne 0
+        assert_eq!(parse_diff("@@ -1,2 +0,0 @@\n-a\n-b\n").of(0), Deleted);
+        // la suppression s'efface devant une modification au même endroit
+        let c = parse_diff("@@ -3 +2,0 @@\n-a\n@@ -4 +3 @@\n-b\n+c\n");
+        assert_eq!(c.of(2), Modified);
+        // lignes invalides : ignorées, pas de panique
+        assert!(parse_diff("@@ -a +b @@\n@@ - +\n@@ -1,x +1,y @@\n").is_empty());
+        let all = LineChanges::all_added(3);
+        assert_eq!(
+            (all.of(0), all.of(2), all.of(3)),
+            (Added, Added, GitMark::None)
+        );
+        assert!(LineChanges::all_added(0).is_empty());
+    }
+
+    /// Avec un vrai dépôt (si `git` est installé) : ajout, modification, suppression, fin de ligne
+    /// CRLF (aucun faux positif), nom de fichier avec des caractères spéciaux.
+    #[test]
+    fn diff_vrai_depot() {
+        if run_git(Path::new("."), &["--version"], Duration::from_secs(10)).is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("paulwrite-git-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            run_git(&dir, args, Duration::from_secs(30)).expect("git");
+        };
+        git(&["init", "-q", "-b", "principale"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        let lines = |n: usize| (1..=n).map(|i| format!("ligne {i}\n")).collect::<String>();
+        let weird = dir.join("a [1] #.txt");
+        std::fs::write(&weird, lines(10)).unwrap();
+        std::fs::write(dir.join("neuf.txt"), "x\n").unwrap();
+        git(&["add", "a [1] #.txt"]);
+        git(&["commit", "-q", "-m", "premier"]);
+        // sans changement : vide (et pas None)
+        assert_eq!(read_diff(&weird), Some(LineChanges::default()));
+        // ligne 2 modifiée, ligne 5 supprimée, deux lignes ajoutées à la fin
+        let edited =
+            "ligne 1\nDEUX\nligne 3\nligne 4\nligne 6\nligne 7\nligne 8\nligne 9\nligne 10\nA\nB\n";
+        std::fs::write(&weird, edited).unwrap();
+        let c = read_diff(&weird).expect("diff");
+        assert_eq!(c.of(0), GitMark::None);
+        assert_eq!(c.of(1), Modified);
+        assert_eq!(c.of(4), Deleted); // « ligne 6 » : la suppression est juste au-dessus
+        assert_eq!(c.of(8), GitMark::None);
+        assert_eq!(c.of(9), Added);
+        assert_eq!(c.of(10), Added);
+        // même contenu en CRLF : Git ne voit pas de modification de contenu avec core.autocrlf
+        git(&["config", "core.autocrlf", "true"]);
+        std::fs::write(&weird, lines(10).replace('\n', "\r\n")).unwrap();
+        assert_eq!(read_diff(&weird), Some(LineChanges::default()));
+        // fichier non suivi : pas de diff (l'éditeur le traite à part : tout « ajouté »)
+        assert_eq!(
+            read_diff(&dir.join("neuf.txt")),
+            Some(LineChanges::default())
+        );
+        // hors dépôt ou dossier absent : None
+        assert!(read_diff(
+            &std::env::temp_dir()
+                .join("paulwrite-absent-xyz")
+                .join("f.txt")
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

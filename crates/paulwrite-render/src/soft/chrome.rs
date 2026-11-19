@@ -650,6 +650,25 @@ impl SoftRenderer {
         }
     }
 
+    /// Changement Git de la ligne : barre verticale (ajoutée : vert, modifiée : orange) dans la
+    /// marge gauche de la gouttière, ou trait court en haut de la ligne (suppression au-dessus).
+    unsafe fn paint_change_bar(&self, row: &Row<'_>, y: f32, lh: f32) {
+        let Some(brush) = git_brush(row.change) else {
+            return;
+        };
+        let s = self.scale;
+        let x = self.metrics.sidebar as f32 + (GUTTER_LEFT * s - 9.0 * s).round();
+        let w = (3.0 * s).round().max(2.0);
+        let (top, bottom, width) = match row.change {
+            // la suppression : un trait plus large, à cheval sur la limite des deux lignes
+            GitMark::Deleted => (y, y + (3.0 * s).round().max(3.0), w * 2.0),
+            GitMark::Added | GitMark::Modified => (y, y + lh, w),
+            _ => return,
+        };
+        self.rt
+            .FillRectangle(&d2d_rect(x, top, x + width, bottom), &self.brushes[brush]);
+    }
+
     /// Numéro de ligne (aligné à droite, avant l'espace des flèches de repli).
     pub(super) unsafe fn paint_gutter(&mut self, row: &Row<'_>, y: f32, lh: f32) -> Result<()> {
         let g = self.metrics.gutter as f32;
@@ -663,6 +682,7 @@ impl SoftRenderer {
                 &self.brushes[BR_GUTTER_CUR_BG],
             );
         }
+        self.paint_change_bar(row, y, lh);
         self.paint_fold_mark(row, y, lh);
         if row.number == 0 {
             return Ok(());
