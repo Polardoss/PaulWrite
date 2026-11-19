@@ -599,3 +599,19 @@ démarrage (le mode de mesure ne lance aucun diff ; il ne reste qu'un thread de 
 celui de Git). Le calcul des changements (`git diff`) tourne sur son thread ; le thread de
 l'interface ne fait que lire une plage triée par ligne visible (recherche dichotomique), et ne
 redessine la gouttière que quand les marqueurs changent ou à la bascule modifié / enregistré.
+
+## Écran partagé (étape 1 : deux fichiers différents)
+
+Mesure sans écran partagé (le cas courant), binaire `release`, fenêtre hors écran, **runs alternés**
+avec la version installée précédente (8079092) : le second moteur de rendu n'existe qu'à l'ouverture
+du partage, le chemin normal ne change que par quelques tests de volet.
+
+| Scénario | Précédent | Écran partagé (partage fermé) | Verdict |
+|---|---|---|---|
+| Démarrage, fenêtre visible (15 + 15 runs alternés) | médiane 92,5 ms (86,7 à 115,7) | médiane 92,8 ms (86,5 à 132,7) | identique (machine bruitée ce jour-là) |
+| Frappe, p99 (3 séries de 300) | 7,27 / 7,90 / 7,91 ms | 7,24 / 7,55 / 7,45 ms | identique |
+| Défilement, dessin p99 (3 séries de 600) | 3,74 / 4,88 / 5,22 ms | 6,78 / 5,43 / 3,58 ms | dans le bruit (la 1re série du nouveau binaire est lente, les deux suivantes non) |
+
+**Non mesuré** : le coût d'une image **avec** deux volets ouverts (les modes `--bench-*` n'ouvrent
+pas le partage). Vérifié seulement par les tests : le rendu par régions des deux volets donne les
+mêmes pixels qu'un redessin complet (100 étapes aléatoires), et par une capture d'écran.

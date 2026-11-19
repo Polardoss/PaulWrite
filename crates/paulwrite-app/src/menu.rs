@@ -194,6 +194,22 @@ fn menus() -> Vec<Menu> {
                 Item(Command::ZoomOut, "Zoom Out", "R\u{e9}duire le texte"),
                 Item(Command::ZoomReset, "Reset Zoom", "Taille par d\u{e9}faut"),
                 Sep,
+                Item(
+                    Command::ToggleSplit,
+                    "Split Screen",
+                    "\u{c9}cran partag\u{e9}",
+                ),
+                Item(
+                    Command::FocusOtherPane,
+                    "Focus Other Pane",
+                    "Aller \u{e0} l'autre volet",
+                ),
+                Item(
+                    Command::MoveToOtherPane,
+                    "Move File to Other Pane",
+                    "Envoyer le fichier dans l'autre volet",
+                ),
+                Sep,
                 Item(Command::NextTab, "Next File", "Fichier suivant"),
                 Item(
                     Command::PrevTab,

@@ -14,6 +14,8 @@ pub const SYNTAX_MARGIN_LINES: usize = 100;
 #[derive(Debug)]
 pub struct Tab {
     pub id: TabId,
+    /// Volet où l'onglet s'affiche (0 : gauche ou seul, 1 : droite en écran partagé).
+    pub pane: usize,
     pub editor: Editor,
     /// Langage reconnu d'après l'extension du fichier.
     pub language: Option<Language>,
@@ -51,6 +53,7 @@ impl Tab {
     pub fn new(id: TabId) -> Self {
         Self {
             id,
+            pane: 0,
             editor: Editor::new(),
             language: None,
             syntax_on: false,

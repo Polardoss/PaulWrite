@@ -678,6 +678,12 @@ impl SoftRenderer {
         self.size.0 as i32 - self.inset
     }
 
+    /// Largeur (pixels) de la zone gérée par ce moteur : la fenêtre moins le second volet.
+    #[must_use]
+    pub fn view_width(&self) -> i32 {
+        self.view_w()
+    }
+
     /// Dimensions d'un caractère à l'échelle courante.
     #[must_use]
     pub fn metrics(&self) -> Metrics {
@@ -751,6 +757,9 @@ impl SoftRenderer {
         self.ui = unsafe { make_ui_formats(&self.dwrite, scale)? };
         self.format = format;
         self.metrics = metrics;
+        if self.is_pane {
+            self.metrics.status_bar = 0;
+        }
         self.scale = scale;
         self.refresh_metrics();
         self.layouts.clear();
@@ -777,6 +786,9 @@ impl SoftRenderer {
             unsafe { make_format(&self.dwrite, self.scale, font_px, tab_size)? };
         self.format = format;
         self.metrics = metrics;
+        if self.is_pane {
+            self.metrics.status_bar = 0;
+        }
         self.font_px = font_px;
         self.tab_size = tab_size;
         self.refresh_metrics();
@@ -1857,6 +1869,13 @@ mod tests {
         let (main, pane) = split_renderers();
         let vw = 900.0 - 420.0;
         assert_eq!(main.inset(), 420);
+        // un volet n'a jamais de barre d'état, même après un changement de police ou d'échelle
+        let mut p2 = SoftRenderer::new_pane(1.0, (300, 200), Colors::default()).unwrap();
+        assert_eq!(p2.metrics().status_bar, 0);
+        p2.set_text_style(18.0, 4.0).unwrap();
+        assert_eq!(p2.metrics().status_bar, 0);
+        p2.set_scale(1.25).unwrap();
+        assert_eq!(p2.metrics().status_bar, 0);
         assert_eq!(main.tab_button_at(vw - 8.0, 5.0), Some(TabButton::List));
         assert_eq!(
             main.tab_button_at(vw + 8.0, 5.0),

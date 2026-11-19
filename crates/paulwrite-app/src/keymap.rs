@@ -28,6 +28,14 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
 
     match key {
         Key::Named(named) => match named {
+            // écran partagé : Ctrl+Alt+← / → change de volet, avec Maj envoie l'onglet dans l'autre
+            // (des touches nommées : pas de conflit avec AltGr)
+            NamedKey::ArrowLeft | NamedKey::ArrowRight if ctrl && alt && shift => {
+                Some(Command::MoveToOtherPane)
+            }
+            NamedKey::ArrowLeft | NamedKey::ArrowRight if ctrl && alt => {
+                Some(Command::FocusOtherPane)
+            }
             NamedKey::ArrowLeft => Some(motion(Motion::Left, Some(Motion::WordLeft))),
             NamedKey::ArrowRight => Some(motion(Motion::Right, Some(Motion::WordRight))),
             NamedKey::ArrowUp if ctrl && alt => Some(Command::AddCursorAbove),

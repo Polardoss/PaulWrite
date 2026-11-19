@@ -72,6 +72,12 @@ pub enum Command {
     CloseFolder,
     /// Afficher ou masquer la barre latérale.
     ToggleSidebar,
+    /// Écran partagé : deux volets côte à côte, chacun avec ses onglets (ou retour à un seul).
+    ToggleSplit,
+    /// Écran partagé : donne le focus à l'autre volet.
+    FocusOtherPane,
+    /// Écran partagé : envoie l'onglet courant dans l'autre volet (ouvre le partage au besoin).
+    MoveToOtherPane,
     /// Ouvrir le fichier de configuration.
     OpenSettings,
     /// À propos de PaulWrite.
@@ -194,6 +200,9 @@ impl Command {
             Command::OpenFolder => "project.open_folder",
             Command::CloseFolder => "project.close_folder",
             Command::ToggleSidebar => "view.toggle_sidebar",
+            Command::ToggleSplit => "view.toggle_split",
+            Command::FocusOtherPane => "view.focus_other_pane",
+            Command::MoveToOtherPane => "view.move_to_other_pane",
             Command::OpenSettings => "preferences.open_settings",
             Command::About => "help.about",
             Command::Find => "find.find",
@@ -278,6 +287,9 @@ impl Command {
             Command::OpenFolder,
             Command::CloseFolder,
             Command::ToggleSidebar,
+            Command::ToggleSplit,
+            Command::FocusOtherPane,
+            Command::MoveToOtherPane,
             Command::OpenSettings,
             Command::About,
             Command::Find,
@@ -357,6 +369,9 @@ impl Command {
             Command::OpenFolder => "Projet : ouvrir un dossier",
             Command::CloseFolder => "Projet : fermer le dossier",
             Command::ToggleSidebar => "Affichage : barre latérale",
+            Command::ToggleSplit => "Affichage : écran partagé",
+            Command::FocusOtherPane => "Affichage : aller à l'autre volet",
+            Command::MoveToOtherPane => "Affichage : envoyer l'onglet dans l'autre volet",
             Command::OpenSettings => "Préférences : ouvrir la configuration",
             Command::About => "Aide : à propos de PaulWrite",
             Command::Find => "Recherche : chercher dans le document",
@@ -444,6 +459,9 @@ impl Command {
             Command::OpenFolder => "Project: open folder",
             Command::CloseFolder => "Project: close folder",
             Command::ToggleSidebar => "View: side bar",
+            Command::ToggleSplit => "View: split screen",
+            Command::FocusOtherPane => "View: focus the other pane",
+            Command::MoveToOtherPane => "View: move the tab to the other pane",
             Command::OpenSettings => "Preferences: open settings",
             Command::About => "Help: about PaulWrite",
             Command::Find => "Find: find in document",
@@ -599,6 +617,9 @@ pub enum Effect {
     OpenFolder,
     CloseFolder,
     ToggleSidebar,
+    ToggleSplit,
+    FocusOtherPane,
+    MoveToOtherPane,
     OpenSettings,
     About,
     /// Occurrence suivante (`true`) ou précédente de la dernière recherche.

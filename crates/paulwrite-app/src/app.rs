@@ -68,7 +68,19 @@ macro_rules! ed {
     };
 }
 
+/// Moteur de rendu du volet qui a le focus (macro : emprunt disjoint des autres champs).
+macro_rules! fr_mut {
+    ($s:expr) => {
+        if $s.focus == 1 {
+            $s.second.as_mut()
+        } else {
+            $s.renderer.as_mut()
+        }
+    };
+}
+
 mod find;
+mod panes;
 mod project;
 mod repo;
 
@@ -333,6 +345,8 @@ enum SidebarDrag {
 /// Ce que survole la souris, tel que transmis au moteur de rendu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Hover {
+    /// Volet sous la souris.
+    pane: usize,
     /// La gouttière.
     gutter: bool,
     /// Rangée dont la flèche de repli est sous le pointeur.
@@ -353,8 +367,14 @@ struct App {
     window: Option<Arc<Window>>,
     hwnd: isize,
     renderer: Option<SoftRenderer>,
+    /// Écran partagé : moteur du volet de droite (voir `panes.rs`).
+    second: Option<SoftRenderer>,
     tabs: Vec<Tab>,
+    /// Onglet du volet qui a le focus : toute la saisie agit sur lui.
     active: usize,
+    /// Volet qui a le focus (0 ou 1), et onglet affiché dans chaque volet.
+    focus: usize,
+    shown: [TabId; 2],
     next_tab_id: TabId,
     /// La liste des onglets (libellés, modifié, actif) doit être renvoyée au moteur de rendu.
     tabs_dirty: bool,
@@ -444,7 +464,7 @@ struct App {
     /// Mesures : durée de chaque étape d'une image (préparation, interface, dessin, copie).
     stages: [Samples; 6],
     /// Dernière minimap fournie au rendu : clé (onglet, révision, première ligne) et instant.
-    minimap_key: Option<(TabId, u64, usize, u64)>,
+    minimap_key: [Option<(TabId, u64, usize, u64)>; 2],
     /// Échéance de la prochaine demande de coloration du document entier (après une frappe).
     overview_due: Option<Instant>,
     minimap_at: Instant,
@@ -528,8 +548,11 @@ impl App {
             window: None,
             hwnd: 0,
             renderer: None,
+            second: None,
             tabs: vec![Tab::new(0)],
             active: 0,
+            focus: 0,
+            shown: [0, 0],
             next_tab_id: 1,
             tabs_dirty: true,
             mods: ModifiersState::empty(),
@@ -583,7 +606,7 @@ impl App {
             bench_keys: 0,
             status_buf: String::new(),
             stages: Default::default(),
-            minimap_key: None,
+            minimap_key: [None, None],
             overview_due: None,
             minimap_at: Instant::now(),
             minimap_pending: false,
@@ -645,21 +668,23 @@ impl App {
 
     // --- Onglets -----------------------------------------------------------------------------
 
+    /// Rangées visibles dans le volet qui a le focus.
     fn rows_now(&self) -> Option<usize> {
-        self.renderer
-            .as_ref()
-            .map(|r| r.metrics().rows_for(r.size().1))
+        self.rows_in(self.focus)
     }
 
-    /// Crée un onglet vide à la fin de la liste et renvoie son indice.
+    /// Crée un onglet vide à la fin de la liste (dans le volet qui a le focus) et renvoie son
+    /// indice.
     fn push_tab(&mut self) -> usize {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        self.tabs.push(Tab::new(id));
+        let mut tab = Tab::new(id);
+        tab.pane = self.focus;
+        self.tabs.push(tab);
         self.tabs.len() - 1
     }
 
-    /// Rend actif l'onglet `index` : tout l'écran est redessiné.
+    /// Rend actif l'onglet `index` (et donne le focus à son volet) : tout l'écran est redessiné.
     fn activate(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
@@ -668,13 +693,22 @@ impl App {
             self.close_palette();
         }
         self.active = index;
-        if let Some(r) = self.renderer.as_mut() {
-            r.invalidate();
+        let pane = self.tabs[index]
+            .pane
+            .min(usize::from(self.second.is_some()));
+        self.tabs[index].pane = pane;
+        self.focus = pane;
+        self.shown[pane] = self.tabs[index].id;
+        self.invalidate_panes();
+        for p in 0..=usize::from(self.second.is_some()) {
+            let i = self.shown_index(p);
+            if let Some(rows) = self.rows_in(p) {
+                self.tabs[i].editor.set_viewport_rows(rows);
+            }
+            self.sync_text_layout_for(i, p);
+            // seul l'éditeur du volet qui a le focus a un curseur qui clignote
+            self.tabs[i].editor.set_caret_visible(p == pane);
         }
-        if let Some(rows) = self.rows_now() {
-            ed!(self).set_viewport_rows(rows);
-        }
-        self.sync_text_layout();
         self.full_present = true;
         self.tabs_dirty = true;
         self.ime_area = None;
@@ -690,17 +724,21 @@ impl App {
     /// Largeur du texte et retour à la ligne de l'onglet actif : la largeur dépend de la fenêtre,
     /// de la gouttière, de la barre latérale et de la minimap ; le retour à la ligne, du réglage
     /// et de la taille du fichier.
-    fn sync_text_layout(&mut self) {
-        let Some(r) = self.renderer.as_ref() else {
+    fn sync_text_layout_for(&mut self, i: usize, pane: usize) {
+        let Some(r) = (if pane == 1 {
+            self.second.as_ref()
+        } else {
+            self.renderer.as_ref()
+        }) else {
             return;
         };
         let cols = r.text_cols();
-        let len = ed!(self).document().buffer().len_bytes();
+        let len = self.tabs[i].editor.document().buffer().len_bytes();
         let wrap = self.word_wrap && self.config.can_wrap(len);
-        let marks = self.fold_hover;
+        let marks = self.fold_hover && self.hover.pane == pane;
         let lang = self.lang;
-        let style = editing::comment_style(self.tabs[self.active].language);
-        let e = &mut self.tabs[self.active].editor;
+        let style = editing::comment_style(self.tabs[i].language);
+        let e = &mut self.tabs[i].editor;
         e.set_lang(lang);
         e.set_comment_style(style);
         e.set_wrap(wrap);
@@ -708,17 +746,20 @@ impl App {
         e.set_viewport_cols(cols);
     }
 
-    /// Envoie la liste des onglets au moteur de rendu si elle a changé.
+    /// Envoie la liste des onglets de chaque volet au moteur de rendu si elle a changé.
     fn refresh_tabs(&mut self) {
-        // L'état « modifié » de l'onglet actif change à la frappe : on le surveille.
-        let m = ed!(self).is_modified();
-        if self.tabs[self.active].shown_modified != m {
-            self.tabs[self.active].shown_modified = m;
-            self.tabs_dirty = true;
-            // les marqueurs Git de la gouttière disparaissent à la première frappe (les numéros de
-            // ligne ne correspondent plus) et reviennent à l'enregistrement
-            if ed!(self).has_changes() {
-                self.refresh_gutter();
+        // L'état « modifié » de l'onglet affiché change à la frappe : on le surveille.
+        for pane in 0..=usize::from(self.second.is_some()) {
+            let i = self.shown_index(pane);
+            let m = self.tabs[i].editor.is_modified();
+            if self.tabs[i].shown_modified != m {
+                self.tabs[i].shown_modified = m;
+                self.tabs_dirty = true;
+                // les marqueurs Git de la gouttière disparaissent à la première frappe (les numéros
+                // de ligne ne correspondent plus) et reviennent à l'enregistrement
+                if self.tabs[i].editor.has_changes() {
+                    self.refresh_gutter();
+                }
             }
         }
         if !self.tabs_dirty {
@@ -726,25 +767,34 @@ impl App {
         }
         self.tabs_dirty = false;
         let labels: Vec<String> = self.tabs.iter().map(Tab::label).collect();
-        let infos: Vec<TabInfo<'_>> = self
-            .tabs
-            .iter()
-            .zip(&labels)
-            .enumerate()
-            .map(|(i, (t, label))| TabInfo {
-                label,
-                modified: t.shown_modified,
-                active: i == self.active,
-                git: match (self.git.as_deref(), t.editor.path()) {
-                    (Some(g), Some(path)) => g.mark_of(path, false),
-                    _ => GitMark::None,
-                },
-            })
-            .collect();
-        if let Some(r) = self.renderer.as_mut() {
-            r.set_tabs(&infos);
-            let rows = r.metrics().rows_for(r.size().1);
-            ed!(self).set_viewport_rows(rows);
+        for pane in 0..=usize::from(self.second.is_some()) {
+            let shown = self.shown_index(pane);
+            let infos: Vec<TabInfo<'_>> = self
+                .tabs
+                .iter()
+                .zip(&labels)
+                .enumerate()
+                .filter(|(_, (t, _))| t.pane == pane)
+                .map(|(i, (t, label))| TabInfo {
+                    label,
+                    modified: t.shown_modified,
+                    active: i == shown,
+                    git: match (self.git.as_deref(), t.editor.path()) {
+                        (Some(g), Some(path)) => g.mark_of(path, false),
+                        _ => GitMark::None,
+                    },
+                })
+                .collect();
+            let r = if pane == 1 {
+                self.second.as_mut()
+            } else {
+                self.renderer.as_mut()
+            };
+            if let Some(r) = r {
+                r.set_tabs(&infos);
+                let rows = r.metrics().rows_for(r.size().1);
+                self.tabs[shown].editor.set_viewport_rows(rows);
+            }
         }
     }
 
@@ -831,7 +881,16 @@ impl App {
     /// nouvelle fenêtre visible. Appelé une fois par image : les frappes d'une même image sont
     /// regroupées.
     fn sync_syntax(&mut self) {
-        let tab = &mut self.tabs[self.active];
+        self.sync_syntax_tab(self.active);
+        if self.second.is_some() {
+            let other = self.shown_index(1 - self.focus);
+            self.sync_syntax_tab(other);
+        }
+    }
+
+    /// Même chose pour l'onglet `i` (celui de chaque volet est suivi).
+    fn sync_syntax_tab(&mut self, i: usize) {
+        let tab = &mut self.tabs[i];
         if !tab.syntax_on {
             return;
         }
@@ -888,6 +947,7 @@ impl App {
         }
         self.plugin_event("close", Some(index));
         self.lsp_close_tab(index);
+        let active_id = self.tabs[self.active].id;
         let tab = self.tabs.remove(index);
         if tab.syntax_on {
             self.syntax_tx
@@ -897,10 +957,20 @@ impl App {
         if self.tabs.is_empty() {
             self.push_tab();
         }
-        if index < self.active {
-            self.active -= 1;
+        // l'onglet actif reste le même ; si c'est lui qu'on ferme, le suivant de son volet (sinon
+        // le précédent) le remplace, comme celui qu'affiche l'autre volet
+        self.active = match self.tab_index(active_id) {
+            Some(i) => i,
+            None => self
+                .neighbor_in_pane(index, tab.pane)
+                .unwrap_or_else(|| index.min(self.tabs.len() - 1)),
+        };
+        if self.shown[tab.pane] == tab.id {
+            if let Some(i) = self.neighbor_in_pane(index, tab.pane) {
+                self.shown[tab.pane] = self.tabs[i].id;
+            }
         }
-        self.active = self.active.min(self.tabs.len() - 1);
+        self.normalize_panes();
         self.activate(self.active);
     }
 
@@ -979,7 +1049,10 @@ impl App {
     /// Applique `font_px` et `tab_size` : nouvelle police, nouvelle géométrie.
     fn apply_text_style(&mut self) {
         editing::set_tab_width(self.tab_size);
-        if let Some(r) = self.renderer.as_mut() {
+        for r in [self.renderer.as_mut(), self.second.as_mut()]
+            .into_iter()
+            .flatten()
+        {
             if let Err(e) = r.set_text_style(self.font_px as f32, self.tab_size as f32) {
                 eprintln!("taille du texte : {e}");
             }
@@ -1340,7 +1413,16 @@ impl App {
     /// Transmet au serveur de langage les modifications de l'onglet actif (une fois par image :
     /// les frappes d'une même image sont regroupées).
     fn sync_lsp(&mut self) {
-        let tab = &mut self.tabs[self.active];
+        self.sync_lsp_tab(self.active);
+        if self.second.is_some() {
+            let other = self.shown_index(1 - self.focus);
+            self.sync_lsp_tab(other);
+        }
+    }
+
+    /// Même chose pour l'onglet `i`.
+    fn sync_lsp_tab(&mut self, i: usize) {
+        let tab = &mut self.tabs[i];
         let Some(path) = tab.lsp_path.clone() else {
             return;
         };
@@ -2524,57 +2606,96 @@ impl App {
 
     /// Dessine dans la DIB (sans copier vers la fenêtre).
     fn draw(&mut self) {
+        let (i0, i1) = (self.shown_index(0), self.shown_index(1));
+        // le second volet d'abord : le moteur principal recopie son image
+        if let Some(r2) = self.second.as_mut() {
+            let e = &mut self.tabs[i1].editor;
+            e.build_view();
+            let scrolled = e.scrolled_since_draw();
+            if let Err(err) = r2.draw(&e.view(), scrolled) {
+                eprintln!("erreur de rendu du second volet : {err}");
+            }
+            e.mark_drawn();
+        }
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
         let t0 = Instant::now();
-        ed!(self).build_view();
+        let e = &mut self.tabs[i0].editor;
+        e.build_view();
         let t1 = Instant::now();
-        let scrolled = ed!(self).scrolled_since_draw();
-        if let Err(e) = r.draw(&ed!(self).view(), scrolled) {
-            eprintln!("erreur de rendu : {e}");
+        let scrolled = e.scrolled_since_draw();
+        if let Err(err) = r.draw_with(&e.view(), scrolled, self.second.as_ref()) {
+            eprintln!("erreur de rendu : {err}");
         }
-        ed!(self).mark_drawn();
+        e.mark_drawn();
         if self.is_bench() {
             self.stages[4].push(t1 - t0);
             self.stages[5].push(t1.elapsed());
         }
     }
 
-    /// Gouttière, barre d'état, minimap et barre de défilement de l'onglet actif.
+    /// Gouttière, barre d'état, minimap et barre de défilement de chaque volet (la barre d'état
+    /// décrit l'onglet du volet qui a le focus).
     fn refresh_chrome(&mut self) {
-        let Some(r) = self.renderer.as_mut() else {
+        self.layout_panes();
+        self.refresh_pane_chrome(0);
+        if self.second.is_some() {
+            self.refresh_pane_chrome(1);
+        }
+    }
+
+    fn refresh_pane_chrome(&mut self, pane: usize) {
+        let i = self.shown_index(pane);
+        let r = if pane == 1 {
+            self.second.as_mut()
+        } else {
+            self.renderer.as_mut()
+        };
+        let Some(r) = r else {
             return;
         };
-        let tab = &self.tabs[self.active];
-        self.status_buf.clear();
-        match &self.toast {
-            Some((text, _)) => self
-                .status_buf
-                .push_str(text.lines().next().unwrap_or_default()),
-            None => tab.editor.write_status(&mut self.status_buf),
-        }
-        let language = tab
-            .language
-            .map_or(self.lang.pick("Plain Text", "Texte brut"), |l| {
-                l.display_name()
+        let tab = &self.tabs[i];
+        if pane == 0 {
+            // la barre d'état de la fenêtre : l'onglet qui a le focus
+            let focused = &self.tabs[self.active];
+            self.status_buf.clear();
+            match &self.toast {
+                Some((text, _)) => self
+                    .status_buf
+                    .push_str(text.lines().next().unwrap_or_default()),
+                None => focused.editor.write_status(&mut self.status_buf),
+            }
+            let language = focused
+                .language
+                .map_or(self.lang.pick("Plain Text", "Texte brut"), |l| {
+                    l.display_name()
+                });
+            let tab_size = self.lang.pick(
+                format!("Tab Size: {}", self.tab_size),
+                format!("Tabulation : {}", self.tab_size),
+            );
+            let without_git = [tab_size.as_str(), language];
+            let with_git = [self.git_label.as_str(), tab_size.as_str(), language];
+            r.set_chrome(&Chrome {
+                line_digits: tab.editor.line_digits(),
+                status_left: &self.status_buf,
+                status_right: if self.git_label.is_empty() {
+                    &without_git
+                } else {
+                    &with_git
+                },
+                scroll: Some(tab.editor.scroll()),
             });
-        let tab_size = self.lang.pick(
-            format!("Tab Size: {}", self.tab_size),
-            format!("Tabulation : {}", self.tab_size),
-        );
-        let without_git = [tab_size.as_str(), language];
-        let with_git = [self.git_label.as_str(), tab_size.as_str(), language];
-        r.set_chrome(&Chrome {
-            line_digits: tab.editor.line_digits(),
-            status_left: &self.status_buf,
-            status_right: if self.git_label.is_empty() {
-                &without_git
-            } else {
-                &with_git
-            },
-            scroll: Some(tab.editor.scroll()),
-        });
+        } else {
+            // le second volet n'a pas de barre d'état
+            r.set_chrome(&Chrome {
+                line_digits: tab.editor.line_digits(),
+                status_left: "",
+                status_right: &[],
+                scroll: Some(tab.editor.scroll()),
+            });
+        }
         // La minimap suit le défilement tout de suite, mais le texte tapé avec retard.
         let key = (
             tab.id,
@@ -2583,9 +2704,9 @@ impl App {
             tab.editor.overview_version(),
         );
         let missing = r.minimap_needs_source();
-        if self.minimap_key != Some(key) || missing {
+        if self.minimap_key[pane] != Some(key) || missing {
             let text_only = !missing
-                && self.minimap_key.is_some_and(|(id, _, first, colors)| {
+                && self.minimap_key[pane].is_some_and(|(id, _, first, colors)| {
                     id == key.0 && first == key.2 && colors == key.3
                 });
             if text_only && self.minimap_at.elapsed() < MINIMAP_DELAY {
@@ -2598,17 +2719,17 @@ impl App {
                 if let Err(e) = r.set_minimap(&tab.editor.minimap(), revision) {
                     eprintln!("minimap : {e}");
                 }
-                self.minimap_key = Some(key);
+                self.minimap_key[pane] = Some(key);
                 self.minimap_at = Instant::now();
                 self.minimap_pending = false;
             }
         }
         // La gouttière ou la barre d'état peuvent changer le nombre de rangées visibles.
         let rows = r.metrics().rows_for(r.size().1);
-        if rows != self.tabs[self.active].editor.rows() {
-            self.tabs[self.active].editor.set_viewport_rows(rows);
+        if rows != self.tabs[i].editor.rows() {
+            self.tabs[i].editor.set_viewport_rows(rows);
         }
-        self.sync_text_layout();
+        self.sync_text_layout_for(i, pane);
     }
 
     fn redraw(&mut self, el: &ActiveEventLoop) {
@@ -2682,7 +2803,15 @@ impl App {
     }
 
     fn update_ime_area(&mut self) {
-        let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
+        let origin = self.pane_origin(self.focus);
+        let (Some(w), Some(r)) = (
+            &self.window,
+            if self.focus == 1 {
+                &self.second
+            } else {
+                &self.renderer
+            },
+        ) else {
             return;
         };
         let Some((row, utf16)) = ed!(self).caret_anchor() else {
@@ -2690,7 +2819,7 @@ impl App {
         };
         let m = r.metrics();
         // Position approchée (chasse fixe) : suffisante pour placer la fenêtre de l'IME.
-        let x = (m.pad_x + utf16 as f32 * m.advance) as i32;
+        let x = (origin + m.pad_x + utf16 as f32 * m.advance) as i32;
         let y = m.top + (row as i32 + 1) * m.line_height;
         if self.ime_area != Some((x, y)) {
             self.ime_area = Some((x, y));
@@ -2707,8 +2836,13 @@ impl App {
             if let Err(e) = r.resize((size.width, size.height)) {
                 eprintln!("redimensionnement : {e}");
             }
-            let rows = r.metrics().rows_for(r.size().1);
-            ed!(self).set_viewport_rows(rows);
+        }
+        self.layout_panes();
+        for p in 0..=usize::from(self.second.is_some()) {
+            let i = self.shown_index(p);
+            if let Some(rows) = self.rows_in(p) {
+                self.tabs[i].editor.set_viewport_rows(rows);
+            }
         }
         self.full_present = true;
     }
@@ -2765,10 +2899,11 @@ impl App {
                 self.activate(i);
             }
             Effect::CloseTab => self.close_tab(self.active),
-            Effect::NextTab => self.activate((self.active + 1) % self.tabs.len()),
-            Effect::PrevTab => {
-                self.activate((self.active + self.tabs.len() - 1) % self.tabs.len());
-            }
+            Effect::NextTab => self.step_tab(1),
+            Effect::PrevTab => self.step_tab(-1),
+            Effect::ToggleSplit => self.toggle_split(),
+            Effect::FocusOtherPane => self.focus_other_pane(),
+            Effect::MoveToOtherPane => self.move_to_other_pane(),
             Effect::OpenPalette(mode) => self.open_palette(mode),
             Effect::OpenFolder => {
                 self.jobs.send(Job::PickFolder { owner: self.hwnd }).ok();
@@ -2898,7 +3033,19 @@ second ligne
             // exécutées avant la capture ; `PAULWRITE_SCREENSHOT_HOVER=1` : souris sur la gouttière.
             if let Ok(list) = std::env::var("PAULWRITE_SCREENSHOT_COMMANDS") {
                 for cmd in list.split(',').filter_map(|n| Command::from_name(n.trim())) {
-                    ed!(self).execute(cmd, 0);
+                    // seuls les effets de disposition (volets, onglets) sont exécutés : jamais
+                    // d'enregistrement ni de boîte de dialogue pendant une capture
+                    if let Some(
+                        effect @ (Effect::ToggleSplit
+                        | Effect::FocusOtherPane
+                        | Effect::MoveToOtherPane
+                        | Effect::NewTab
+                        | Effect::NextTab
+                        | Effect::PrevTab),
+                    ) = ed!(self).execute(cmd, 0)
+                    {
+                        self.run_effect(effect, el);
+                    }
                 }
             }
             if std::env::var_os("PAULWRITE_SCREENSHOT_HOVER").is_some() {
@@ -2933,26 +3080,33 @@ second ligne
     /// panneau), la flèche partout ailleurs (barre latérale, onglets, gouttière, minimap, barre
     /// d'état, liste du panneau).
     fn update_cursor(&mut self) {
-        let (Some(r), Some(w)) = (self.renderer.as_ref(), self.window.as_ref()) else {
+        let pane = self.pane_at(self.mouse.x as f32);
+        let origin = self.pane_origin(pane);
+        let (Some(main), Some(w)) = (self.renderer.as_ref(), self.window.as_ref()) else {
             return;
+        };
+        let r = if pane == 1 {
+            self.second.as_ref().unwrap_or(main)
+        } else {
+            main
         };
         let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
         let m = r.metrics();
         let resizing = self.sidebar_drag == Some(SidebarDrag::Resize);
         let icon = if self.palette.is_some() {
-            if r.overlay_row_at(x, y) == Some(0) {
+            if main.overlay_row_at(x, y) == Some(0) {
                 CursorIcon::Text
             } else {
                 CursorIcon::Default
             }
-        } else if resizing || r.sidebar_edge_hit(x, y) {
+        } else if resizing || main.sidebar_edge_hit(x, y) {
             CursorIcon::ColResize
         } else if self.strip_drag.is_some() {
             CursorIcon::Default
         } else {
-            let bottom = (r.size().1 as i32 - m.status_bar) as f32;
-            let left = (m.sidebar + m.gutter) as f32;
-            let right = (r.size().0 as i32 - m.minimap) as f32;
+            let bottom = (main.size().1 as i32 - main.metrics().status_bar) as f32;
+            let left = origin + (m.sidebar + m.gutter) as f32;
+            let right = origin + (r.view_width() - m.minimap) as f32;
             if x >= left && x < right && y >= m.top as f32 && y < bottom {
                 CursorIcon::Text
             } else {
@@ -2968,10 +3122,17 @@ second ligne
     /// Survol : les flèches de repli (▼) n'apparaissent que sur la gouttière, et ce qui est sous
     /// le pointeur (flèche, onglet, ligne de la barre latérale) passe en blanc au lieu de gris.
     fn update_hover(&mut self, inside: bool) {
-        let Some(r) = self.renderer.as_mut() else {
+        let pane = self.pane_at(self.mouse.x as f32);
+        let origin = self.pane_origin(pane);
+        let (Some(main), second) = (self.renderer.as_mut(), self.second.as_mut()) else {
             return;
         };
-        let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
+        // `r` : le moteur du volet sous la souris ; `other` : l'autre volet, qui ne survole rien
+        let (r, mut other) = match (pane, second) {
+            (1, Some(s)) => (s, Some(main)),
+            (_, s) => (main, s),
+        };
+        let (x, y) = (self.mouse.x as f32 - origin, self.mouse.y as f32);
         let m = r.metrics();
         let bottom = (r.size().1 as i32 - m.status_bar) as f32;
         let free = inside && self.palette.is_none() && self.strip_drag.is_none();
@@ -2985,6 +3146,7 @@ second ligne
         let tab = if free { r.tab_at(x, y) } else { None };
         let side = if free { r.sidebar_row_at(x, y) } else { None };
         let now = Hover {
+            pane,
             gutter,
             fold_arrow: hot,
             tab,
@@ -2997,6 +3159,12 @@ second ligne
             r.set_fold_hot(hot);
             r.set_hover_tab(tab);
             r.set_hover_sidebar(side);
+            if let Some(o) = other.as_mut() {
+                o.set_fold_hover(false);
+                o.set_fold_hot(None);
+                o.set_hover_tab(None);
+                o.set_hover_sidebar(None);
+            }
             self.request_redraw();
         }
     }
@@ -3012,11 +3180,15 @@ second ligne
 
     /// Glissement dans la zone de droite : seule l'ordonnée de la souris compte.
     fn strip_scroll(&mut self, scrollbar: bool) {
-        let Some(r) = self.renderer.as_ref() else {
+        let Some(r) = (if self.focus == 1 {
+            self.second.as_ref()
+        } else {
+            self.renderer.as_ref()
+        }) else {
             return;
         };
         let m = r.metrics();
-        let w = r.size().0 as f32;
+        let w = r.view_width() as f32;
         let x = if scrollbar {
             w - 1.0
         } else {
@@ -3031,13 +3203,18 @@ second ligne
 
     /// Clic dans la gouttière : sélectionne la ligne.
     fn select_row_at_mouse(&mut self) {
-        let Some(r) = self.renderer.as_ref() else {
+        let local_x = self.mouse.x as f32 - self.pane_origin(self.focus);
+        let Some(r) = (if self.focus == 1 {
+            self.second.as_ref()
+        } else {
+            self.renderer.as_ref()
+        }) else {
             return;
         };
         let m = r.metrics();
         let row = ((self.mouse.y as i32 - m.top).max(0) / m.line_height.max(1)) as usize;
         let row = row.min(ed!(self).rows().saturating_sub(1));
-        if r.gutter_fold_hit(self.mouse.x as f32) {
+        if r.gutter_fold_hit(local_x) {
             // la flèche replie ou déplie ; hors flèche, un clic sélectionne la ligne
             ed!(self).toggle_fold_row(row);
         } else {
@@ -3047,7 +3224,9 @@ second ligne
 
     /// Place le curseur sous la souris (clic ou glissement).
     fn mouse_to_caret(&mut self, extend: bool) {
-        let Some(r) = self.renderer.as_mut() else {
+        // abscisse de la souris dans le volet qui a le focus
+        let mouse_x = self.mouse.x as f32 - self.pane_origin(self.focus);
+        let Some(r) = fr_mut!(self) else {
             return;
         };
         let m = r.metrics();
@@ -3059,14 +3238,14 @@ second ligne
         if !extend && ed!(self).row_is_folded(row) {
             let width = crate::wrap::visual_width(ed!(self).row_plain_text(row).chars());
             let x0 = m.pad_x + width as f32 * m.advance;
-            let x = self.mouse.x as f32;
+            let x = mouse_x;
             if x >= x0 - 0.3 * m.advance && x < x0 + 2.0 * m.advance {
                 ed!(self).toggle_fold_row(row);
                 return;
             }
         }
         let utf16 = r
-            .column_at(ed!(self).row_plain_text(row), self.mouse.x as f32)
+            .column_at(ed!(self).row_plain_text(row), mouse_x)
             .unwrap_or(0);
         let col = ed!(self).char_col_of_utf16(row, utf16);
         ed!(self).click(row, col, extend);
@@ -3914,7 +4093,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 // Déplacement vers un autre écran / changement de DPI : nouvelle police.
-                if let Some(r) = self.renderer.as_mut() {
+                for r in [self.renderer.as_mut(), self.second.as_mut()]
+                    .into_iter()
+                    .flatten()
+                {
                     if let Err(e) = r.set_scale(scale_factor as f32) {
                         eprintln!("changement d'échelle : {e}");
                     }
@@ -4042,8 +4224,12 @@ impl ApplicationHandler<UserEvent> for App {
                 } else {
                     (dx, dy)
                 };
+                // la molette agit sur le volet sous la souris, même sans le focus
+                let under = self.shown_index(self.pane_at(self.mouse.x as f32));
                 if dx != 0.0 {
-                    ed!(self).scroll_horizontally(-(dx * 6.0).round() as isize);
+                    self.tabs[under]
+                        .editor
+                        .scroll_horizontally(-(dx * 6.0).round() as isize);
                     self.touch(Instant::now());
                     if dy == 0.0 {
                         return;
@@ -4060,7 +4246,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let whole = self.wheel_lines.trunc();
                 if whole != 0.0 {
                     self.wheel_lines -= whole;
-                    ed!(self).scroll_by(whole as isize);
+                    self.tabs[under].editor.scroll_by(whole as isize);
                     self.touch(Instant::now());
                 }
             }
@@ -4144,7 +4330,24 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 }
-                let (hit, tab_button, strip, area) = match self.renderer.as_ref() {
+                // Écran partagé : un clic dans l'autre volet (hors barre d'état) lui donne d'abord
+                // le focus ; la suite agit sur lui, avec des abscisses relatives à son bord gauche.
+                let status_top = self
+                    .renderer
+                    .as_ref()
+                    .map_or(i32::MAX, |r| r.size().1 as i32 - r.metrics().status_bar);
+                let pane = self.pane_at(x);
+                if pane != self.focus && (y as i32) < status_top {
+                    let i = self.shown_index(pane);
+                    self.activate(i);
+                }
+                let x = x - self.pane_origin(self.focus);
+                let focused = if self.focus == 1 {
+                    self.second.as_ref()
+                } else {
+                    self.renderer.as_ref()
+                };
+                let (hit, tab_button, strip, area) = match focused {
                     Some(r) => {
                         let m = r.metrics();
                         let bottom = r.size().1 as i32 - m.status_bar;
@@ -4176,12 +4379,13 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 let in_rows = area.is_some_and(|(_, inside)| inside);
                 let in_gutter = area.is_some_and(|(gutter, _)| gutter);
+                // indice de l'onglet dans la barre du volet -> indice dans `tabs`
+                let hit = hit
+                    .and_then(|(i, close)| self.pane_tabs(self.focus).get(i).map(|&g| (g, close)));
                 match (button, hit, tab_button, strip) {
                     (MouseButton::Left, _, Some(b), _) => match b {
-                        TabButton::Previous => {
-                            self.activate((self.active + self.tabs.len() - 1) % self.tabs.len());
-                        }
-                        TabButton::Next => self.activate((self.active + 1) % self.tabs.len()),
+                        TabButton::Previous => self.step_tab(-1),
+                        TabButton::Next => self.step_tab(1),
                         TabButton::New => {
                             let i = self.push_tab();
                             self.activate(i);

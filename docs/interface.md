@@ -212,6 +212,22 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   changement de branche). **Limite assumée** : les marqueurs décrivent le fichier *enregistré* ; dès
   la première frappe ils s'effacent (les numéros de ligne ne correspondraient plus) et reviennent à
   l'enregistrement. Pas de marqueurs au-delà de 8 Mo, ni dans les modes de mesure.
+- **Écran partagé** (View ▸ Split Screen, commandes `view.toggle_split`, `view.focus_other_pane`,
+  `view.move_to_other_pane`) : deux volets côte à côte, chacun avec sa barre d'onglets, sa gouttière,
+  sa minimap et sa barre de défilement ; la barre latérale et la barre d'état restent uniques (la
+  barre d'état décrit le volet qui a le focus). À l'ouverture, l'onglet courant passe à droite s'il a
+  des voisins ; sinon un onglet vide est créé à droite. Un clic dans un volet lui donne le focus, la
+  molette agit sur le volet sous la souris, la saisie et les commandes agissent sur le volet qui a le
+  focus, un fichier ouvert (Goto Anything, barre latérale) s'affiche dans le volet qui a le focus.
+  Quand un volet n'a plus d'onglet, le partage se referme. **Conception** : le moteur de rendu
+  principal garde la fenêtre entière et réserve un encart à droite, où il recopie l'image d'un
+  second moteur (`SoftRenderer::new_pane`, créé seulement à l'ouverture du partage : rien ne change
+  sans partage, ni au démarrage). Les bandes redessinées et la zone défilée du second volet sont
+  recopiées avec celles du premier ; le panneau flottant reste au-dessus. **Limites** (étape 1) :
+  un fichier ne s'affiche que dans un volet à la fois (le même fichier dans les deux volets est
+  l'étape 2 : document partagé, curseurs par vue) ; les volets font chacun la moitié de la place ;
+  pas de glisser-déposer d'onglet d'un volet à l'autre ; la disposition n'est pas conservée d'une
+  session à l'autre (les onglets reviennent dans un seul volet).
 
 ## Limites connues
 
