@@ -131,6 +131,14 @@ fn bench_fuzzy(root: &Path) {
         let mut typed = String::new();
         for (i, c) in query.chars().enumerate() {
             typed.push(c);
+            // `BENCH_KEY_PAUSE_MS` : pause entre deux frappes, comme un vrai clavier (les threads
+            // de classement se rendorment entre deux frappes)
+            if let Some(ms) = std::env::var("BENCH_KEY_PAUSE_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             let t = Instant::now();
             finder.set_query(&typed);
             while finder.tick(1).running {}

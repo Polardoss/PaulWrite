@@ -515,6 +515,26 @@ Réserves, dites franchement :
 - **Frappe dans un fichier Rust de 1 Mo, première série après compilation** : p99 15 ms ; les cinq
   séries suivantes : p99 5,4 à 6,4 ms. Même effet de binaire neuf que précédemment.
 
+### Goto Anything : d'où vient la queue de latence (diagnostic du 2026-11-19)
+
+Cinq séries dans l'application (300 frappes, 100 000 fichiers) : p99 « résultats affichés » de 26,1
+à 34,6 ms, donc l'objectif de 30 ms n'est pas tenu de façon fiable. Pour isoler la cause, le banc
+`paulwrite-search --example bench` accepte maintenant `BENCH_KEY_PAUSE_MS` (pause entre deux frappes) :
+
+| Condition (classement seul, 100 000 chemins, 2 séries chacune) | p50 | p99 |
+|---|---|---|
+| frappes enchaînées sans pause (threads de nucleo « chauds ») | 0,5 ms | **6,6 à 6,9 ms** |
+| une frappe toutes les 25 ms (comme un clavier) | 1,4 à 1,9 ms | **23,1 à 24,9 ms** |
+
+Le classement est donc quatre fois plus lent dès que les threads de nucleo se rendorment entre deux
+frappes. Nombre de threads (une frappe toutes les 25 ms, 2 séries) : 1 thread p99 40 à 47 ms, 2 : 29 à
+33, 3 : 27 à 28, 6 : 20 à 28, 12 (défaut) : 15 à 16 ms. Le réglage par défaut est donc le meilleur.
+Une attente active à la place de `tick(1)` ne change rien : ce n'est pas la granularité des attentes
+chronométrées de Windows. Reste le coût du classement lui-même sur les premières lettres (100 000
+candidats qui correspondent encore) quand le processeur sort de veille ; il n'y a pas de réglage
+côté application qui le supprime. La saisie, elle, s'affiche tout de suite : seule la liste des
+résultats suit avec ce retard sur les une ou deux premières lettres.
+
 ## Correction : défilement (bug de l'étape 2 trouvé à l'étape 4)
 
 **Bug** : après un défilement, le milieu de la fenêtre gardait l'ancien texte pendant que le haut et
