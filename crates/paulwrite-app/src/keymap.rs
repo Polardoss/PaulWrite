@@ -36,6 +36,8 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
             NamedKey::ArrowLeft | NamedKey::ArrowRight if ctrl && alt => {
                 Some(Command::FocusOtherPane)
             }
+            // défilement synchronisé des deux volets (comme dans un tableur)
+            NamedKey::ScrollLock => Some(Command::ToggleSyncScroll),
             NamedKey::ArrowLeft => Some(motion(Motion::Left, Some(Motion::WordLeft))),
             NamedKey::ArrowRight => Some(motion(Motion::Right, Some(Motion::WordRight))),
             NamedKey::ArrowUp if ctrl && alt => Some(Command::AddCursorAbove),
@@ -108,6 +110,11 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<Command> {
         Key::Character(s) if alt && !ctrl && !shift && s.to_lowercase() == "z" => {
             Some(Command::ToggleWordWrap)
         }
+        // Alt+Y : défilement synchronisé (pour un clavier sans Arrêt défil) ; « Y » n'est la
+        // lettre d'aucun menu
+        Key::Character(s) if alt && !ctrl && !shift && s.to_lowercase() == "y" => {
+            Some(Command::ToggleSyncScroll)
+        }
         _ => None,
     }
 }
@@ -126,7 +133,8 @@ pub fn command_for_event(plain: &Key, logical: &Key, mods: ModifiersState) -> Op
 #[must_use]
 pub fn shortcut_label(cmd: Command) -> Option<String> {
     use NamedKey::*;
-    let named: [(NamedKey, &str); 17] = [
+    let named: [(NamedKey, &str); 18] = [
+        (ScrollLock, "Arrêt défil"),
         (Space, "Espace"),
         (F1, "F1"),
         (F3, "F3"),

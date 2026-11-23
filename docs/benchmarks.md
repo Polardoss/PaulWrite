@@ -633,3 +633,19 @@ version installée précédente (cb65e68) :
 copie du texte inséré, puis une insertion dans le second rope). Vérifié par les tests : 400
 éditions aléatoires (multi-curseurs, annuler, rétablir, remplacements) laissent les deux textes et
 leurs révisions identiques ; l'historique commun annule une frappe faite dans l'autre vue.
+
+## Menu d'un onglet et défilement synchronisé
+
+Mesure sans écran partagé, runs alternés avec la version installée précédente (9949922). Machine
+plus calme que les jours précédents (frappe p99 de 2,7 à 4,3 ms).
+
+| Scénario | Précédent | Cette version | Verdict |
+|---|---|---|---|
+| Démarrage, fenêtre visible (15 + 15 runs alternés) | médiane 99,3 ms (83,9 à 274,9) | médiane 97,3 ms (81,1 à 183,0) | identique |
+| Frappe, p99 (3 séries de 300) | 4,26 / 2,70 / 3,25 ms | 3,71 / 2,80 / 2,81 ms | identique |
+| Défilement, dessin p99 (3 séries de 600) | 3,16 / 2,89 / 3,95 ms | 3,20 / 3,20 / 3,13 ms | identique |
+
+**Non mesuré** : le coût d'une image en écran partagé avec défilement synchronisé (une comparaison
+de deux entiers et, quand un volet a défilé, un `set_first_line` sur l'autre). Le menu d'onglet est
+un menu natif Windows : il n'a pas été essayé à la souris dans cette session (la boucle de menu est
+modale), seulement sa construction (identifiants, commandes) est testée.

@@ -235,7 +235,23 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   d'annulation vit dans la vue qui reçoit la saisie et passe à l'autre quand le focus change. Sans
   jumelle, le chemin de saisie ne fait qu'un test d'option de plus. Fermer une vue ne pose aucune
   question (le texte reste dans l'autre) ; refermer le partage supprime la vue jumelle de droite.
-  Au rechargement du fichier modifié sur disque, chaque vue se recharge. **Limites** : les volets
+  Au rechargement du fichier modifié sur disque, chaque vue se recharge.
+- **Menu d'un onglet** (clic droit) : menu natif (`TrackPopupMenu`, comme la barre de menus : la
+  boucle de menu de Windows bloque le temps du choix). L'onglet cliqué devient l'onglet courant, puis
+  chaque entrée est une commande nommée : sans partage « Scinder à droite (déplacer le fichier) »
+  et « (garder aussi ici) » ; en écran partagé « Envoyer dans l'autre volet », « Afficher aussi dans
+  l'autre volet », « Défilement synchronisé », « Fermer l'écran partagé » ; puis « Enregistrer » et
+  « Fermer le fichier ».
+- **Défilement synchronisé** (`view.toggle_sync_scroll` : Arrêt défil, Alt+Y, menu Affichage) : les
+  deux volets gardent la même première ligne. Une fois par image, le volet qui n'a pas défilé suit
+  celui qui a défilé (molette sous la souris, touches, barre de défilement, minimap, curseur qui
+  sort de la vue) ; si les deux ont bougé, celui qui a le focus l'emporte. À l'activation, l'autre
+  volet se cale sur celui qui a le focus ; changer de volet ou d'onglet n'est pas un défilement. Les
+  deux fichiers n'ont pas à avoir la même longueur (le plus court s'arrête à sa dernière ligne).
+  Défilement vertical seulement ; le curseur de chaque volet reste le sien.
+  **Correction trouvée avec le test** : donner leur taille aux éditeurs ramenait la vue au curseur
+  à chaque rafraîchissement, y compris dans le volet inactif ; c'est maintenant fait seulement si
+  le nombre de rangées visibles change (changer de volet ne fait plus sauter la vue). **Limites** : les volets
   font chacun la moitié de la place ; pas de glisser-déposer d'onglet d'un volet à l'autre ; la
   disposition n'est pas conservée d'une session à l'autre (un fichier à deux vues revient en un
   seul onglet) ; une seule vue par fichier a le serveur de langage (donc les soulignements

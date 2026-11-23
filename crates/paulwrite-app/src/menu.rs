@@ -214,6 +214,11 @@ fn menus() -> Vec<Menu> {
                     "Clone File to Other Pane",
                     "Afficher le fichier dans l'autre volet",
                 ),
+                Item(
+                    Command::ToggleSyncScroll,
+                    "Synchronized Scrolling",
+                    "D\u{e9}filement synchronis\u{e9}",
+                ),
                 Sep,
                 Item(Command::NextTab, "Next File", "Fichier suivant"),
                 Item(
@@ -336,6 +341,7 @@ fn shortcut_text(cmd: Command, lang: Lang) -> Option<String> {
         Lang::En => label
             .replace("Maj+", "Shift+")
             .replace("Espace", "Space")
+            .replace("Arrêt défil", "Scroll Lock")
             .replace("Échap", "Esc")
             .replace("Début", "Home")
             .replace("Fin", "End")
@@ -381,9 +387,109 @@ pub fn build(lang: Lang) -> (Vec<(String, Vec<MenuEntry>)>, Vec<Command>) {
     (bar, table)
 }
 
+/// Les identifiants du menu contextuel d'un onglet vont de cette valeur à `CONTEXT_BASE` + nombre
+/// d'entrées (hors de la plage de la barre de menus).
+pub const CONTEXT_BASE: u32 = 2000;
+
+/// Menu contextuel d'un onglet (clic droit) : scinder l'écran, fermer, enregistrer. Chaque entrée
+/// est une commande nommée, qui agit sur l'onglet cliqué (activé avant l'ouverture du menu). Rend
+/// les entrées et la table identifiant → commande (`CONTEXT_BASE` + indice). `split` : l'écran est
+/// déjà partagé.
+#[must_use]
+pub fn tab_context(lang: Lang, split: bool) -> (Vec<MenuEntry>, Vec<Command>) {
+    let mut lines: Vec<Line> = if split {
+        vec![
+            Item(
+                Command::MoveToOtherPane,
+                "Move to Other Pane",
+                "Envoyer dans l'autre volet",
+            ),
+            Item(
+                Command::CloneToOtherPane,
+                "Also Show in Other Pane",
+                "Afficher aussi dans l'autre volet",
+            ),
+            Item(
+                Command::ToggleSyncScroll,
+                "Synchronized Scrolling",
+                "D\u{e9}filement synchronis\u{e9}",
+            ),
+            Item(
+                Command::ToggleSplit,
+                "Close Split Screen",
+                "Fermer l'\u{e9}cran partag\u{e9}",
+            ),
+        ]
+    } else {
+        vec![
+            Item(
+                Command::MoveToOtherPane,
+                "Split Right (Move File)",
+                "Scinder \u{e0} droite (d\u{e9}placer le fichier)",
+            ),
+            Item(
+                Command::CloneToOtherPane,
+                "Split Right (Keep Here Too)",
+                "Scinder \u{e0} droite (garder aussi ici)",
+            ),
+        ]
+    };
+    lines.extend([
+        Sep,
+        Item(Command::Save, "Save", "Enregistrer"),
+        Item(Command::CloseTab, "Close File", "Fermer le fichier"),
+    ]);
+    let mut table = Vec::new();
+    let entries = lines
+        .into_iter()
+        .map(|line| match line {
+            Line::Sep => MenuEntry::Separator,
+            Line::Item(cmd, en, fr) => {
+                let id = CONTEXT_BASE + table.len() as u32;
+                table.push(cmd);
+                let label = lang.pick(en, fr);
+                MenuEntry::Item(
+                    id,
+                    match shortcut_text(cmd, lang) {
+                        Some(s) => format!("{label}\t{s}"),
+                        None => label.to_owned(),
+                    },
+                )
+            }
+        })
+        .collect();
+    (entries, table)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn le_menu_d_un_onglet_scinde_et_se_ferme() {
+        for split in [false, true] {
+            let (entries, table) = tab_context(Lang::Fr, split);
+            let ids: Vec<u32> = entries
+                .iter()
+                .filter_map(|e| match e {
+                    MenuEntry::Item(id, _) => Some(*id),
+                    MenuEntry::Separator => None,
+                })
+                .collect();
+            assert_eq!(ids.len(), table.len());
+            assert!(ids.iter().all(|id| *id >= CONTEXT_BASE));
+            for (k, id) in ids.iter().enumerate() {
+                assert_eq!((id - CONTEXT_BASE) as usize, k);
+            }
+            assert!(table.contains(&Command::CloneToOtherPane));
+            assert!(table.contains(&Command::MoveToOtherPane));
+            assert!(table.contains(&Command::CloseTab));
+            assert_eq!(table.contains(&Command::ToggleSplit), split);
+        }
+        // hors de la plage des identifiants de la barre de menus
+        let (_, bar_table) = build(Lang::En);
+        assert!(MENU_BASE + (bar_table.len() as u32) < CONTEXT_BASE);
+    }
 
     #[test]
     fn les_menus_sont_ceux_de_sublime_text() {

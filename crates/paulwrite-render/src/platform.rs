@@ -6,7 +6,8 @@
 use std::path::PathBuf;
 
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, POINT};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
@@ -24,8 +25,9 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateMenu, CreatePopupMenu, DestroyMenu, DrawMenuBar, GetMenu, MessageBoxW,
-    SetMenu, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
-    MB_YESNOCANCEL, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, WM_COMMAND,
+    SetForegroundWindow, SetMenu, TrackPopupMenu, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION,
+    MB_ICONWARNING, MB_OK, MB_YESNO, MB_YESNOCANCEL, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, WM_COMMAND,
 };
 
 /// Texte du presse-papiers (s'il y en a).
@@ -266,6 +268,44 @@ pub fn set_menu(hwnd: isize, menus: &[(String, Vec<MenuEntry>)]) -> bool {
             let _ = DrawMenuBar(HWND(hwnd as *mut _));
         }
         ok
+    }
+}
+
+/// Affiche un menu contextuel au point `(x, y)` (pixels de la zone cliente) et renvoie
+/// l'identifiant de l'entrée choisie, `None` s'il est refermé sans choix. **Bloque** pendant que
+/// l'utilisateur choisit (boucle de menu de Windows, comme pour la barre de menus).
+#[must_use]
+pub fn popup_menu(hwnd: isize, entries: &[MenuEntry], x: i32, y: i32) -> Option<u32> {
+    // SAFETY: le menu créé est détruit avant le retour ; les chaînes sont terminées par 0 et
+    // copiées par Windows pendant `AppendMenuW` ; `TrackPopupMenu` est appelé depuis le thread qui
+    // possède la fenêtre.
+    unsafe {
+        let popup = CreatePopupMenu().ok()?;
+        for e in entries {
+            let _ = match e {
+                MenuEntry::Item(id, label) => {
+                    let text = wide(label);
+                    AppendMenuW(popup, MF_STRING, *id as usize, PCWSTR(text.as_ptr()))
+                }
+                MenuEntry::Separator => AppendMenuW(popup, MF_SEPARATOR, 0, PCWSTR::null()),
+            };
+        }
+        let hwnd = HWND(hwnd as *mut _);
+        let mut at = POINT { x, y };
+        let _ = ClientToScreen(hwnd, &mut at);
+        // au premier plan : sinon le menu ne se referme pas au clic ailleurs
+        let _ = SetForegroundWindow(hwnd);
+        let chosen = TrackPopupMenu(
+            popup,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+            at.x,
+            at.y,
+            None,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(popup);
+        (chosen.0 > 0).then_some(chosen.0 as u32)
     }
 }
 

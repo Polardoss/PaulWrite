@@ -379,6 +379,10 @@ struct App {
     next_tab_id: TabId,
     /// Dernier numéro de groupe de vues jumelles distribué (voir `links.rs`).
     next_link: u64,
+    /// Défilement synchronisé des deux volets, et première ligne de chacun à la dernière
+    /// synchronisation (sert à voir lequel des deux a défilé).
+    sync_scroll: bool,
+    synced_first: (usize, usize),
     /// La liste des onglets (libellés, modifié, actif) doit être renvoyée au moteur de rendu.
     tabs_dirty: bool,
     mods: ModifiersState,
@@ -558,6 +562,8 @@ impl App {
             shown: [0, 0],
             next_tab_id: 1,
             next_link: 0,
+            sync_scroll: false,
+            synced_first: (0, 0),
             tabs_dirty: true,
             mods: ModifiersState::empty(),
             full_present: true,
@@ -709,12 +715,14 @@ impl App {
         for p in 0..=usize::from(self.second.is_some()) {
             let i = self.shown_index(p);
             if let Some(rows) = self.rows_in(p) {
-                self.tabs[i].editor.set_viewport_rows(rows);
+                self.apply_rows(i, rows);
             }
             self.sync_text_layout_for(i, p);
             // seul l'éditeur du volet qui a le focus a un curseur qui clignote
             self.tabs[i].editor.set_caret_visible(p == pane);
         }
+        // changer d'onglet n'est pas un défilement : les deux volets ne se recalent pas pour autant
+        self.mark_scroll_synced();
         self.full_present = true;
         self.tabs_dirty = true;
         self.ime_area = None;
@@ -799,7 +807,7 @@ impl App {
             if let Some(r) = r {
                 r.set_tabs(&infos);
                 let rows = r.metrics().rows_for(r.size().1);
-                self.tabs[shown].editor.set_viewport_rows(rows);
+                self.apply_rows(shown, rows);
             }
         }
     }
@@ -2762,6 +2770,7 @@ impl App {
         let started = Instant::now();
         // les vues jumelles d'un même fichier se rattrapent avant tout le reste
         self.sync_links();
+        self.sync_scroll_panes();
         self.sync_syntax();
         self.sync_lsp();
         self.refresh_tabs();
@@ -2869,7 +2878,7 @@ impl App {
         for p in 0..=usize::from(self.second.is_some()) {
             let i = self.shown_index(p);
             if let Some(rows) = self.rows_in(p) {
-                self.tabs[i].editor.set_viewport_rows(rows);
+                self.apply_rows(i, rows);
             }
         }
         self.full_present = true;
@@ -2933,6 +2942,7 @@ impl App {
             Effect::FocusOtherPane => self.focus_other_pane(),
             Effect::MoveToOtherPane => self.move_to_other_pane(),
             Effect::CloneToOtherPane => self.clone_to_other_pane(),
+            Effect::ToggleSyncScroll => self.toggle_sync_scroll(),
             Effect::OpenPalette(mode) => self.open_palette(mode),
             Effect::OpenFolder => {
                 self.jobs.send(Job::PickFolder { owner: self.hwnd }).ok();
@@ -3069,6 +3079,7 @@ second ligne
                         | Effect::FocusOtherPane
                         | Effect::MoveToOtherPane
                         | Effect::CloneToOtherPane
+                        | Effect::ToggleSyncScroll
                         | Effect::NewTab
                         | Effect::NextTab
                         | Effect::PrevTab),
@@ -4435,6 +4446,10 @@ impl ApplicationHandler<UserEvent> for App {
                     (MouseButton::Left, Some((i, true)), _, _)
                     | (MouseButton::Middle, Some((i, _)), _, _) => self.close_tab(i),
                     (MouseButton::Left, Some((i, false)), _, _) => self.activate(i),
+                    (MouseButton::Right, Some((i, _)), _, _) => {
+                        let at = (self.mouse.x as i32, self.mouse.y as i32);
+                        self.tab_context_menu(i, at, el);
+                    }
                     (MouseButton::Left, None, None, Some(hit)) => {
                         self.strip_drag = Some(matches!(hit, StripHit::Scrollbar { .. }));
                         self.strip_apply(hit);

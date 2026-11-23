@@ -124,6 +124,8 @@ paulwrite [fichier]        # ou glisser un fichier sur la fenêtre
 | Ctrl+K puis Ctrl+B, icône en bas à gauche | afficher / masquer la barre latérale |
 | Glisser le bord de la barre latérale, son curseur de défilement | largeur, défilement |
 | View ▸ Split Screen, Ctrl+Alt+← / → , Ctrl+Alt+Maj+← / → | **écran partagé** : deux fichiers côte à côte, chaque volet avec ses onglets ; un clic sur un volet lui donne le focus, la molette agit sur le volet sous la souris ; Ctrl+Alt+← / → change de volet, avec Maj envoie l'onglet dans l'autre (le partage se referme quand un volet est vide) ; View ▸ Clone File to Other Pane affiche **le même fichier dans les deux volets** (vues jumelles : curseurs et défilement propres, texte, enregistrement et annulation communs) |
+| Clic droit sur un onglet | menu : **scinder à droite** (déplacer le fichier, ou le garder aussi ici), puis (en écran partagé) envoyer dans l'autre volet, défilement synchronisé, fermer le partage ; enregistrer, fermer |
+| Arrêt défil ou Alt+Y (View ▸ Synchronized Scrolling) | **défilement synchronisé** des deux volets : ils restent à la même première ligne, pour comparer deux fichiers (le volet qui n'a pas le focus se cale à l'activation) |
 | Alt+Z (View ▸ Word Wrap) | retour à la ligne automatique (actif par défaut) |
 | (en revenant sur la fenêtre) | un fichier modifié par un autre programme est **rechargé tout seul** (curseur et vue conservés) s'il n'a pas été modifié ici ; sinon une question est posée |
 | (au lancement, sans fichier en argument) | **reprise de session** : onglets, dossier, barre latérale, curseur et défilement de chaque fichier ; le texte non enregistré n'est pas conservé |

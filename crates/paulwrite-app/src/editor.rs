@@ -984,6 +984,7 @@ impl Editor {
             Command::FocusOtherPane => return Some(Effect::FocusOtherPane),
             Command::MoveToOtherPane => return Some(Effect::MoveToOtherPane),
             Command::CloneToOtherPane => return Some(Effect::CloneToOtherPane),
+            Command::ToggleSyncScroll => return Some(Effect::ToggleSyncScroll),
             Command::OpenSettings => return Some(Effect::OpenSettings),
             Command::About => return Some(Effect::About),
             Command::LspCompletion => return Some(Effect::Lsp(LspAction::Completion)),

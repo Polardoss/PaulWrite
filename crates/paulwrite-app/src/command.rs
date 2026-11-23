@@ -81,6 +81,9 @@ pub enum Command {
     /// Écran partagé : affiche le même fichier dans l'autre volet (une vue jumelle : même texte,
     /// mêmes modifications, historique d'annulation commun, curseur et défilement propres).
     CloneToOtherPane,
+    /// Écran partagé : les deux volets défilent ensemble (toujours à la même ligne), pour comparer
+    /// deux fichiers.
+    ToggleSyncScroll,
     /// Ouvrir le fichier de configuration.
     OpenSettings,
     /// À propos de PaulWrite.
@@ -207,6 +210,7 @@ impl Command {
             Command::FocusOtherPane => "view.focus_other_pane",
             Command::MoveToOtherPane => "view.move_to_other_pane",
             Command::CloneToOtherPane => "view.clone_to_other_pane",
+            Command::ToggleSyncScroll => "view.toggle_sync_scroll",
             Command::OpenSettings => "preferences.open_settings",
             Command::About => "help.about",
             Command::Find => "find.find",
@@ -295,6 +299,7 @@ impl Command {
             Command::FocusOtherPane,
             Command::MoveToOtherPane,
             Command::CloneToOtherPane,
+            Command::ToggleSyncScroll,
             Command::OpenSettings,
             Command::About,
             Command::Find,
@@ -378,6 +383,7 @@ impl Command {
             Command::FocusOtherPane => "Affichage : aller à l'autre volet",
             Command::MoveToOtherPane => "Affichage : envoyer l'onglet dans l'autre volet",
             Command::CloneToOtherPane => "Affichage : afficher le fichier dans l'autre volet",
+            Command::ToggleSyncScroll => "Affichage : défilement synchronisé des volets",
             Command::OpenSettings => "Préférences : ouvrir la configuration",
             Command::About => "Aide : à propos de PaulWrite",
             Command::Find => "Recherche : chercher dans le document",
@@ -469,6 +475,7 @@ impl Command {
             Command::FocusOtherPane => "View: focus the other pane",
             Command::MoveToOtherPane => "View: move the tab to the other pane",
             Command::CloneToOtherPane => "View: show the file in the other pane",
+            Command::ToggleSyncScroll => "View: synchronized scrolling of the panes",
             Command::OpenSettings => "Preferences: open settings",
             Command::About => "Help: about PaulWrite",
             Command::Find => "Find: find in document",
@@ -628,6 +635,7 @@ pub enum Effect {
     FocusOtherPane,
     MoveToOtherPane,
     CloneToOtherPane,
+    ToggleSyncScroll,
     OpenSettings,
     About,
     /// Occurrence suivante (`true`) ou précédente de la dernière recherche.

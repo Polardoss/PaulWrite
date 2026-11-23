@@ -55,6 +55,16 @@ impl App {
         Some(r.metrics().rows_for(r.size().1))
     }
 
+    /// Donne à l'onglet `i` le nombre de rangées visibles de son volet. L'éditeur ramène alors son
+    /// curseur dans la vue : seulement si le nombre a changé (sinon la vue sautait au curseur à
+    /// chaque rafraîchissement ou changement de focus, et perdait la position où l'utilisateur
+    /// l'avait fait défiler, ce qui défait aussi le défilement synchronisé).
+    pub(super) fn apply_rows(&mut self, i: usize, rows: usize) {
+        if self.tabs[i].editor.rows() != rows.max(1) {
+            self.tabs[i].editor.set_viewport_rows(rows);
+        }
+    }
+
     /// Redessin complet des deux volets à la prochaine image.
     pub(super) fn invalidate_panes(&mut self) {
         for r in [self.renderer.as_mut(), self.second.as_mut()]
@@ -203,6 +213,83 @@ impl App {
         self.layout_panes();
     }
 
+    /// Première ligne affichée dans chaque volet.
+    fn first_lines(&self) -> (usize, usize) {
+        (
+            self.tabs[self.shown_index(0)].editor.first_line(),
+            self.tabs[self.shown_index(1)].editor.first_line(),
+        )
+    }
+
+    /// Retient les positions actuelles des deux volets comme « synchronisées ».
+    pub(super) fn mark_scroll_synced(&mut self) {
+        self.synced_first = self.first_lines();
+    }
+
+    /// Défilement synchronisé : active ou coupe, et recale l'autre volet sur celui qui a le focus.
+    pub(super) fn toggle_sync_scroll(&mut self) {
+        self.sync_scroll = !self.sync_scroll;
+        if self.sync_scroll && self.second.is_some() {
+            let line = self.tabs[self.active].editor.first_line();
+            let other = self.shown_index(1 - self.focus);
+            self.tabs[other].editor.set_first_line(line);
+        }
+        self.mark_scroll_synced();
+        let on = self.sync_scroll;
+        let split = self.second.is_some();
+        self.toast(match (self.lang, on, split) {
+            (Lang::Fr, true, true) => "Défilement synchronisé : activé",
+            (Lang::Fr, true, false) => "Défilement synchronisé : activé (actif en écran partagé)",
+            (Lang::Fr, false, _) => "Défilement synchronisé : désactivé",
+            (Lang::En, true, true) => "Synchronized scrolling: on",
+            (Lang::En, true, false) => "Synchronized scrolling: on (applies in split screen)",
+            (Lang::En, false, _) => "Synchronized scrolling: off",
+        });
+        self.request_redraw();
+    }
+
+    /// Une fois par image : si un volet a défilé, l'autre le suit (même première ligne). Quand les
+    /// deux ont bougé, le volet qui a le focus l'emporte.
+    pub(super) fn sync_scroll_panes(&mut self) {
+        if !self.sync_scroll || self.second.is_none() {
+            return;
+        }
+        let (f0, f1) = self.first_lines();
+        if f0 == f1 {
+            self.synced_first = (f0, f1);
+            return;
+        }
+        let (l0, l1) = self.synced_first;
+        let source = match (f0 != l0, f1 != l1) {
+            (true, false) => 0,
+            (false, true) => 1,
+            _ => self.focus,
+        };
+        let line = if source == 0 { f0 } else { f1 };
+        let target = self.shown_index(1 - source);
+        self.tabs[target].editor.set_first_line(line);
+        self.mark_scroll_synced();
+    }
+
+    /// Clic droit sur l'onglet `index` : il devient l'onglet courant, puis un menu propose de
+    /// scinder l'écran (déplacer le fichier ou le garder aussi ici), de fermer ou d'enregistrer.
+    pub(super) fn tab_context_menu(&mut self, index: usize, at: (i32, i32), el: &ActiveEventLoop) {
+        self.activate(index);
+        let (entries, table) = menu::tab_context(self.lang, self.second.is_some());
+        // le dessin du clic précédent doit être à l'écran avant que le menu ne bloque
+        if let Some(r) = self.renderer.as_mut() {
+            let _ = r.present(self.hwnd);
+        }
+        let chosen = platform::popup_menu(self.hwnd, &entries, at.0, at.1);
+        if let Some(cmd) = chosen
+            .and_then(|id| id.checked_sub(menu::CONTEXT_BASE))
+            .and_then(|k| table.get(k as usize).copied())
+        {
+            self.execute(cmd, el);
+            self.touch(Instant::now());
+        }
+    }
+
     /// Donne le focus à l'autre volet (sans effet hors écran partagé).
     pub(super) fn focus_other_pane(&mut self) {
         if self.second.is_some() {
@@ -332,5 +419,48 @@ mod tests {
 
         // même fichier dans les deux volets (vues jumelles)
         app.scenario_vues_jumelles();
+
+        // défilement synchronisé : deux fichiers de 300 lignes
+        app.tabs[0].editor.insert_text(&"ligne\n".repeat(300), 0);
+        app.toggle_split();
+        assert_eq!(app.tabs.len(), 2);
+        app.tabs[1].editor.insert_text(&"autre\n".repeat(300), 0);
+        let (a, b) = (0usize, 1usize);
+        app.tabs[a].editor.set_first_line(7);
+        app.tabs[b].editor.set_first_line(2);
+        // coupé : chacun garde sa position
+        app.sync_scroll_panes();
+        assert_eq!(
+            (
+                app.tabs[a].editor.first_line(),
+                app.tabs[b].editor.first_line()
+            ),
+            (7, 2)
+        );
+        // activé : l'autre volet se cale sur celui qui a le focus (le volet de droite)
+        assert_eq!(app.focus, 1);
+        app.toggle_sync_scroll();
+        assert!(app.sync_scroll);
+        assert_eq!(app.tabs[a].editor.first_line(), 2);
+        // le volet qui a le focus défile : l'autre le suit
+        app.tabs[b].editor.scroll_by(40);
+        app.sync_scroll_panes();
+        assert_eq!(app.tabs[b].editor.first_line(), 42);
+        assert_eq!(app.tabs[a].editor.first_line(), 42);
+        // l'autre volet défile (molette sous la souris) : le premier le suit
+        app.tabs[a].editor.scroll_by(-12);
+        app.sync_scroll_panes();
+        assert_eq!(app.tabs[a].editor.first_line(), 30);
+        assert_eq!(app.tabs[b].editor.first_line(), 30);
+        // changer de volet n'est pas un défilement
+        app.focus_other_pane();
+        app.sync_scroll_panes();
+        assert_eq!(app.tabs[a].editor.first_line(), 30);
+        // coupé : plus de suivi
+        app.toggle_sync_scroll();
+        app.tabs[a].editor.scroll_by(5);
+        app.sync_scroll_panes();
+        assert_eq!(app.tabs[a].editor.first_line(), 35);
+        assert_eq!(app.tabs[b].editor.first_line(), 30);
     }
 }
