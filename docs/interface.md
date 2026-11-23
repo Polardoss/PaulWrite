@@ -243,7 +243,9 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   l'autre volet », « Défilement synchronisé », « Fermer l'écran partagé » ; puis « Enregistrer » et
   « Fermer le fichier ».
 - **Défilement synchronisé** (`view.toggle_sync_scroll` : Arrêt défil, Alt+Y, menu Affichage) : les
-  deux volets gardent la même première ligne. Une fois par image, le volet qui n'a pas défilé suit
+  deux volets gardent la même première **rangée** (la même ligne, et avec le retour à la ligne la
+  même rangée dans la ligne : sans cela l'un montrait le début d'une longue ligne et l'autre sa
+  suite, un décalage visible, corrigé après un premier essai). Une fois par image, le volet qui n'a pas défilé suit
   celui qui a défilé (molette sous la souris, touches, barre de défilement, minimap, curseur qui
   sort de la vue) ; si les deux ont bougé, celui qui a le focus l'emporte. À l'activation, l'autre
   volet se cale sur celui qui a le focus ; changer de volet ou d'onglet n'est pas un défilement. Les

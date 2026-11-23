@@ -382,7 +382,7 @@ struct App {
     /// Défilement synchronisé des deux volets, et première ligne de chacun à la dernière
     /// synchronisation (sert à voir lequel des deux a défilé).
     sync_scroll: bool,
-    synced_first: (usize, usize),
+    synced_first: ((usize, usize), (usize, usize)),
     /// La liste des onglets (libellés, modifié, actif) doit être renvoyée au moteur de rendu.
     tabs_dirty: bool,
     mods: ModifiersState,
@@ -563,7 +563,7 @@ impl App {
             next_tab_id: 1,
             next_link: 0,
             sync_scroll: false,
-            synced_first: (0, 0),
+            synced_first: ((0, 0), (0, 0)),
             tabs_dirty: true,
             mods: ModifiersState::empty(),
             full_present: true,

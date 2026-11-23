@@ -213,26 +213,26 @@ impl App {
         self.layout_panes();
     }
 
-    /// Première ligne affichée dans chaque volet.
-    fn first_lines(&self) -> (usize, usize) {
+    /// Première rangée affichée dans chaque volet : `(ligne, rangée dans la ligne)`.
+    fn first_positions(&self) -> ((usize, usize), (usize, usize)) {
         (
-            self.tabs[self.shown_index(0)].editor.first_line(),
-            self.tabs[self.shown_index(1)].editor.first_line(),
+            self.tabs[self.shown_index(0)].editor.first_position(),
+            self.tabs[self.shown_index(1)].editor.first_position(),
         )
     }
 
     /// Retient les positions actuelles des deux volets comme « synchronisées ».
     pub(super) fn mark_scroll_synced(&mut self) {
-        self.synced_first = self.first_lines();
+        self.synced_first = self.first_positions();
     }
 
     /// Défilement synchronisé : active ou coupe, et recale l'autre volet sur celui qui a le focus.
     pub(super) fn toggle_sync_scroll(&mut self) {
         self.sync_scroll = !self.sync_scroll;
         if self.sync_scroll && self.second.is_some() {
-            let line = self.tabs[self.active].editor.first_line();
+            let (line, sub) = self.tabs[self.active].editor.first_position();
             let other = self.shown_index(1 - self.focus);
-            self.tabs[other].editor.set_first_line(line);
+            self.tabs[other].editor.set_first_position(line, sub);
         }
         self.mark_scroll_synced();
         let on = self.sync_scroll;
@@ -254,7 +254,7 @@ impl App {
         if !self.sync_scroll || self.second.is_none() {
             return;
         }
-        let (f0, f1) = self.first_lines();
+        let (f0, f1) = self.first_positions();
         if f0 == f1 {
             self.synced_first = (f0, f1);
             return;
@@ -263,11 +263,15 @@ impl App {
         let source = match (f0 != l0, f1 != l1) {
             (true, false) => 0,
             (false, true) => 1,
-            _ => self.focus,
+            // rien n'a bougé depuis la dernière fois (le plus court s'est arrêté plus tôt) :
+            // rien à refaire
+            (false, false) => return,
+            // les deux ont bougé : le volet qui a le focus l'emporte
+            (true, true) => self.focus,
         };
-        let line = if source == 0 { f0 } else { f1 };
+        let (line, sub) = if source == 0 { f0 } else { f1 };
         let target = self.shown_index(1 - source);
-        self.tabs[target].editor.set_first_line(line);
+        self.tabs[target].editor.set_first_position(line, sub);
         self.mark_scroll_synced();
     }
 
@@ -462,5 +466,36 @@ mod tests {
         app.sync_scroll_panes();
         assert_eq!(app.tabs[a].editor.first_line(), 35);
         assert_eq!(app.tabs[b].editor.first_line(), 30);
+
+        // retour à la ligne : les deux volets restent à la même *rangée*, pas seulement à la même
+        // ligne (sinon l'un montre le début de la ligne et l'autre sa suite : un décalage)
+        for i in [a, b] {
+            let e = &mut app.tabs[i].editor;
+            e.goto(1, 0);
+            e.insert_text(&format!("{}\n", "mot ".repeat(200)).repeat(40), 0);
+            e.set_first_line(0);
+        }
+        app.toggle_sync_scroll();
+        assert!(app.sync_scroll);
+        let focus_tab = app.active;
+        app.tabs[focus_tab].editor.scroll_by(7);
+        app.sync_scroll_panes();
+        let (pa, pb) = (
+            app.tabs[a].editor.first_position(),
+            app.tabs[b].editor.first_position(),
+        );
+        assert!(
+            pa.1 > 0,
+            "le défilement s'est arrêté dans une ligne repliée : {pa:?}"
+        );
+        assert_eq!(pa, pb, "même ligne et même rangée dans les deux volets");
+        // et l'autre sens, rangée par rangée
+        let other_tab = if focus_tab == a { b } else { a };
+        app.tabs[other_tab].editor.scroll_by(3);
+        app.sync_scroll_panes();
+        assert_eq!(
+            app.tabs[a].editor.first_position(),
+            app.tabs[b].editor.first_position()
+        );
     }
 }

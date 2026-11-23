@@ -1251,6 +1251,40 @@ impl Editor {
         }
     }
 
+    /// Première rangée affichée : `(ligne, rangée dans la ligne)`. La seconde valeur est 0 sans
+    /// retour à la ligne ; avec, elle compte les rangées de continuation déjà défilées.
+    #[must_use]
+    pub fn first_position(&self) -> (usize, usize) {
+        (self.first_line, self.first_sub)
+    }
+
+    /// Place la première rangée affichée à `(line, sub)` (sans bouger le curseur) : `sub` est
+    /// ramené dans la ligne si elle a moins de rangées. Sert au défilement synchronisé : deux
+    /// vues qui défilent rangée par rangée restent à la même rangée, pas seulement à la même ligne.
+    pub fn set_first_position(&mut self, line: usize, sub: usize) {
+        self.sync();
+        if self.plain_rows() {
+            self.set_first_line(line);
+            return;
+        }
+        let line = line.min(self.max_first_line());
+        let from = self.first_pos();
+        let to = walker!(self).normalize(Pos { line, sub });
+        self.set_first_pos(to);
+        // l'écart en rangées, s'il est petit (le rendu déplace alors les pixels au lieu de tout
+        // redessiner)
+        let rows = self.rows;
+        let moved = if to >= from {
+            self.rows_between(from, to, rows).map(|n| n as isize)
+        } else {
+            self.rows_between(to, from, rows).map(|n| -(n as isize))
+        };
+        match moved {
+            Some(n) => self.pending_scroll += n,
+            None => self.pending_scroll = JUMP,
+        }
+    }
+
     /// Fait défiler la vue pour que `line` soit au milieu de la fenêtre.
     pub fn scroll_to_center(&mut self, line: usize) {
         if self.plain_rows() {
