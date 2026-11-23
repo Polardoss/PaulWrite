@@ -131,18 +131,21 @@ impl App {
     /// Écran partagé : ouvre le second volet, ou le referme.
     pub(super) fn toggle_split(&mut self) {
         if self.second.is_some() {
-            self.close_split();
-            self.activate(self.active);
+            // une vue jumelle du volet de droite fait double emploi : elle disparaît
+            self.drop_redundant_twins();
+            if self.second.is_some() {
+                self.close_split();
+                self.activate(self.active);
+            }
         } else {
             self.open_split();
         }
     }
 
-    /// Ouvre le second volet. L'onglet courant y passe s'il a des voisins dans le volet de gauche ;
-    /// sinon un onglet vide y est créé (le volet de gauche garde son seul onglet).
-    fn open_split(&mut self) {
-        if self.second.is_some() || self.renderer.is_none() {
-            return;
+    /// Crée le moteur de rendu du second volet. `false` en cas d'échec.
+    pub(super) fn ensure_second(&mut self) -> bool {
+        if self.second.is_some() {
+            return true;
         }
         let scale = self
             .window
@@ -152,13 +155,22 @@ impl App {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("second volet : {e}");
-                return;
+                return false;
             }
         };
         if let Err(e) = r2.set_text_style(self.font_px as f32, self.tab_size as f32) {
             eprintln!("taille du texte : {e}");
         }
         self.second = Some(r2);
+        true
+    }
+
+    /// Ouvre le second volet. L'onglet courant y passe s'il a des voisins dans le volet de gauche ;
+    /// sinon un onglet vide y est créé (le volet de gauche garde son seul onglet).
+    fn open_split(&mut self) {
+        if self.second.is_some() || self.renderer.is_none() || !self.ensure_second() {
+            return;
+        }
         let target = if self.pane_tabs(0).len() >= 2 {
             self.active
         } else {
@@ -317,5 +329,8 @@ mod tests {
         app.close_now(1);
         assert!(app.second.is_none());
         assert_eq!(app.tabs.len(), 1);
+
+        // même fichier dans les deux volets (vues jumelles)
+        app.scenario_vues_jumelles();
     }
 }

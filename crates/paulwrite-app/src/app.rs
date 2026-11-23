@@ -80,6 +80,7 @@ macro_rules! fr_mut {
 }
 
 mod find;
+mod links;
 mod panes;
 mod project;
 mod repo;
@@ -376,6 +377,8 @@ struct App {
     focus: usize,
     shown: [TabId; 2],
     next_tab_id: TabId,
+    /// Dernier numéro de groupe de vues jumelles distribué (voir `links.rs`).
+    next_link: u64,
     /// La liste des onglets (libellés, modifié, actif) doit être renvoyée au moteur de rendu.
     tabs_dirty: bool,
     mods: ModifiersState,
@@ -554,6 +557,7 @@ impl App {
             focus: 0,
             shown: [0, 0],
             next_tab_id: 1,
+            next_link: 0,
             tabs_dirty: true,
             mods: ModifiersState::empty(),
             full_present: true,
@@ -692,6 +696,8 @@ impl App {
         if self.find_panel_open() {
             self.close_palette();
         }
+        // l'historique d'annulation d'un fichier à deux vues suit celle qui reçoit la saisie
+        self.claim_history(index);
         self.active = index;
         let pane = self.tabs[index]
             .pane
@@ -826,6 +832,8 @@ impl App {
         } else {
             self.push_tab()
         };
+        // un onglet vierge réutilisé ne peut pas rester la jumelle d'un autre
+        self.unlink(index);
         let tab = &mut self.tabs[index];
         tab.editor.set_path(path.clone());
         tab.loading = Some((0, 0));
@@ -931,7 +939,8 @@ impl App {
     fn close_now(&mut self, index: usize) {
         // On se souvient de l'onglet (seulement un vrai fichier lu ou enregistré).
         if let Some(t) = self.tabs.get(index) {
-            if let (Some(path), true) = (t.editor.path(), t.disk_stamp.is_some()) {
+            // (une vue jumelle ne se « rouvre » pas : le fichier reste ouvert dans l'autre vue)
+            if let (Some(path), true, 0) = (t.editor.path(), t.disk_stamp.is_some(), t.link) {
                 let (line, col) = t.editor.caret_line_col();
                 let closed = TabState {
                     path: path.to_path_buf(),
@@ -947,8 +956,11 @@ impl App {
         }
         self.plugin_event("close", Some(index));
         self.lsp_close_tab(index);
+        // une autre vue du fichier reprend l'historique d'annulation commun
+        self.release_history(index);
         let active_id = self.tabs[self.active].id;
         let tab = self.tabs.remove(index);
+        self.tidy_links();
         if tab.syntax_on {
             self.syntax_tx
                 .send(syntax::Request::Close { tab: tab.id })
@@ -979,7 +991,9 @@ impl App {
         if index >= self.tabs.len() {
             return;
         }
-        if self.tabs[index].editor.is_modified() && !self.is_bench() {
+        // fermer une vue jumelle ne perd rien : les modifications restent dans l'autre vue
+        let sole_view = self.peers_of(index).is_empty();
+        if self.tabs[index].editor.is_modified() && !self.is_bench() && sole_view {
             if self.confirming {
                 return;
             }
@@ -1213,10 +1227,22 @@ impl App {
     fn current_session(&self) -> Session {
         let mut tabs = Vec::new();
         let mut active = 0;
+        // position, dans la session, de la première vue de chaque fichier à plusieurs vues
+        let mut first_view: HashMap<u64, usize> = HashMap::new();
         for (i, t) in self.tabs.iter().enumerate() {
             let Some(path) = t.editor.path() else {
                 continue;
             };
+            if t.link != 0 {
+                // un fichier affiché dans deux vues n'est enregistré qu'une fois
+                if let Some(&pos) = first_view.get(&t.link) {
+                    if i == self.active {
+                        active = pos;
+                    }
+                    continue;
+                }
+                first_view.insert(t.link, tabs.len());
+            }
             if i == self.active {
                 active = tabs.len();
             }
@@ -2734,6 +2760,8 @@ impl App {
 
     fn redraw(&mut self, el: &ActiveEventLoop) {
         let started = Instant::now();
+        // les vues jumelles d'un même fichier se rattrapent avant tout le reste
+        self.sync_links();
         self.sync_syntax();
         self.sync_lsp();
         self.refresh_tabs();
@@ -2904,6 +2932,7 @@ impl App {
             Effect::ToggleSplit => self.toggle_split(),
             Effect::FocusOtherPane => self.focus_other_pane(),
             Effect::MoveToOtherPane => self.move_to_other_pane(),
+            Effect::CloneToOtherPane => self.clone_to_other_pane(),
             Effect::OpenPalette(mode) => self.open_palette(mode),
             Effect::OpenFolder => {
                 self.jobs.send(Job::PickFolder { owner: self.hwnd }).ok();
@@ -3039,6 +3068,7 @@ second ligne
                         effect @ (Effect::ToggleSplit
                         | Effect::FocusOtherPane
                         | Effect::MoveToOtherPane
+                        | Effect::CloneToOtherPane
                         | Effect::NewTab
                         | Effect::NextTab
                         | Effect::PrevTab),
@@ -3960,6 +3990,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.note_recent(&path);
                             }
                             self.tabs[i].editor.load(doc, Some(path));
+                            // un fichier à deux vues : le nouveau document garde son journal
+                            if self.tabs[i].link != 0 {
+                                self.tabs[i].editor.set_mirror(true);
+                            }
                             self.file_loaded = true;
                             self.tabs[i].shown_modified = false;
                             if i == self.active {
@@ -4022,6 +4056,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 if self.tabs[i].editor.path() == Some(path.as_path()) {
                                     self.tabs[i].editor.mark_saved(revision);
                                     self.tabs[i].disk_stamp = stamp;
+                                    self.mark_peers_saved(i, revision);
                                 }
                                 self.tabs_dirty = true;
                                 self.request_git();
@@ -4061,6 +4096,11 @@ impl ApplicationHandler<UserEvent> for App {
                 } => {
                     if let Some(i) = self.tab_index(tab) {
                         self.lsp_close_tab(i);
+                        // le nom vaut pour toutes les vues du fichier
+                        for j in self.peers_of(i) {
+                            self.tabs[j].editor.set_path(path.clone());
+                            self.attach_syntax(j, None);
+                        }
                         self.tabs[i].editor.set_path(path);
                         // Le nouveau nom peut changer le langage (« .txt » devenu « .rs »).
                         self.attach_syntax(i, None);

@@ -39,11 +39,24 @@ pub struct TextChange {
     pub text: String,
 }
 
+/// Une modification primitive à rejouer sur un autre buffer : sert à garder à jour les **vues
+/// jumelles** d'un même fichier (chacune a son propre buffer, tenu identique par rejeu).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MirrorOp {
+    /// Insertion de `text` à l'offset de caractères `at`.
+    Insert { at: usize, text: String },
+    /// Suppression des caractères `[start, end)`.
+    Delete { start: usize, end: usize },
+}
+
 /// Contenu texte d'un document.
 #[derive(Clone, Default)]
 pub struct Buffer {
     rope: Rope,
     revision: u64,
+    /// Journal des modifications à rejouer sur les vues jumelles, tenu seulement si
+    /// [`Buffer::track_mirror`] l'a activé (aucun coût sinon).
+    mirror_log: Option<Vec<MirrorOp>>,
     /// Journal des modifications au format LSP, tenu seulement si [`Buffer::track_changes`]
     /// l'a activé (aucun coût sinon).
     change_log: Option<Vec<TextChange>>,
@@ -76,6 +89,7 @@ impl Buffer {
         Self {
             rope: Rope::from_str(text),
             revision: 0,
+            mirror_log: None,
             edit_log: None,
             change_log: None,
         }
@@ -87,6 +101,20 @@ impl Buffer {
         Self {
             rope,
             revision: 0,
+            mirror_log: None,
+            edit_log: None,
+            change_log: None,
+        }
+    }
+
+    /// Copie du texte et de la révision, sans aucun journal : le point de départ d'une vue
+    /// jumelle (le rope se copie en temps constant).
+    #[must_use]
+    pub fn snapshot(&self) -> Self {
+        Self {
+            rope: self.rope.clone(),
+            revision: self.revision,
+            mirror_log: None,
             edit_log: None,
             change_log: None,
         }
@@ -145,6 +173,44 @@ impl Buffer {
             .unwrap_or_default()
     }
 
+    /// Active ou désactive le journal des modifications à rejouer sur les vues jumelles.
+    /// Désactiver vide le journal.
+    pub fn track_mirror(&mut self, on: bool) {
+        self.mirror_log = on.then(Vec::new);
+    }
+
+    /// Retire et renvoie les modifications faites depuis le dernier appel, dans l'ordre. Vide si
+    /// le suivi est désactivé.
+    pub fn take_mirror(&mut self) -> Vec<MirrorOp> {
+        self.mirror_log
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Rejoue des modifications venues d'une vue jumelle. Elles ne sont **pas** remises dans le
+    /// journal des jumelles (sinon elles repartiraient en écho) ; les journaux de coloration, de
+    /// repli et LSP, eux, les voient comme n'importe quelle modification. Une opération qui sort
+    /// des bornes (texte rechargé entre-temps) est ignorée. `each` est appelé après chaque
+    /// opération appliquée.
+    pub(crate) fn apply_mirror(&mut self, ops: &[MirrorOp], mut each: impl FnMut(&MirrorOp)) {
+        let log = self.mirror_log.take();
+        for op in ops {
+            match op {
+                MirrorOp::Insert { at, text } if *at <= self.rope.len_chars() => {
+                    self.insert(*at, text);
+                    each(op);
+                }
+                MirrorOp::Delete { start, end } if start < end && *end <= self.rope.len_chars() => {
+                    self.delete(*start..*end);
+                    each(op);
+                }
+                _ => {}
+            }
+        }
+        self.mirror_log = log;
+    }
+
     /// Active ou désactive le journal des modifications au format LSP (synchronisation d'un
     /// serveur de langage). Désactiver vide le journal.
     pub fn track_changes(&mut self, on: bool) {
@@ -191,6 +257,12 @@ impl Buffer {
 
     /// Insère `text` à `char_idx`.
     pub fn insert(&mut self, char_idx: usize, text: &str) {
+        if let Some(log) = self.mirror_log.as_mut() {
+            log.push(MirrorOp::Insert {
+                at: char_idx,
+                text: text.to_owned(),
+            });
+        }
         if self.change_log.is_some() && !text.is_empty() {
             let p = self.lsp_position(char_idx);
             if let Some(log) = self.change_log.as_mut() {
@@ -227,6 +299,12 @@ impl Buffer {
     /// Supprime la plage de caractères.
     pub fn delete(&mut self, range: Range<usize>) {
         if range.start < range.end {
+            if let Some(log) = self.mirror_log.as_mut() {
+                log.push(MirrorOp::Delete {
+                    start: range.start,
+                    end: range.end,
+                });
+            }
             if self.change_log.is_some() {
                 let (start, end) = (self.lsp_position(range.start), self.lsp_position(range.end));
                 if let Some(log) = self.change_log.as_mut() {

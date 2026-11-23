@@ -16,6 +16,12 @@ pub struct Tab {
     pub id: TabId,
     /// Volet où l'onglet s'affiche (0 : gauche ou seul, 1 : droite en écran partagé).
     pub pane: usize,
+    /// Les onglets qui portent le même numéro (non nul) sont des **vues jumelles** d'un même
+    /// fichier : leurs textes sont tenus identiques (voir `app/links.rs`). 0 : onglet seul.
+    pub link: u64,
+    /// Parmi les vues jumelles, celle qui porte l'historique d'annulation commun (celle qui reçoit
+    /// la saisie).
+    pub holds_history: bool,
     pub editor: Editor,
     /// Langage reconnu d'après l'extension du fichier.
     pub language: Option<Language>,
@@ -54,6 +60,8 @@ impl Tab {
         Self {
             id,
             pane: 0,
+            link: 0,
+            holds_history: false,
             editor: Editor::new(),
             language: None,
             syntax_on: false,

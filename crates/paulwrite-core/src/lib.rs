@@ -21,7 +21,7 @@ pub mod line_ending;
 pub mod motion;
 pub mod selection;
 
-pub use buffer::{Buffer, TextChange, TextEdit};
+pub use buffer::{Buffer, MirrorOp, TextChange, TextEdit};
 pub use document::{Document, Replacement};
 pub use edit::EditKind;
 pub use encoding::{Encoding, EncodingKind};

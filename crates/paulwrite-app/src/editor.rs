@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use paulwrite_core::motion;
 use paulwrite_core::{
-    Document, EditKind, Motion, Replacement, Selection, SelectionSet, TextChange, TextEdit,
+    Document, EditKind, MirrorOp, Motion, Replacement, Selection, SelectionSet, TextChange,
+    TextEdit,
 };
 use paulwrite_render::{FoldMark, GitMark, MinimapSource, Row, RowSource, Scroll};
 use paulwrite_syntax::{kind, Span};
@@ -247,6 +248,51 @@ impl Editor {
         self.cols = cols;
         self.wrap = wrap;
         self.fold_marks = marks;
+    }
+
+    // --- Vues jumelles -----------------------------------------------------------------------
+
+    /// Une vue jumelle de ce fichier (même texte, même état « enregistré », même position de
+    /// défilement), avec ses propres sélections et son propre défilement. Son journal de
+    /// modifications est actif : voir [`Editor::take_mirror`] et [`Editor::apply_mirror`].
+    #[must_use]
+    pub fn fork(&self) -> Editor {
+        let mut e = Editor::from_document(self.doc.fork(), self.path.clone());
+        e.saved_revision = self.saved_revision;
+        e.first_line = self.first_line;
+        e.first_sub = self.first_sub;
+        e.hscroll = self.hscroll;
+        e.rows = self.rows;
+        e.cols = self.cols;
+        e.wrap = self.wrap;
+        e.lang = self.lang;
+        e.comment = self.comment;
+        e.autopair = self.autopair;
+        e.fold_marks = self.fold_marks;
+        e.changes = self.changes.clone();
+        e.doc.track_mirror(true);
+        e
+    }
+
+    /// Active ou coupe le journal des modifications à rejouer sur les vues jumelles.
+    pub fn set_mirror(&mut self, on: bool) {
+        self.doc.track_mirror(on);
+    }
+
+    /// Modifications faites ici depuis le dernier appel, à rejouer sur les vues jumelles.
+    pub fn take_mirror(&mut self) -> Vec<MirrorOp> {
+        self.doc.take_mirror()
+    }
+
+    /// Rejoue les modifications d'une vue jumelle.
+    pub fn apply_mirror(&mut self, ops: &[MirrorOp]) {
+        self.doc.apply_mirror(ops);
+    }
+
+    /// Échange l'historique d'annulation avec celui d'une vue jumelle (voir
+    /// [`Document::swap_history`]).
+    pub fn swap_history(&mut self, other: &mut Editor) {
+        self.doc.swap_history(&mut other.doc);
     }
 
     // --- Accès -------------------------------------------------------------------------------
@@ -937,6 +983,7 @@ impl Editor {
             Command::ToggleSplit => return Some(Effect::ToggleSplit),
             Command::FocusOtherPane => return Some(Effect::FocusOtherPane),
             Command::MoveToOtherPane => return Some(Effect::MoveToOtherPane),
+            Command::CloneToOtherPane => return Some(Effect::CloneToOtherPane),
             Command::OpenSettings => return Some(Effect::OpenSettings),
             Command::About => return Some(Effect::About),
             Command::LspCompletion => return Some(Effect::Lsp(LspAction::Completion)),

@@ -615,3 +615,21 @@ du partage, le chemin normal ne change que par quelques tests de volet.
 **Non mesuré** : le coût d'une image **avec** deux volets ouverts (les modes `--bench-*` n'ouvrent
 pas le partage). Vérifié seulement par les tests : le rendu par régions des deux volets donne les
 mêmes pixels qu'un redessin complet (100 étapes aléatoires), et par une capture d'écran.
+
+## Écran partagé (étape 2 : le même fichier dans les deux volets)
+
+Le buffer tient maintenant, **seulement pour un fichier à deux vues**, un journal des insertions et
+suppressions à rejouer sur la vue jumelle. Sans jumelle, le chemin de saisie ne fait qu'un test
+d'option de plus par insertion ou suppression. Mesure sans écran partagé, runs alternés avec la
+version installée précédente (cb65e68) :
+
+| Scénario | Précédent | Vues jumelles (sans partage) | Verdict |
+|---|---|---|---|
+| Démarrage, fenêtre visible (30 + 30 runs alternés) | médiane 90,2 ms (84,2 à 142,4) | médiane 91,4 ms (83,3 à 162,2) | identique (une première série de 15 donnait 91,3 contre 95,8 ms avec une valeur isolée à 203 ms : bruit) |
+| Frappe, p99 (3 séries de 300) | 6,80 / 7,10 / 7,12 ms | 8,16 / 7,10 / 6,37 ms | identique |
+| Défilement, dessin p99 (3 séries de 600) | 3,70 / 4,43 / 3,95 ms | 5,05 / 3,16 / 4,64 ms | dans le bruit |
+
+**Non mesuré** : le coût d'une frappe **avec** deux vues du même fichier (rejeu sur la jumelle : la
+copie du texte inséré, puis une insertion dans le second rope). Vérifié par les tests : 400
+éditions aléatoires (multi-curseurs, annuler, rétablir, remplacements) laissent les deux textes et
+leurs révisions identiques ; l'historique commun annule une frappe faite dans l'autre vue.

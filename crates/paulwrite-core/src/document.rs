@@ -3,7 +3,7 @@
 //! C'est la façade utilisée par les commandes de l'éditeur. Chaque opération agit sur **toutes**
 //! les sélections et produit **une seule transaction** d'historique.
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, MirrorOp};
 use crate::edit::{self, Change, EditKind, Transaction};
 use crate::encoding::Encoding;
 use crate::fragment::Fragment;
@@ -94,6 +94,59 @@ impl Document {
     /// undo/redo, multi-curseurs. Vide si le suivi est désactivé.
     pub fn take_edits(&mut self) -> Vec<crate::buffer::TextEdit> {
         self.buffer.take_edits()
+    }
+
+    // --- Vues jumelles -----------------------------------------------------------------------
+    //
+    // Un même fichier affiché dans deux volets : chaque vue a son document (donc ses
+    // sélections), et les modifications de l'une sont rejouées sur l'autre. L'historique d'annulation
+    // est **commun** : il vit dans la vue qui a le focus (voir [`Document::swap_history`]).
+
+    /// Une vue jumelle de ce document : même texte, même révision, mêmes sélections et même
+    /// encodage, mais un historique vide et aucun journal.
+    #[must_use]
+    pub fn fork(&self) -> Document {
+        Document {
+            buffer: self.buffer.snapshot(),
+            selections: self.selections.clone(),
+            history: History::new(),
+            encoding: self.encoding,
+            line_ending: self.line_ending,
+        }
+    }
+
+    /// Active ou désactive le journal des modifications à rejouer sur les jumelles.
+    pub fn track_mirror(&mut self, on: bool) {
+        self.buffer.track_mirror(on);
+    }
+
+    /// Modifications faites depuis le dernier appel, à rejouer sur les jumelles.
+    pub fn take_mirror(&mut self) -> Vec<MirrorOp> {
+        self.buffer.take_mirror()
+    }
+
+    /// Rejoue les modifications d'une jumelle. Les sélections de ce document suivent le texte (un
+    /// curseur placé exactement au point d'insertion reste devant le texte inséré).
+    pub fn apply_mirror(&mut self, ops: &[MirrorOp]) {
+        let selections = &mut self.selections;
+        self.buffer.apply_mirror(ops, |op| {
+            selections.transform(|s| {
+                let map = |p: usize| match op {
+                    MirrorOp::Insert { at, text } if p > *at => p + text.chars().count(),
+                    MirrorOp::Delete { start, end } if p > *end => p - (end - start),
+                    MirrorOp::Delete { start, end } if p > *start => *start,
+                    _ => p,
+                };
+                Selection::new(map(s.anchor), map(s.head))
+            });
+        });
+    }
+
+    /// Échange l'historique avec celui d'une jumelle : l'historique d'annulation d'un fichier
+    /// affiché dans deux vues est commun, et suit la vue qui reçoit la saisie. À n'appeler que
+    /// quand les deux textes sont identiques.
+    pub fn swap_history(&mut self, other: &mut Document) {
+        std::mem::swap(&mut self.history, &mut other.history);
     }
 
     #[must_use]

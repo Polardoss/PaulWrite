@@ -223,11 +223,25 @@ l'éditeur (`view.rs`, `editor.rs`) qui décide quelle partie de quelle ligne oc
   principal garde la fenêtre entière et réserve un encart à droite, où il recopie l'image d'un
   second moteur (`SoftRenderer::new_pane`, créé seulement à l'ouverture du partage : rien ne change
   sans partage, ni au démarrage). Les bandes redessinées et la zone défilée du second volet sont
-  recopiées avec celles du premier ; le panneau flottant reste au-dessus. **Limites** (étape 1) :
-  un fichier ne s'affiche que dans un volet à la fois (le même fichier dans les deux volets est
-  l'étape 2 : document partagé, curseurs par vue) ; les volets font chacun la moitié de la place ;
-  pas de glisser-déposer d'onglet d'un volet à l'autre ; la disposition n'est pas conservée d'une
-  session à l'autre (les onglets reviennent dans un seul volet).
+  recopiées avec celles du premier ; le panneau flottant reste au-dessus.
+- **Le même fichier dans les deux volets** (`view.clone_to_other_pane`, View ▸ Clone File to Other
+  Pane) : une **vue jumelle**, avec son curseur, ses sélections et son défilement propres ; le texte,
+  les modifications, l'état « modifié » et l'enregistrement valent pour les deux vues, et
+  **l'annulation est commune** (Ctrl+Z dans une vue annule la dernière frappe, où qu'elle ait été
+  faite). **Conception** : chaque vue est un onglet avec son propre document ; les onglets qui
+  portent le même numéro de lien sont tenus identiques par **rejeu** : le buffer tient, seulement
+  quand il a des jumelles, un journal des insertions et suppressions (texte compris), rejoué une
+  fois par image sur les autres vues (les sélections des jumelles suivent le texte). L'historique
+  d'annulation vit dans la vue qui reçoit la saisie et passe à l'autre quand le focus change. Sans
+  jumelle, le chemin de saisie ne fait qu'un test d'option de plus. Fermer une vue ne pose aucune
+  question (le texte reste dans l'autre) ; refermer le partage supprime la vue jumelle de droite.
+  Au rechargement du fichier modifié sur disque, chaque vue se recharge. **Limites** : les volets
+  font chacun la moitié de la place ; pas de glisser-déposer d'onglet d'un volet à l'autre ; la
+  disposition n'est pas conservée d'une session à l'autre (un fichier à deux vues revient en un
+  seul onglet) ; une seule vue par fichier a le serveur de langage (donc les soulignements
+  d'erreurs) ; deux modifications simultanées dans deux vues ne se produisent pas (une seule vue
+  reçoit la saisie), et un fichier rechargé du disque dans une vue avant l'autre (quelques
+  millisecondes) pourrait mal rejouer une frappe, ignorée si hors des bornes.
 
 ## Limites connues
 

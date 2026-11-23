@@ -209,6 +209,11 @@ fn menus() -> Vec<Menu> {
                     "Move File to Other Pane",
                     "Envoyer le fichier dans l'autre volet",
                 ),
+                Item(
+                    Command::CloneToOtherPane,
+                    "Clone File to Other Pane",
+                    "Afficher le fichier dans l'autre volet",
+                ),
                 Sep,
                 Item(Command::NextTab, "Next File", "Fichier suivant"),
                 Item(
